@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-make_jbl770nc_master_ir.py
-Dual-Mode Mastering Convolver Suite for JBL Live 770NC (Passive on Filk KB006x + 711)
-  - Mode 1 (Offline / mpv `afir=precision=double`):
-      262,144-pt f64 Hilbert-Cepstral FFT (0.1831 Hz bin) -> 65,536 causal taps (16 x 4096 partitions)
-      + Minimum-Phase `poly-sinc-gauss` Nyquist Apodizer (20.2-24.0 kHz)
-      + Kaiser-Bessel (beta=18.0, -185 dB sidelobe) optimal window
-      -> Exported as native 64-bit IEEE Float WAV (`ir.wav`, pcm_f64le, -309.4 dBFS tail floor)
-  - Mode 2 (Real-Time PipeWire / Nuendo DAW):
-      32,768-pt f64 Hilbert-Cepstral FFT (1.46 Hz bin) -> 16,384 causal taps
-      -> Exported as 32-bit IEEE Float WAV (`jbl_770nc_mastering_mono_48k.wav` & `_stereo_48k.wav`)
+770NCLIVE.py
+Rig-Compensated Minimum-Phase Mastering Convolver Generator for JBL Live 770NC (Passive Mode)
+
+Data Sources & Attribution:
+  - Raw Measurement : Filk (JBL Live 770NC passive on Clone GRAS 43AG / KB006x pinna + IEC 60318-4 711 coupler),
+                      sourced via the AutoEq database (Jaakko Pasanen, MIT License; measurement data per Filk terms).
+  - Target Curve    : Harman Over-Ear 2018 Target (Harman International).
+
+Key Acoustic Design Choices (& Limitations):
+  - Single-coupler measurements have inherent seat-to-seat and head-to-head variance (+/- 2-4 dB in sub-bass
+    and >3 kHz pinna modes). This curve discounts sub-40 Hz stiff-pinna leakage on the KB006x plate, inverts
+    the lumped-parameter 160 Hz / 455 Hz passive cup dipole and 6.88 kHz / 8.48 kHz diaphragm breakup peaks
+    (preventing standard AutoEq's 2.0-octave treble smoother from bleeding adjacent dip errors into boosting
+    those sibilance peaks), bridges smoothly across the 5.37 kHz concha notch without narrow peak boosting,
+    and clamps >9.1 kHz coupler cylinder nulls to 0.0 dB.
 """
 
+import argparse
 import struct
 import numpy as np
 
@@ -124,7 +130,7 @@ def synthesize_minimum_phase_ir(
     n_taps: int = 65536,
     n_tail: int = 8192,
     headroom_db: float = -1.50,
-    gauss_apodize: bool = True,
+    gauss_apodize: bool = False,
     kaiser_beta: float = 18.0,
 ):
     f_nodes = np.array([p[0] for p in ctrl_pts], dtype=np.float64)
@@ -135,7 +141,6 @@ def synthesize_minimum_phase_ir(
     target_db = pchip_log_interp(f_nodes, g_nodes, f_safe)
     target_db[0] = g_nodes[0]
 
-    # Optional `poly-sinc-gauss` Gaussian Apodizing Anti-Ringing Roll-Off (20.2 kHz -> 24.0 kHz)
     if gauss_apodize:
         apod_mask = freqs > 20200.0
         target_db[apod_mask] += -3.0103 * ((freqs[apod_mask] - 20200.0) / 1650.0) ** 2
@@ -144,7 +149,7 @@ def synthesize_minimum_phase_ir(
     preamp_db = headroom_db - max_boost_db
     gain_db_norm = target_db + preamp_db
 
-    # 64-bit Kolmogorov / Hilbert-Cepstral Minimum-Phase Reconstruction
+    # 64-bit Hilbert-Cepstral Minimum-Phase Reconstruction
     mag_lin = 10.0 ** (gain_db_norm / 20.0)
     log_mag = np.log(np.maximum(mag_lin, 1e-18))
     log_spec_full = np.concatenate([log_mag, log_mag[-2:0:-1]])
@@ -159,39 +164,57 @@ def synthesize_minimum_phase_ir(
     ir_full_f64 = np.fft.ifft(min_phase_spec).real
 
     ir_f64 = ir_full_f64[:n_taps].copy()
+    unwindowed_floor_dbfs = float(20.0 * np.log10(np.max(np.abs(ir_f64[-128:])) + 1e-25))
+
     t_norm = np.arange(n_tail, dtype=np.float64) / n_tail
     kaiser_tail = bessel_i0(kaiser_beta * np.sqrt(np.maximum(0.0, 1.0 - t_norm**2))) / bessel_i0(kaiser_beta)
     ir_f64[-n_tail:] *= kaiser_tail
 
+    windowed_floor_dbfs = float(20.0 * np.log10(np.max(np.abs(ir_f64[-100:])) + 1e-25))
     energy_pct = float(np.sum(ir_f64**2) / np.sum(ir_full_f64**2) * 100.0)
-    tail_floor_dbfs = float(20.0 * np.log10(np.max(np.abs(ir_f64[-100:])) + 1e-25))
-    return ir_f64, max_boost_db, preamp_db, energy_pct, tail_floor_dbfs
+    return ir_f64, max_boost_db, preamp_db, energy_pct, unwindowed_floor_dbfs, windowed_floor_dbfs
 
 
 def main():
-    # 1. Generate 64-Bit Float (pcm_f64le) Offline / mpv Master Convolver (`ir.wav`)
-    ir_mpv_f64, boost_mpv, pre_mpv, en_mpv, floor_mpv = synthesize_minimum_phase_ir(
-        CTRL_PTS_JBL770NC, fs=48000, n_fft=262144, n_taps=65536, n_tail=8192,
-        headroom_db=-1.50, gauss_apodize=False, kaiser_beta=18.0
-    )
-    write_wav_ieee_float("ir.wav", ir_mpv_f64, fs=48000, bits=64)
-    print("=== [1] Offline / mpv 64-Bit Double Convolver (ir.wav) ===")
-    print(f"  Format           : 64-bit IEEE Float (pcm_f64le) | 48,000 Hz | Mono")
-    print(f"  FFT / Taps       : 262,144 FFT (0.1831 Hz bin) -> 65,536 taps (16 x 4096 partitions)")
-    print(f"  Apodizer / Win   : poly-sinc-gauss (>20.2 kHz, -16 dB @ 24 kHz) + Kaiser-Bessel (beta=18.0, -185 dB)")
-    print(f"  Total Preamp     : {pre_mpv:.2f} dB (Max Boost +{boost_mpv:.2f} dB, -1.50 dB true-peak headroom)")
-    print(f"  Causal Energy    : {en_mpv:.10f}% | Tail Floor @ Tap 65,536: {floor_mpv:.2f} dBFS")
+    parser = argparse.ArgumentParser(description="Generate JBL Live 770NC (Passive) Minimum-Phase Convolver IRs.")
+    parser.add_argument("--fs", type=int, default=48000, help="Sample rate in Hz (default: 48000)")
+    parser.add_argument("--taps", type=int, default=65536, choices=[8192, 16384, 32768, 65536],
+                        help="Tap count for ir.wav (default: 65536; 16384 already reaches -152.6 dBFS unwindowed)")
+    parser.add_argument("--apodize", action="store_true",
+                        help="Enable Gaussian Nyquist roll-off (>20.2 kHz) for legacy brickwall-ringing sources")
+    args = parser.parse_args()
 
-    # 2. Generate 32-Bit Float (pcm_f32le) Real-Time PipeWire / Nuendo Convolvers
-    ir_rt_f64, boost_rt, pre_rt, en_rt, _ = synthesize_minimum_phase_ir(
-        CTRL_PTS_JBL770NC, fs=48000, n_fft=32768, n_taps=16384, n_tail=2048,
-        headroom_db=-1.50, gauss_apodize=False, kaiser_beta=16.0
+    n_fft_mpv = max(65536, args.taps * 4)
+    n_tail_mpv = args.taps // 8
+    kaiser_beta = 18.0
+    kaiser_form_db = kaiser_beta / 0.1102 + 8.7
+
+    ir_mpv_f64, boost_mpv, pre_mpv, en_mpv, unwin_db, win_db = synthesize_minimum_phase_ir(
+        CTRL_PTS_JBL770NC, fs=args.fs, n_fft=n_fft_mpv, n_taps=args.taps, n_tail=n_tail_mpv,
+        headroom_db=-1.50, gauss_apodize=args.apodize, kaiser_beta=kaiser_beta
+    )
+    write_wav_ieee_float("ir.wav", ir_mpv_f64, fs=args.fs, bits=64)
+
+    apod_desc = "Gaussian Apodizer (>20.2 kHz)" if args.apodize else "Non-Apodizing 0.00 dB HF Wire (>9.1 kHz)"
+    print("=== [1] Offline / mpv 64-Bit Double Convolver (ir.wav) ===")
+    print(f"  Format            : 64-bit IEEE Float (pcm_f64le) | {args.fs:,} Hz | Mono")
+    print(f"  FFT / Taps        : {n_fft_mpv:,} FFT ({args.fs/n_fft_mpv:.4f} Hz bin) -> {args.taps:,} taps ({args.taps/args.fs*1000:.1f} ms)")
+    print(f"  HF Mode / Taper   : {apod_desc} + Half-Kaiser Fade (beta={kaiser_beta:.1f}, {kaiser_form_db:.1f} dB Kaiser formula)")
+    print(f"  Total Preamp      : {pre_mpv:.2f} dB (Max Boost +{boost_mpv:.2f} dB, -1.50 dB true-peak headroom)")
+    print(f"  Causal Energy     : {en_mpv:.10f}%")
+    print(f"  Decay @ Truncation: {unwin_db:.2f} dBFS (unwindowed) | {win_db:.2f} dBFS (after half-Kaiser fade)")
+
+    ir_rt_f64, _, _, _, unwin_rt_db, _ = synthesize_minimum_phase_ir(
+        CTRL_PTS_JBL770NC, fs=args.fs, n_fft=32768, n_taps=16384, n_tail=2048,
+        headroom_db=-1.50, gauss_apodize=args.apodize, kaiser_beta=16.0
     )
     ir_rt_f32 = ir_rt_f64.astype(np.float32)
-    write_wav_ieee_float("jbl_770nc_mastering_mono_48k.wav", ir_rt_f32, fs=48000, bits=32)
-    write_wav_ieee_float("jbl_770nc_mastering_stereo_48k.wav", np.column_stack([ir_rt_f32, ir_rt_f32]), fs=48000, bits=32)
+    mono_rt = f"jbl_770nc_mastering_mono_{args.fs//1000}k.wav"
+    stereo_rt = f"jbl_770nc_mastering_stereo_{args.fs//1000}k.wav"
+    write_wav_ieee_float(mono_rt, ir_rt_f32, fs=args.fs, bits=32)
+    write_wav_ieee_float(stereo_rt, np.column_stack([ir_rt_f32, ir_rt_f32]), fs=args.fs, bits=32)
     print("\n=== [2] Real-Time PipeWire / Nuendo 32-Bit Float Convolvers ===")
-    print(f"  Written          : jbl_770nc_mastering_mono_48k.wav, jbl_770nc_mastering_stereo_48k.wav (16,384 taps)")
+    print(f"  Written           : {mono_rt}, {stereo_rt} (16,384 taps, {unwin_rt_db:.2f} dBFS unwindowed floor)")
 
 
 if __name__ == "__main__":

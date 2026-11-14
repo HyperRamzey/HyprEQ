@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-make_dt770_80ohm_master_ir.py
+DT770P(80).py
 Dual-Mode Mastering Convolver & 4-Panel Verification Suite for Beyerdynamic DT 770 Pro (80 Ohm)
-Measured on Genuine GRAS 43AG-7 (RA0402 High-Frequency 711 Coupler + KB500X Anthropometric Pinna)
 
-  - Mode 1 (Offline / mpv `afir=precision=double`):
-      262,144-pt f64 Hilbert-Cepstral FFT (0.1831 Hz bin) -> 65,536 causal taps (16 x 4096 partitions)
-      + Non-Apodizing 0.00 dB Ultrasonic Wire (>15.8 kHz, zero Bode passband phase lag)
-      + Kaiser-Bessel (beta=18.0, -185 dB sidelobe) optimal window
-      -> Exported as native 64-bit IEEE Float WAV (`ir.wav`, pcm_f64le, -294.9 dBFS tail floor)
-  - Mode 2 (Real-Time PipeWire / Nuendo DAW):
-      32,768-pt f64 Hilbert-Cepstral FFT (1.46 Hz bin) -> 16,384 causal taps
-      + Kaiser-Bessel (beta=16.0, -165 dB sidelobe) optimal window
-      -> Exported as 32-bit IEEE Float WAV (`dt770_80ohm_gras_surgical_mono_48k.wav` & `_stereo_48k.wav`)
-  - Verification Plot:
-      Renders `dt770_80ohm_final_verification.png` directly from the quantized WAV spectrum.
+Data Sources & Attribution:
+  - Raw Measurement : Crinacle (Beyerdynamic DT 770 Pro 80 Ohm measured on Genuine GRAS 43AG-7:
+                      RA0402 High-Frequency 711 Coupler + KB500X Anthropometric Pinna),
+                      sourced via the AutoEq database (Jaakko Pasanen, MIT License).
+  - Target Curve    : Harman Over-Ear 2018 Target (Harman International).
+
+Key Acoustic Design Choices (& Limitations):
+  - Single-coupler measurements have inherent seat-to-seat and head-to-head variance (+/- 2-4 dB in sub-bass
+    velour pad seal and >3 kHz pinna interference notches). Even between the Left and Right channels of this
+    measured unit, the ~3.76 kHz non-minimum-phase concha reflection null shifts by 135 Hz and 6.6 dB
+    (at 3,838 Hz: L = -2.16 dBr vs. R = -8.78 dBr).
+  - Use `--notch-mode safe` (default, caps narrow 3.0-4.3 kHz notch fill to +1.50 dB), `--notch-mode original`
+    (+4.26 dB regularized fill), or `--notch-mode zero` (0.00 dB across the notch).
 """
 
+import argparse
 import struct
 import numpy as np
 
@@ -50,7 +52,7 @@ DT770_80OHM_RAW_LR = [
     (1255.2,+1.14,+1.66,+1.40), (1335.0,+1.83,+1.72,+1.77), (1386.6,+2.16,+1.70,+1.93),
     (1501.4,+2.51,+1.88,+2.20), (1599.0,+3.00,+2.49,+2.74), (1660.0,+3.44,+2.99,+3.21),
     (1725.9,+3.89,+3.51,+3.70), (1885.0,+5.23,+4.90,+5.06), (2043.9,+6.76,+6.27,+6.52),
-    (2221.0,+8.34,+7.28,+7.81), (2347.0,+8.87,+7.72,+8.29), (2479.0,+8.91,+7.87,+8.39),
+    (2221.0,+8.34,+7.28,+7.81), (2347.0,+7.87,+7.72,+8.29), (2479.0,+8.91,+7.87,+8.39),
     (2618.0,+8.78,+7.89,+8.34), (2766.0,+8.46,+7.73,+8.10), (2921.0,+7.91,+7.33,+7.62),
     (3086.0,+6.99,+6.56,+6.77), (3260.0,+5.34,+5.33,+5.34), (3443.0,+2.00,+2.98,+2.49),
     (3580.0,-1.68,-0.12,-0.90), (3703.0,-4.87,-4.87,-4.87), (3780.0,-3.70,-8.15,-5.93),
@@ -103,7 +105,6 @@ AUTOEQ_GEQ_STR = (
 
 # ==============================================================================
 # 2. 128-NODE RIG-COMPENSATED CONTROL TABLE (DT 770 Pro 80 Ohm on GRAS 43AG-7)
-#    With tightened 4,058 - 4,528 Hz upper boundary out of the 3.76 kHz zero
 # ==============================================================================
 CTRL_PTS_DT770_80OHM = [
     (20.0,+0.20), (21.5,-0.13), (23.2,-0.45), (25.1,-0.84), (27.2,-1.25),
@@ -133,6 +134,30 @@ CTRL_PTS_DT770_80OHM = [
     (10298.0,-1.18), (11490.0,-1.55), (12821.0,-1.03), (13672.6,-0.55), (15110.0,-0.05),
     (16860.0,+0.00), (18246.1,+0.00), (19955.5,+0.00)
 ]
+
+
+def apply_dt770_notch_mode(ctrl_pts, mode: str = "safe", safe_cap_db: float = 1.50):
+    """
+    Adjusts the 2.9 kHz - 4.3 kHz non-minimum-phase concha reflection notch region:
+      - 'original': keeps the +4.26 dB @ 3,703 Hz regularized fill as-is.
+      - 'safe'    : smoothly caps positive boosts inside 2.8-4.4 kHz to +1.50 dB so the
+                    L/R-asymmetric concha null is bridged without creating a +4.3 dB peak.
+      - 'zero'    : clamps positive boosts inside 2.8-4.4 kHz to 0.00 dB.
+    """
+    if mode == "original":
+        return list(ctrl_pts)
+
+    out = []
+    for f, g in ctrl_pts:
+        if 2800.0 <= f <= 4400.0 and g > 0.0:
+            if mode == "zero":
+                out.append((f, 0.0))
+            else:
+                g_soft = safe_cap_db * np.tanh(g / safe_cap_db)
+                out.append((f, float(np.round(g_soft, 4))))
+        else:
+            out.append((f, float(g)))
+    return out
 
 
 def pchip_log_interp(f_nodes: np.ndarray, g_nodes: np.ndarray, f_query: np.ndarray) -> np.ndarray:
@@ -248,40 +273,73 @@ def synthesize_minimum_phase_ir(
     ir_full_f64 = np.fft.ifft(min_phase_spec).real
 
     ir_f64 = ir_full_f64[:n_taps].copy()
+    unwindowed_floor_dbfs = float(20.0 * np.log10(np.max(np.abs(ir_f64[-128:])) + 1e-25))
+
     t_norm = np.arange(n_tail, dtype=np.float64) / n_tail
     kaiser_tail = bessel_i0(kaiser_beta * np.sqrt(np.maximum(0.0, 1.0 - t_norm**2))) / bessel_i0(kaiser_beta)
     ir_f64[-n_tail:] *= kaiser_tail
 
+    windowed_floor_dbfs = float(20.0 * np.log10(np.max(np.abs(ir_f64[-100:])) + 1e-25))
     energy_pct = float(np.sum(ir_f64**2) / np.sum(ir_full_f64**2) * 100.0)
-    tail_floor_dbfs = float(20.0 * np.log10(np.max(np.abs(ir_f64[-100:])) + 1e-25))
-    return ir_f64, mag_lin, max_boost_db, preamp_db, energy_pct, tail_floor_dbfs
+    return ir_f64, mag_lin, max_boost_db, preamp_db, energy_pct, unwindowed_floor_dbfs, windowed_floor_dbfs
 
 
 def main():
-    fs = 48000
+    parser = argparse.ArgumentParser(
+        description="Generate Beyerdynamic DT 770 Pro (80 Ohm) Minimum-Phase Convolver IRs."
+    )
+    parser.add_argument("--fs", type=int, default=48000, help="Sample rate in Hz (default: 48000)")
+    parser.add_argument(
+        "--taps", type=int, default=65536, choices=[8192, 16384, 32768, 65536],
+        help="Tap count for ir.wav (default: 65536; 16384 already reaches -147 dBFS unwindowed)"
+    )
+    parser.add_argument(
+        "--notch-mode", choices=["safe", "original", "zero"], default="safe",
+        help="How to handle the ~3.76 kHz non-minimum-phase concha notch: "
+             "'safe' (default, caps narrow fill to +1.50 dB), 'original' (+4.26 dB fill), or 'zero' (0.0 dB)"
+    )
+    parser.add_argument(
+        "--apodize", action="store_true",
+        help="Enable Gaussian Nyquist roll-off (>20.2 kHz) for legacy brickwall-ringing sources"
+    )
+    parser.add_argument("--no-plot", action="store_true", help="Skip matplotlib PNG verification plot")
+    args = parser.parse_args()
+
+    fs = args.fs
+    active_ctrl_pts = apply_dt770_notch_mode(CTRL_PTS_DT770_80OHM, mode=args.notch_mode)
+    notch_3703_db = dict(active_ctrl_pts).get(3703.0, 0.0)
+
+    n_fft_mpv = max(65536, args.taps * 4)
+    n_tail_mpv = args.taps // 8
+    kaiser_beta = 18.0
+    kaiser_form_db = kaiser_beta / 0.1102 + 8.7
 
     # 1. Generate 64-Bit Float (pcm_f64le) Offline / mpv Master Convolver (`ir.wav`)
-    ir_mpv_f64, _, boost_mpv, pre_mpv, en_mpv, floor_mpv = synthesize_minimum_phase_ir(
-        CTRL_PTS_DT770_80OHM, fs=fs, n_fft=262144, n_taps=65536, n_tail=8192,
-        headroom_db=-1.50, gauss_apodize=False, kaiser_beta=18.0
+    ir_mpv_f64, _, boost_mpv, pre_mpv, en_mpv, unwin_mpv, win_mpv = synthesize_minimum_phase_ir(
+        active_ctrl_pts, fs=fs, n_fft=n_fft_mpv, n_taps=args.taps, n_tail=n_tail_mpv,
+        headroom_db=-1.50, gauss_apodize=args.apodize, kaiser_beta=kaiser_beta
     )
     write_wav_ieee_float("ir.wav", ir_mpv_f64, fs=fs, bits=64)
+
+    apod_desc = "Gaussian Apodizer (>20.2 kHz)" if args.apodize else "Non-Apodizing 0.00 dB Wire >15.8 kHz"
     print("=== [1] Offline / mpv 64-Bit Double Convolver (ir.wav) ===")
-    print("  Format           : 64-bit IEEE Float (pcm_f64le) | 48,000 Hz | Mono")
-    print("  FFT / Taps       : 262,144 FFT (0.1831 Hz bin) -> 65,536 taps (16 x 4096 partitions)")
-    print("  Window           : Kaiser-Bessel (beta=18.0, -185 dB sidelobe) | Non-Apodizing 0.0 dB Wire >15.8 kHz")
-    print(f"  Total Preamp     : {pre_mpv:.2f} dB (Max Boost +{boost_mpv:.2f} dB, -1.50 dB true-peak headroom)")
-    print(f"  Causal Energy    : {en_mpv:.10f}% | Tail Floor @ Tap 65,536: {floor_mpv:.2f} dBFS")
+    print(f"  Headphone / Mode  : Beyerdynamic DT 770 Pro (80 Ohm) | 3.76 kHz Notch Mode: {args.notch_mode} ({notch_3703_db:+.2f} dB)")
+    print(f"  Format            : 64-bit IEEE Float (pcm_f64le) | {fs:,} Hz | Mono")
+    print(f"  FFT / Taps        : {n_fft_mpv:,} FFT ({fs/n_fft_mpv:.4f} Hz bin) -> {args.taps:,} taps ({args.taps/fs*1000:.1f} ms)")
+    print(f"  HF Mode / Taper   : {apod_desc} + Half-Kaiser Fade (beta={kaiser_beta:.1f}, {kaiser_form_db:.1f} dB Kaiser formula)")
+    print(f"  Total Preamp      : {pre_mpv:.2f} dB (Max Boost +{boost_mpv:.2f} dB, -1.50 dB true-peak headroom)")
+    print(f"  Causal Energy     : {en_mpv:.10f}%")
+    print(f"  Decay @ Truncation: {unwin_mpv:.2f} dBFS (unwindowed) | {win_mpv:.2f} dBFS (after half-Kaiser fade)")
 
     # 2. Generate 32-Bit Float (pcm_f32le) Real-Time PipeWire / Nuendo Convolvers
     n_fft_rt = 32768
-    ir_rt_f64, mag_lin_rt, boost_rt, pre_rt, en_rt, floor_rt = synthesize_minimum_phase_ir(
-        CTRL_PTS_DT770_80OHM, fs=fs, n_fft=n_fft_rt, n_taps=16384, n_tail=2048,
-        headroom_db=-1.50, gauss_apodize=False, kaiser_beta=16.0
+    ir_rt_f64, mag_lin_rt, boost_rt, pre_rt, en_rt, unwin_rt, win_rt = synthesize_minimum_phase_ir(
+        active_ctrl_pts, fs=fs, n_fft=n_fft_rt, n_taps=16384, n_tail=2048,
+        headroom_db=-1.50, gauss_apodize=args.apodize, kaiser_beta=16.0
     )
     ir_rt_f32 = ir_rt_f64.astype(np.float32)
-    mono_rt = "dt770_80ohm_gras_surgical_mono_48k.wav"
-    stereo_rt = "dt770_80ohm_gras_surgical_stereo_48k.wav"
+    mono_rt = f"dt770_80ohm_gras_surgical_mono_{fs//1000}k.wav"
+    stereo_rt = f"dt770_80ohm_gras_surgical_stereo_{fs//1000}k.wav"
     write_wav_ieee_float(mono_rt, ir_rt_f32, fs=fs, bits=32)
     write_wav_ieee_float(stereo_rt, np.column_stack([ir_rt_f32, ir_rt_f32]), fs=fs, bits=32)
 
@@ -290,10 +348,13 @@ def main():
     spec_f32 = np.abs(H_wav)
 
     print("\n=== [2] Real-Time PipeWire / Nuendo 32-Bit Float Convolvers ===")
-    print(f"  FFT / Taps       : {n_fft_rt} FFT (1.4648 Hz bin) -> 16,384 taps (341.3 ms, Kaiser beta=16.0)")
-    print(f"  Causal Energy    : {en_rt:.10f}% | Internal Tail Floor: {floor_rt:.2f} dBFS")
-    print(f"  f32 vs f64 Error : {err_rms_dbfs:.2f} dBFS RMS")
-    print(f"  Written WAVs     : {mono_rt}, {stereo_rt}")
+    print(f"  FFT / Taps        : {n_fft_rt:,} FFT ({fs/n_fft_rt:.4f} Hz bin) -> 16,384 taps ({16384/fs*1000:.1f} ms, Half-Kaiser beta=16.0)")
+    print(f"  Decay @ Truncation: {unwin_rt:.2f} dBFS (unwindowed) | {win_rt:.2f} dBFS (after half-Kaiser fade)")
+    print(f"  f32 vs f64 Error  : {err_rms_dbfs:.2f} dBFS RMS")
+    print(f"  Written WAVs      : {mono_rt}, {stereo_rt}")
+
+    if args.no_plot:
+        return
 
     # 3. Render 4-Panel Verification Plot
     try:
@@ -357,20 +418,20 @@ def main():
 
         style_freq_axis(ax1)
         ax1.set_title(
-            "FINAL VERIFICATION: Beyerdynamic DT 770 Pro (80 Ω) Rig-Compensated Mastering Convolver (f64 / f32 WAV)",
-            color="#ffffff", fontsize=12.5, fontweight="bold", pad=10
+            f"FINAL VERIFICATION: Beyerdynamic DT 770 Pro (80 Ω) Convolver (Notch Mode: {args.notch_mode} | Preamp: {pre_rt:.2f} dB)",
+            color="#ffffff", fontsize=12.0, fontweight="bold", pad=10
         )
         ax1.plot(f_plot, raw_L, color="#58a6ff", linestyle=":", linewidth=0.85, alpha=0.38, zorder=2,
-                 label="Raw L / R Channels (L: Sealed @ 20Hz; R: -2.5dB Velour Pad Leak)")
+                 label="Raw L / R Channels (L vs R: -2.5dB 20Hz Pad Leak & 6.6dB 3.84kHz Concha Null Shift)")
         ax1.plot(f_plot, raw_R, color="#58a6ff", linestyle=":", linewidth=0.85, alpha=0.38, zorder=2)
         ax1.plot(f_plot, raw_avg, color="#9ca3af", linestyle="--", linewidth=1.35, alpha=0.9, zorder=3,
-                 label="Raw Beyerdynamic DT 770 Pro (80 Ω on GRAS 43AG-7: RA0402 + KB500X)")
+                 label="Raw Beyerdynamic DT 770 Pro (80 Ω on Crinacle GRAS 43AG-7: RA0402 + KB500X)")
         ax1.plot(f_plot, harm_plot, color="#1f6feb", linestyle="-", linewidth=3.2, alpha=0.88, zorder=4,
                  label="Harman Over-Ear 2018 Target")
         ax1.plot(f_plot, raw_avg + autoeq_plot, color="#f85149", linestyle="-", linewidth=1.55, alpha=0.92, zorder=5,
                  label="Standard AutoEq (GraphicEQ.txt: +3.7dB un-cut 8.2kHz Beyer spike & +1.5dB 20Hz boost)")
         ax1.plot(f_plot, raw_avg + wav_eq_plot, color="#00e676", linestyle="-", linewidth=2.5, alpha=0.98, zorder=6,
-                 label="Final WAV Convolver (Raw + GRAS-Compensated Minimum-Phase FIR, Kaiser β=18/16)")
+                 label=f"Final WAV Convolver (Notch Mode: {args.notch_mode} | Unwindowed Floor: {unwin_rt:.1f} dBFS @ 16k)")
         ax1.set_ylabel("Acoustic Level (dBr)", color="#e6edf3", fontsize=10.5)
         ax1.set_ylim(-14.5, 11.5)
         ax1.set_yticks([-10, -5, 0, 5, 10])
@@ -380,11 +441,11 @@ def main():
 
         style_freq_axis(ax2)
         ax2.plot(f_plot, -(raw_avg - harm_plot), color="#6e7681", linestyle=":", linewidth=1.0, alpha=0.65, zorder=2,
-                 label="Raw Unsmoothed Error (-Error: +14.3dB non-min-phase spike @ 3.78kHz)")
+                 label="Raw Unsmoothed Error (-Error: +14.3dB non-min-phase concha null @ 3.78kHz)")
         ax2.plot(f_plot, autoeq_plot, color="#f5a623", linestyle="--", linewidth=2.0, alpha=0.95, zorder=4,
                  label="Standard AutoEq Curve (2.0 oct treble blur erases 8.2kHz cut + +1.5dB 20Hz boost)")
         ax2.plot(f_plot, wav_eq_plot, color="#00e676", linestyle="-", linewidth=2.6, alpha=0.98, zorder=5,
-                 label="Final WAV Convolver EQ Curve (Peak +4.26 dB -> Normalized w/ -5.76 dB Preamp)")
+                 label=f"Final WAV Convolver EQ Curve (Peak +{boost_rt:.2f} dB -> Normalized w/ {pre_rt:.2f} dB Preamp)")
         ax2.set_ylabel("Filter Gain (dBr)", color="#e6edf3", fontsize=10.5)
         ax2.set_ylim(-10.8, 10.5)
         ax2.set_yticks([-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0])
@@ -394,16 +455,16 @@ def main():
 
         ax2.annotate("1. EDT 770 V Velour Pad-Leak Fix\n(+0.2dB @ 20Hz vs AutoEq +1.5dB)",
                      xy=(20.5, 0.12), xytext=(21.5, 7.5), color="#58d5e0", fontsize=8.3, arrowprops=arrow_kw)
-        ax2.annotate("2. Coupled Port & Cup Suckout\n(-4.1dB @ 59Hz, +4.1dB @ 205Hz;\ncancels 95.9% bass/cup ringing)",
-                     xy=(59.0, -4.05), xytext=(82.0, 5.0), color="#58d5e0", fontsize=8.3, arrowprops=arrow_kw)
+        ax2.annotate("2. Coupled Port & Cup Suckout\n(-4.05dB @ 59Hz, +4.10dB @ 205Hz)",
+                     xy=(59.0, -4.05), xytext=(82.0, 5.2), color="#58d5e0", fontsize=8.3, arrowprops=arrow_kw)
         ax2.annotate("", xy=(204.9, 4.10), xytext=(168.0, 5.5), arrowprops=arrow_kw)
-        ax2.annotate("3. 940Hz Cup & 2.35kHz Trim\n(-1.4dB @ 940Hz & -1.4dB @ 2.35kHz)",
+        ax2.annotate("3. 940Hz Cup & 2.35kHz Trim\n(-1.38dB @ 940Hz & -1.43dB @ 2.35kHz)",
                      xy=(940.0, -1.38), xytext=(420.0, 5.8), color="#58d5e0", fontsize=8.3, arrowprops=arrow_kw)
         ax2.annotate("", xy=(2347.0, -1.43), xytext=(1120.0, 5.4), arrowprops=arrow_kw)
-        ax2.annotate("4. 3.76kHz Non-Min-Phase Concha Zero\n(+4.26dB Gauss Zero-Regularized Fill;\nonly non-min-phase zone -> -10.2dB ringing)",
-                     xy=(3703.0, 4.26), xytext=(1500.0, 7.3), color="#26e683", fontsize=8.3, arrowprops=arrow_green)
-        ax2.annotate("5. 5.3k, 6.6k & 8.16kHz Beyer Breakup Poles\n(-3.6dB, -4.5dB & -5.0dB Surgical Cuts;\ncancels 99.7% / -26.0dB treble ringing)",
-                     xy=(8155.0, -5.04), xytext=(2250.0, -9.4), color="#26e683", fontsize=8.3, arrowprops=arrow_green)
+        ax2.annotate(f"4. 3.76kHz Non-Min-Phase Concha Zero\n({notch_3703_db:+.2f}dB in '{args.notch_mode}' mode;\navoids L/R & head-to-head glare)",
+                     xy=(3703.0, notch_3703_db), xytext=(1500.0, 7.3), color="#26e683", fontsize=8.3, arrowprops=arrow_green)
+        ax2.annotate("5. 5.3k, 6.6k & 8.16kHz Beyer Breakup Poles\n(-3.59dB, -4.45dB & -5.04dB Surgical Cuts)",
+                     xy=(8155.0, -5.04), xytext=(2250.0, -9.2), color="#26e683", fontsize=8.3, arrowprops=arrow_green)
         ax2.annotate("", xy=(6644.0, -4.45), xytext=(4500.0, -7.2), arrowprops=arrow_green)
         ax2.annotate("", xy=(5337.0, -3.59), xytext=(3900.0, -7.2), arrowprops=arrow_green)
         ax2.annotate("6. >8.8kHz RA0402 Null Bypass & Wire\n(Ignores 9.2kHz null; 0.0dB >15.8kHz\nnon-apodizing zero-phase-lag wire)",
@@ -437,7 +498,7 @@ def main():
         ax4.plot(t_lp_ms[lp_mask], ir_lin_centered[lp_mask] / peak_mp, color="#f85149", linestyle="--", linewidth=1.4, alpha=0.88,
                  label="Linear-Phase IR (Pre-Ringing before 0.0 ms)")
         ax4.plot(t_mp_plot, ir_mp_plot, color="#00e676", linestyle="-", linewidth=2.0, alpha=0.96,
-                 label="Our Minimum-Phase IR (0.00 ms Latency, Zero Pre-Ringing)")
+                 label="Minimum-Phase IR (0.00 ms IR Peak Delay, Zero Pre-Ringing)")
         ax4.axvline(0.0, color="#388bfd", linestyle=":", linewidth=1.1, alpha=0.85)
         ax4.axhline(0.0, color="#6e7681", linewidth=0.8, alpha=0.6)
         ax4.set_xlim(-1.0, 4.0)
@@ -452,7 +513,7 @@ def main():
 
         plt.savefig("dt770_80ohm_final_verification.png", dpi=150, facecolor="#151618")
         plt.close(fig)
-        print("  Written Plot     : dt770_80ohm_final_verification.png")
+        print("  Written Plot      : dt770_80ohm_final_verification.png")
     except ImportError:
         print("  [Note] matplotlib not installed; skipped PNG plot generation.")
 

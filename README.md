@@ -9,12 +9,17 @@ All target curves and headphone measurement datasets are decoupled from the DSP 
 1. **JBL Live 770NC (Passive / Wired Mode)** — `--headphone jbl770nc`
    - **Measurement Source:** **Filk** (Clone GRAS 43AG fixture with `KB006x` KEMAR pinna + clone IEC 60318-4 `711` occluded-ear simulator), via the [AutoEq](https://github.com/jaakkopasanen/AutoEq) database.
    - **Target:** Harman Over-Ear 2018.
+     <img width="1950" height="1725" alt="jbl770nc_final_verification" src="https://github.com/user-attachments/assets/8077a438-9547-4bcd-937a-5b97cdca29fd" />
+
 2. **Beyerdynamic DT 770 Pro (80 Ω)** — `--headphone dt770_80`
    - **Measurement Source:** **Crinacle** (Genuine `GRAS 43AG-7` fixture: `RA0402` high-frequency 711 coupler + `KB500X` anthropometric pinna), via AutoEq.
    - **Target:** Harman Over-Ear 2018.
+     <img width="1950" height="1725" alt="dt770_80ohm_final_verification" src="https://github.com/user-attachments/assets/bb9cb3a1-7519-494b-b826-211ef1710715" />
+
 3. **FiiO FT1 Pro (Open-Back Planar Magnetic)** — `--headphone ft1pro`
    - **Measurement Source:** **oratory1990 / Kuulokenurkka** (Genuine `GRAS 43AG` fixture with `KB50xx` anthropometric pinna + IEC 60318-4 `711` occluded-ear simulator), via AutoEq.
    - **Target:** Harman Over-Ear 2018.
+<img width="1950" height="1725" alt="ft1pro_final_verification" src="https://github.com/user-attachments/assets/63e24940-7c91-4df8-b0b4-14480a36a0f6" />
 
 ### Acoustic Scope & Limitations
 A coupler measurement captures one unit on one artificial pinna/ear simulator. Pad wear, seal leakage, and individual pinna geometry shift sub-bass (`<60 Hz`) and high-frequency pinna interference notches (`>3 kHz`) by several dB from ear to ear. For example, even between the Left and Right earcups of the measured DT 770 Pro 80 Ω unit on Crinacle's GRAS 43AG-7 rig, the `~3.76 kHz` concha reflection null shifts by `135 Hz` and `6.6 dB` (`-2.16 dBr` Left vs. `-8.78 dBr` Right at `3,838 Hz`), while the FiiO FT1 Pro exhibits a `4.05 dB` L/R channel split across its `~3.84–4.05 kHz` concha/driver notch (`+4.32 dBr` Left vs. `+8.37 dBr` Right at `3,839 Hz`).

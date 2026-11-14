@@ -2,6 +2,8 @@
 
 Rig-compensated minimum-phase FIR impulse response generator (`pcm_f64le` for `mpv` / `FFmpeg` and `pcm_f32le` for PipeWire / DAW convolvers) targeting the **Harman Over-Ear 2018** curve.
 
+All target curves and headphone measurement datasets are decoupled from the DSP script into an external `measurements.json` database (with automatic discovery of standalone `.json` and `.csv` model files in `models/`), allowing users to add new headphone models without modifying `hypreq.py`.
+
 ## Supported Headphones & Data Sources
 
 1. **JBL Live 770NC (Passive / Wired Mode)** — `--headphone jbl770nc`
@@ -10,15 +12,18 @@ Rig-compensated minimum-phase FIR impulse response generator (`pcm_f64le` for `m
 2. **Beyerdynamic DT 770 Pro (80 Ω)** — `--headphone dt770_80`
    - **Measurement Source:** **Crinacle** (Genuine `GRAS 43AG-7` fixture: `RA0402` high-frequency 711 coupler + `KB500X` anthropometric pinna), via AutoEq.
    - **Target:** Harman Over-Ear 2018.
+3. **FiiO FT1 Pro (Open-Back Planar Magnetic)** — `--headphone ft1pro`
+   - **Measurement Source:** **oratory1990 / Kuulokenurkka** (Genuine `GRAS 43AG` fixture with `KB50xx` anthropometric pinna + IEC 60318-4 `711` occluded-ear simulator), via AutoEq.
+   - **Target:** Harman Over-Ear 2018.
 
 ### Acoustic Scope & Limitations
-A coupler measurement captures one unit on one artificial pinna/ear simulator. Pad wear, seal leakage, and individual pinna geometry shift sub-bass (`<60 Hz`) and high-frequency pinna interference notches (`>3 kHz`) by several dB from ear to ear. For example, even between the Left and Right earcups of the measured DT 770 Pro 80 Ω unit on Crinacle's GRAS 43AG-7 rig, the `~3.76 kHz` concha reflection null shifts by `135 Hz` and `6.6 dB` (`-2.16 dBr` Left vs. `-8.78 dBr` Right at `3,838 Hz`).
+A coupler measurement captures one unit on one artificial pinna/ear simulator. Pad wear, seal leakage, and individual pinna geometry shift sub-bass (`<60 Hz`) and high-frequency pinna interference notches (`>3 kHz`) by several dB from ear to ear. For example, even between the Left and Right earcups of the measured DT 770 Pro 80 Ω unit on Crinacle's GRAS 43AG-7 rig, the `~3.76 kHz` concha reflection null shifts by `135 Hz` and `6.6 dB` (`-2.16 dBr` Left vs. `-8.78 dBr` Right at `3,838 Hz`), while the FiiO FT1 Pro exhibits a `4.05 dB` L/R channel split across its `~3.84–4.05 kHz` concha/driver notch (`+4.32 dBr` Left vs. `+8.37 dBr` Right at `3,839 Hz`).
 
 To avoid over-correcting rig-specific artifacts while still fixing audible driver/cup resonances:
-- **Sub-bass pad/pinna leak compensation:** Discounts stiff-pinna air-leakage roll-off below `40 Hz` on the `KB006x` plate (`jbl770nc`) and asymmetric velour pad leakage (`dt770_80`).
-- **Minimum-phase cup & breakup pole inversion:** Uses Hilbert-Cepstral minimum-phase reconstruction (`0.00 ms` impulse peak delay, zero pre-ringing) to invert lumped-parameter bass/cup modes (`160 Hz` / `455 Hz` on JBL; `59 Hz` / `205 Hz` on DT 770) and diaphragm breakup peaks (`6.88 kHz` / `8.48 kHz` on JBL; `5.34 kHz`, `6.64 kHz`, and `8.16 kHz` on DT 770) without letting wide `2.0-octave` treble smoothing bleed adjacent dip errors into boosting sibilance peaks.
-- **Safe concha notch bridging (`--notch-mode safe`):** Caps narrow boosts inside the DT 770's `2.8–4.4 kHz` non-minimum-phase concha null to `+1.50 dB` by default (preventing L/R and head-to-head upper-midrange glare), or allows `--notch-mode original` (`+4.26 dB` fill) and `--notch-mode zero` (`0.00 dB`).
-- **Uncorrected coupler-null & HF bypass zone:** Leaves `>9.1 kHz` (`jbl770nc`) and `>8.8 kHz` / `>15.8 kHz` (`dt770_80`) coupler half-wave cylinder nulls unmodified (`0.00 dB` ultrasonic wire to Nyquist, shaded on the verification plots).
+- **Sub-bass pad/pinna leak compensation:** Discounts stiff-pinna air-leakage roll-off below `40 Hz` on the `KB006x` plate (`jbl770nc`), asymmetric velour pad leakage (`dt770_80`), and damps the `35 Hz` controlled front-volume pad-leak resonance ($f_s$) on the `ft1pro` while moderating its sub-bass Harman shelf (`+2.70 dB` at `55 Hz`, `+2.37 dB` at `20 Hz`) to prevent `1 μm` planar diaphragm excursion limits at high SPLs.
+- **Minimum-phase cup & breakup pole inversion:** Uses Hilbert-Cepstral minimum-phase reconstruction (`0.00 ms` impulse peak delay, zero pre-ringing) to invert lumped-parameter bass/cup modes (`160 Hz` / `455 Hz` on JBL; `59 Hz` / `205 Hz` on DT 770), open-back planar ear-gain recession and upper-midrange glare (`+4.07 dB` at `1.82 kHz` and `-2.64 dB` at `2.82 kHz` on FT1 Pro), and diaphragm breakup peaks (`6.88 kHz` / `8.48 kHz` on JBL; `5.34 kHz`, `6.64 kHz`, and `8.16 kHz` on DT 770; `5.75 kHz` on FT1 Pro) without letting wide `2.0-octave` treble smoothing bleed adjacent dip errors into boosting sibilance peaks.
+- **Safe concha notch bridging (`--notch-mode safe`):** Caps narrow boosts inside the DT 770's `2.8–4.4 kHz` and FT1 Pro's `3.4–4.4 kHz` non-minimum-phase concha nulls to `+1.50 dB` (`safe_cap_db * tanh(g / safe_cap_db)`) by default (preventing L/R and head-to-head upper-midrange glare), or allows `--notch-mode original` (`+4.26 dB` fill on DT 770; `+2.01 dB` fill on FT1 Pro) and `--notch-mode zero` (`0.00 dB`).
+- **Uncorrected coupler-null & HF bypass zone:** Leaves `>9.1 kHz` (`jbl770nc`), `>8.8 kHz` / `>15.8 kHz` (`dt770_80`), and `>9.75 kHz` (`ft1pro`) coupler half-wave cylinder nulls unmodified (`0.00 dB` ultrasonic wire to Nyquist, shaded on the verification plots).
 
 ---
 
@@ -27,22 +32,68 @@ To avoid over-correcting rig-specific artifacts while still fixing audible drive
 Requires Python 3 and `numpy` (plus `matplotlib` for the 4-panel verification PNGs):
 
 ```bash
-# Generate both headphones (64-bit float WAVs, 32-bit float DAW WAVs, audit CSVs, and 4-panel PNG plots):
+# Generate all headphones (64-bit float WAVs, 32-bit float DAW WAVs, audit CSVs, and 4-panel PNG plots):
 python3 hypreq.py --headphone all --export-csv
 
-# Generate only JBL Live 770NC or Beyerdynamic DT 770 Pro (80 Ohm):
+# Generate only JBL Live 770NC, Beyerdynamic DT 770 Pro (80 Ohm), or FiiO FT1 Pro:
 python3 hypreq.py --headphone jbl770nc
 python3 hypreq.py --headphone dt770_80 --notch-mode safe
+python3 hypreq.py --headphone ft1pro --notch-mode safe
 
 # Lighter 16,384-tap IR (already reaches <-147 dBFS unwindowed floor) or custom sample rate (e.g. 44.1 kHz):
 python3 hypreq.py --headphone dt770_80 --taps 16384 --fs 44100
+python3 hypreq.py --headphone ft1pro --taps 16384 --fs 44100
+
+# Specify a custom measurement database JSON or external models directory:
+python3 hypreq.py --data-file measurements.json --models-dir models --headphone all
 ```
 
 ### Generated Files
-- `jbl770nc_f64_48k.wav` / `dt770_80ohm_f64_48k.wav`: 64-bit IEEE float (`pcm_f64le`) mono impulse responses for `mpv` / `FFmpeg` (`afir=precision=double`). When a single headphone is selected, it is also copied to `ir.wav`.
+- `jbl770nc_f64_48k.wav` / `dt770_80ohm_f64_48k.wav` / `ft1pro_f64_48k.wav`: 64-bit IEEE float (`pcm_f64le`) mono impulse responses for `mpv` / `FFmpeg` (`afir=precision=double`). When a single headphone is selected, it is also copied to `ir.wav`.
 - `*_mastering_mono_48k.wav` / `*_mastering_stereo_48k.wav`: 32-bit IEEE float (`pcm_f32le`, `16,384` taps) for real-time PipeWire `filter-chain` or DAW convolver plugins.
-- `jbl770nc_final_verification.png` / `dt770_80ohm_final_verification.png`: 4-panel before/after frequency, filter gain, minimum-phase angle, and time-domain impulse response plots.
+- `jbl770nc_final_verification.png` / `dt770_80ohm_final_verification.png` / `ft1pro_final_verification.png`: 4-panel before/after frequency, filter gain, minimum-phase angle, and time-domain impulse response plots.
 - `*_audit_data.csv`: Auditable CSV tables (when `--export-csv` is passed) listing frequency, raw measurement, Harman target, raw error, and applied EQ.
+
+---
+
+## Adding More Headphone Models (Modular Architecture)
+
+All target curves (`targets`) and headphone definitions (`models`) are stored outside `hypreq.py` in `measurements.json`, and `hypreq.py` also scans the `models/` directory at startup. You can add new headphone models in three ways without editing the Python script:
+
+### 1. Drop a Raw Measurement CSV into `models/` (Simplest)
+Create a `models/` directory next to `hypreq.py` and drop in any 2-column (`freq_hz,raw_dBr`) or 4-column (`freq_hz,left_dBr,right_dBr,avg_dBr`) CSV file, e.g. `models/hd600.csv`:
+- `hypreq.py` automatically registers the filename stem as a `--headphone` key (e.g. `python3 hypreq.py --headphone hd600`).
+- When no manual `ctrl_pts` curve is specified, `hypreq.py` automatically normalizes the raw measurement near `1 kHz`, computes the inverse error against `harman_2018`, applies sub-bass leak discounting (`<65 Hz`), and cosine-tapers the filter to `0.00 dB` at `9.5 kHz` (`hf_bypass_hz`) so 711 coupler half-wave nulls are never boosted.
+
+### 2. Drop a Standalone JSON File into `models/`
+Create `models/<model_key>.json` (e.g. `models/hd600.json`). You can either supply explicit `ctrl_pts` alongside `raw_pts` (or `raw_csv` / `ctrl_csv` paths), or omit `ctrl_pts` to let `hypreq.py` derive the control curve automatically:
+
+```json
+{
+  "key": "hd600",
+  "name": "Sennheiser HD 600",
+  "file_prefix": "hd600",
+  "rig_info": "GRAS 43AG / KB50xx Anthropometric Pinna + IEC 711",
+  "target": "harman_2018",
+  "harm_offset": 0.0,
+  "gauss_apodize": true,
+  "hf_bypass_hz": 9500.0,
+  "notch_range_hz": [3000.0, 4500.0],
+  "safe_cap_db": 1.50,
+  "subbass_leak_discount_db": 1.0,
+  "raw_pts": [
+    [20.0, -3.20],
+    [100.0, 0.85],
+    [1000.0, 0.00],
+    [3000.0, 8.90],
+    [10000.0, -2.10],
+    [19955.5, -18.50]
+  ]
+}
+```
+
+### 3. Add a Model Entry to `measurements.json`
+Add a new object under `"models"` in `measurements.json` using the same schema as `jbl770nc`, `dt770_80`, and `ft1pro` (supporting optional `autoeq_geq_str` for AutoEq GraphicEQ overlay comparison, `plot_annotations`, `audit_notes`, `notch_range_hz`, and `hf_bypass_hz`).
 
 ---
 
@@ -50,7 +101,7 @@ python3 hypreq.py --headphone dt770_80 --taps 16384 --fs 44100
 
 `hypreq.py` prints the exact `mpv.conf` block matching your chosen `--fs` and file path at the end of every run.
 
-For a `48,000 Hz` setup, add the following to `~/.config/mpv/mpv.conf` (Linux/macOS) or `%APPDATA%\mpv\mpv.conf` (Windows):
+For a `48,000 Hz` setup, add the following to `~/.config/mpv/mpv.conf` (Linux/macOS) or `%APPDATA%\mpv\mpv.conf` (Windows) (replace `jbl770nc_f64_48k.wav` with `dt770_80ohm_f64_48k.wav`, `ft1pro_f64_48k.wav`, or `ir.wav` as needed):
 
 ```ini
 # Lock mpv output rate to match the IR sample rate so mpv never inserts a second default resampler
@@ -70,4 +121,4 @@ af=lavfi=[aformat=sample_fmts=dblp,aresample=48000:filter_size=256:phase_shift=1
 
 ## Credits & License
 - Generator code is licensed under the **MIT License**.
-- Raw frequency response measurements courtesy of **Filk** (`JBL Live 770NC`) and **Crinacle** (`Beyerdynamic DT 770 Pro 80 Ω`) via **Jaakko Pasanen's [AutoEq](https://github.com/jaakkopasanen/AutoEq)** database (used under their respective measurement terms). Target curve derived from **Harman International** (2018 Over-Ear target).
+- Raw frequency response measurements courtesy of **Filk** (`JBL Live 770NC`), **Crinacle** (`Beyerdynamic DT 770 Pro 80 Ω`), and **oratory1990 / Kuulokenurkka** (`FiiO FT1 Pro`) via **Jaakko Pasanen's [AutoEq](https://github.com/jaakkopasanen/AutoEq)** database (used under their respective measurement terms). Target curve derived from **Harman International** (2018 Over-Ear target).

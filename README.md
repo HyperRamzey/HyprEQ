@@ -46,7 +46,7 @@ python3 hypreq.py --headphone dt770_80 --taps 16384 --fs 44100
 
 ---
 
-## `mpv` Configuration (`FFmpeg >= 6.0` Required)
+## `mpv` Configuration (`FFmpeg >= 8.0` Required)
 
 `hypreq.py` prints the exact `mpv.conf` block matching your chosen `--fs` and file path at the end of every run.
 

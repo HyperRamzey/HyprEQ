@@ -7,9 +7,11 @@ Rig-compensated minimum-phase FIR impulse response generators (`pcm_f64le` for `
 1. **JBL Live 770NC (Passive / Wired Mode)** — `770NCLIVE.py`
    - **Measurement Source:** `Filk` (`KB006x` pinna + clone IEC 60318-4 `711` occluded-ear simulator), via the [AutoEq](https://github.com/jaakkopasanen/AutoEq) database.
    - **Target:** Harman Over-Ear 2018.
+     
 2. **Beyerdynamic DT 770 Pro (80 Ω)** — `DT770P(80).py`
    - **Measurement Source:** `oratory1990` (`GRAS 43AG-7` / `KB5000` anthropomorphic pinna + IEC `711` coupler), via AutoEq.
    - **Target:** Harman Over-Ear 2018.
+<img width="1950" height="1725" alt="image" src="https://github.com/user-attachments/assets/ff34a555-dfef-434f-8498-a6bedfeebb8f" />
 
 ### Acoustic Scope & Limitations
 A coupler measurement captures one unit on one artificial pinna/ear simulator. Pad wear, seal leakage, and individual pinna anatomy shift sub-bass (`<60 Hz`) and high-frequency pinna interference notches (`>3 kHz`) by several dB from head to head.

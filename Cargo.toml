@@ -1,0 +1,37 @@
+[package]
+name = "hypreq"
+description = "Rig-compensated minimum-phase FIR convolver generator + true-peak ceiling limiter for AutoEq headphone measurements"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.87"
+license = "MIT"
+
+[[bin]]
+name = "hypreq"
+path = "src/main.rs"
+
+[dependencies]
+rustfft = "6.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+plotters = { version = "0.3", default-features = false, features = [
+    "bitmap_backend",
+    "bitmap_encoder",
+    "ttf",
+    "line_series",
+    "area_series",
+    "full_palette",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# Numerical note: the true-peak interpolator, the
+# two-stage gain scheduler and the Hilbert-cepstral minimum-phase fold must stay
+# IEEE-754 exact. Rust already compiles `+ - *` with fp-contract=off (no FMA
+# contraction), which is what keeps the port bit-identical to the NumPy original
+# within FFT noise. Do NOT add `-C target-cpu=native` with fma,
+# `-C llvm-args=--fp-contract=fast`, or any fast-math here: `cargo test` fails
+# the IR-floor and dBTP-tolerance tests if FMA ever shows up in the DSP path.

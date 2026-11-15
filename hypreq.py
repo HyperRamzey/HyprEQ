@@ -749,7 +749,7 @@ def export_audit_csv(
 
 
 # ==============================================================================
-# 3. TRUE-PEAK MEASUREMENT ENGINE (ITU-R BS.1770-5 / G6ME X2..X32) & METERS
+# 3. TRUE-PEAK MEASUREMENT ENGINE (ITU-R BS.1770-5 / x2..x32) & METERS
 # ==============================================================================
 
 DBL_MIN_POS: float = math.ldexp(1.0, -1022)
@@ -865,7 +865,7 @@ def db_from_peak(p: float) -> float:
 
 
 class Ratio(Enum):
-    """Over-sampling ratios supported by the G6ME true-peak detector & limiter."""
+    """Over-sampling ratios supported by the true-peak detector & limiter."""
 
     X2 = "x2"
     X4 = "x4"
@@ -1185,8 +1185,8 @@ def param_to_db(p: float) -> float:
 
 class Meters:
     """
-    Instant-attack, 0.30s exponential-release peak-hold meters matching G6ME's `meter.rs`.
-    Defaults to G6ME's 10-channel slot layout (`In1..In8, OutL, OutR`) or can be sized
+    Instant-attack, 0.30s exponential-release peak-hold meters on the 0.30 s
+    exponential-release scale, in the 10-channel slot layout (`In1..In8, OutL, OutR`) or sized
     to any channel count via `Meters(channels=N)` for `observe_planar`.
     """
 
@@ -1276,7 +1276,7 @@ class Meters:
 
 
 class MeterTap:
-    """Sample tap wrapper around `Meters` mirroring G6ME's `MeterTap` in `meter.rs`."""
+    """Sample tap wrapper around `Meters`, feeding one slot per channel."""
 
     def __init__(self, meters: Optional[Meters] = None) -> None:
         self._meters = meters if meters is not None else Meters()
@@ -1333,7 +1333,7 @@ def measure_signal(
     ratio: Ratio = Ratio.X16,
     block_size: int = 1024,
 ) -> SignalMeasurements:
-    """Runs G6ME true-peak (`ratio` + ITU x4) and 0.30s peak-hold meter measurements on planar audio."""
+    """Runs true-peak (`ratio` + ITU x4) and 0.30s peak-hold meter measurements on planar audio."""
     nch = len(planar)
     frames = len(planar[0]) if nch > 0 else 0
     if nch == 0 or frames == 0:
@@ -1418,7 +1418,7 @@ def measure_signal(
 
 
 # ==============================================================================
-# 4. TWO-STAGE TRUE-PEAK CEILING LIMITER (PORTED FROM G6ME, DEFAULT X16)
+# 4. TWO-STAGE TRUE-PEAK CEILING LIMITER (DEFAULT X16)
 # ==============================================================================
 
 ATTACK_MS: float = 0.5
@@ -1447,7 +1447,7 @@ TRANSIENT_RELEASE_MS: float = 25.0
 
 @dataclass
 class LimiterCfg:
-    """Configuration for the two-stage G6ME true-peak ceiling limiter."""
+    """Configuration for the two-stage true-peak ceiling limiter."""
 
     enable: bool = True
     ceiling_db: float = DEFAULT_CEILING_DB
@@ -1553,7 +1553,7 @@ def _blend_gain(a: float, b: float, w: float) -> float:
 
 class Limiter:
     """
-    Streaming two-stage true-peak ceiling limiter (ported from G6ME `limiter.rs`, default x16).
+    Streaming two-stage true-peak ceiling limiter (default x16).
     Uses vectorized NumPy Pass 1/2/3 over steady-state sub-blocks while maintaining exact
     chunk-size invariance and bit-level equivalence with the per-frame ring algorithm.
     """
@@ -2515,7 +2515,7 @@ def render_verification_plot(
 # ==============================================================================
 
 def build_limiter_cfg(args) -> LimiterCfg:
-    """Builds and validates a G6ME LimiterCfg from CLI arguments (default: x16 @ -3.0 dBTP)."""
+    """Builds and validates a LimiterCfg from CLI arguments (default: x16 @ -3.0 dBTP)."""
     ratio = Ratio.from_str(args.tp_ratio)
     cfg = LimiterCfg(
         enable=not getattr(args, "no_tp_limiter", False),
@@ -2564,7 +2564,7 @@ def build_convolver_probe(fs: int, duration_s: float = 0.5) -> np.ndarray:
 
 
 def print_signal_measurements(label: str, m: SignalMeasurements) -> None:
-    """Prints G6ME true-peak (ratio + ITU x4) and 0.30s peak-hold meter measurements."""
+    """Prints true-peak (ratio + ITU x4) and 0.30s peak-hold meter measurements."""
     ch_tp = ", ".join(f"{v:+.2f}" for v in m.per_channel_dbtp)
     ch_itu = ", ".join(f"{v:+.2f}" for v in m.itu_x4_per_channel_dbtp)
     print(f"  {label}:")
@@ -2585,7 +2585,7 @@ def print_signal_measurements(label: str, m: SignalMeasurements) -> None:
 
 
 def print_limiter_report(rep: LimiterReport, post_meas: SignalMeasurements, cfg: LimiterCfg, fs: int) -> None:
-    """Prints G6ME two-stage true-peak limiter report and independent verification."""
+    """Prints the two-stage true-peak limiter report and independent verification."""
     raised = " [RAISED to filter floor]" if cfg.lookahead_was_raised(fs) else ""
     print(
         f"  Side-Chain / Ratio  : {rep.ratio.label} ({rep.ratio.chain()})"
@@ -2617,7 +2617,7 @@ def print_limiter_report(rep: LimiterReport, post_meas: SignalMeasurements, cfg:
 def run_audio_wav_mode(args, model_cfg: Optional[dict], lim_cfg: LimiterCfg) -> None:
     """
     Processes an input WAV file: measures input, optionally convolves with the selected
-    headphone EQ IR, applies the G6ME x16 true-peak limiter, verifies output, and writes WAV.
+    headphone EQ IR, applies the x16 true-peak limiter, verifies output, and writes WAV.
     """
     wav_fs, planar_in, fmt_desc = read_wav(args.input)
     fs = wav_fs if args.fs is None else int(args.fs)
@@ -2686,7 +2686,7 @@ def run_audio_wav_mode(args, model_cfg: Optional[dict], lim_cfg: LimiterCfg) -> 
                 work = [np.concatenate([w, t]) for w, t in zip(work, tail)]
         rep = lim.report()
         m_out = measure_signal(work, fs=fs, ratio=lim_cfg.ratio)
-        print("\n=== G6ME True-Peak Limiter Report ===")
+        print("\n=== True-Peak Limiter Report ===")
         print_limiter_report(rep, m_out, lim_cfg, fs)
         print_signal_measurements("Output Audio (Verified)", m_out)
     else:
@@ -2823,7 +2823,7 @@ def run_model(model_cfg: dict, args, copy_default_ir: bool, lim_cfg: LimiterCfg)
     convolved_probe = convolve_planar_fft([probe], ir_mpv_f64, trim_to_input=False)
     pre_probe_meas = measure_signal(convolved_probe, fs=fs, ratio=lim_cfg.ratio)
 
-    print(f"\n=== [3] G6ME True-Peak {lim_cfg.ratio.label} Limiter & Convolver Verification (0.00 dBTP Probe -> IR) ===")
+    print(f"\n=== [3] True-Peak {lim_cfg.ratio.label} Limiter & Convolver Verification (0.00 dBTP Probe -> IR) ===")
     print_signal_measurements("Convolved Probe (Pre-Limiter)", pre_probe_meas)
     if lim_cfg.enable:
         probe_work = [convolved_probe[0].copy()]
@@ -2876,7 +2876,7 @@ def main() -> None:
     valid_choices = ["all"] + list(models.keys()) + list(active_aliases.keys())
 
     parser = argparse.ArgumentParser(
-        description="HyprEQ: Unified Minimum-Phase Convolver Generator, G6ME x16 True-Peak Limiter & Measurements Suite."
+        description="HyprEQ: Unified Minimum-Phase Convolver Generator, x16 True-Peak Limiter & Measurements Suite."
     )
     parser.add_argument(
         "-H", "--headphone", choices=valid_choices if models else None, default="all",
@@ -2929,7 +2929,7 @@ def main() -> None:
         help="Optional directory containing additional per-model .json or .csv files",
     )
 
-    tp_grp = parser.add_argument_group("G6ME True-Peak Limiter & Measurements")
+    tp_grp = parser.add_argument_group("True-Peak Limiter & Measurements")
     tp_grp.add_argument(
         "--tp-ratio", type=str, default="x16",
         help="True-peak oversampling ratio: 2/x2, 4/x4, 8/x8, 16/x16, 32/x32 (default: x16)",
@@ -2976,7 +2976,7 @@ def main() -> None:
     )
     tp_grp.add_argument(
         "--bypass-eq", action="store_true",
-        help="Skip EQ convolution in --input mode (run G6ME true-peak limiter + measurements only)",
+        help="Skip EQ convolution in --input mode (run true-peak limiter + measurements only)",
     )
     tp_grp.add_argument(
         "--trim-tail", action="store_true",
@@ -2984,7 +2984,7 @@ def main() -> None:
     )
     tp_grp.add_argument(
         "--measure-only", action="store_true",
-        help="Measure audio file / convolved signal and print G6ME true-peak & meter report without writing WAV",
+        help="Measure audio file / convolved signal and print the true-peak & meter report without writing WAV",
     )
     tp_grp.add_argument(
         "--measure-wav", type=str, default=None,

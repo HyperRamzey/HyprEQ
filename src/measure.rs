@@ -375,7 +375,8 @@ mod tests {
         // Combined RMS is the mean *power*, not the mean level: 3 dB below the loud
         // channel here (the quiet one still contributes half the power's worth).
         let lin = |db: f64| 10f64.powf(db / 10.0);
-        let want = 10f64 * ((lin(m.per_channel_rms_dbfs[0]) + lin(m.per_channel_rms_dbfs[1])) / 2.0).log10();
+        let want = 10f64
+            * ((lin(m.per_channel_rms_dbfs[0]) + lin(m.per_channel_rms_dbfs[1])) / 2.0).log10();
         assert!(
             (m.rms_dbfs - want).abs() < 1e-9,
             "combined {} vs power mean {}",
@@ -448,16 +449,13 @@ mod tests {
         // the peak is what proves the burst is present and where the convolver's
         // group delay will be read from.
         assert_eq!(n, 24000);
-        let (argmax, peak) = p
-            .iter()
-            .enumerate()
-            .fold((0usize, 0.0f64), |acc, (i, &v)| {
-                if v.abs() > acc.1 {
-                    (i, v.abs())
-                } else {
-                    acc
-                }
-            });
+        let (argmax, peak) = p.iter().enumerate().fold((0usize, 0.0f64), |acc, (i, &v)| {
+            if v.abs() > acc.1 {
+                (i, v.abs())
+            } else {
+                acc
+            }
+        });
         assert_eq!(argmax, mid + 512, "burst centre");
         assert!(
             (peak - 0.993_675_238_560_307_5).abs() < 1e-9,
@@ -489,7 +487,11 @@ mod tests {
             early[i] = 0.999;
         }
         let m = measure_signal(&[early.clone()], 48000, Ratio::X16);
-        assert!(m.true_peak_dbtp > -0.05, "the burst is there: {}", m.true_peak_dbtp);
+        assert!(
+            m.true_peak_dbtp > -0.05,
+            "the burst is there: {}",
+            m.true_peak_dbtp
+        );
         assert!(
             m.meter_peak_hold_dbfs < -10.0,
             "a burst 0.58 s from the end must have released, got {}",
@@ -503,7 +505,11 @@ mod tests {
             late[i] = 0.999;
         }
         let m2 = measure_signal(&[late], 48000, Ratio::X16);
-        assert!(m2.meter_peak_hold_dbfs > -0.02, "held: {}", m2.meter_peak_hold_dbfs);
+        assert!(
+            m2.meter_peak_hold_dbfs > -0.02,
+            "held: {}",
+            m2.meter_peak_hold_dbfs
+        );
 
         // Block size changes the granularity of the release, not the peak it saw:
         // both must have caught the burst, and both must release similarly.

@@ -143,8 +143,6 @@ pub struct PlotData {
     pub autoeq_label: String,
     /// Generated-convolver legend.
     pub wav_label: String,
-    /// Panel 2 caption.
-    pub gain_title: String,
     /// Panel 2 legends.
     pub raw_err_label: String,
     /// AutoEq legend on panel 2.
@@ -242,141 +240,624 @@ fn fill(c: Rgb, alpha: f64) -> plotters::style::ShapeStyle {
     }
 }
 
-/// An invisible style, to switch the mesh's minor grid off.
-fn clear() -> plotters::style::ShapeStyle {
-    fill(Rgb(0, 0, 0), 0.0)
+/// The reference's minor x ticks: the in-between decades that get a light grid line and
+/// no label (`FixedLocator(minor_freqs)` with a `NullFormatter`).
+pub const MINOR_FREQS: [f64; 19] = [
+    30.0, 40.0, 60.0, 70.0, 80.0, 90.0, 300.0, 400.0, 600.0, 700.0, 800.0, 900.0, 3000.0, 4000.0,
+    6000.0, 7000.0, 8000.0, 9000.0, 15000.0,
+];
+
+/// Lowest plotted frequency (`ax.set_xlim(20, 20000)`).
+const F_MIN: f64 = 20.0;
+/// Highest plotted frequency.
+const F_MAX: f64 = 20000.0;
+/// Light grid colour, `grid(which="minor")`.
+const GRID_MINOR: Rgb = Rgb(0x24, 0x29, 0x2F);
+/// Legend text size in pixels (the reference's 8.5 pt at 150 dpi).
+const LEGEND_FONT: u32 = 18;
+/// Legend text colour.
+const LEGEND_TEXT: Rgb = Rgb(0xD0, 0xD7, 0xDE);
+/// Dash length and gap for the reference's `linestyle="--"`, in pixels.
+const DASH: (u32, u32) = (9, 7);
+/// Dash length and gap for the reference's `linestyle=":"`.
+const DOT: (u32, u32) = (1, 4);
+/// x ticks of the impulse panel (milliseconds relative to the transient).
+const IR_XTICKS: [f64; 6] = [-1.0, 0.0, 1.0, 2.0, 3.0, 4.0];
+/// y ticks of the impulse panel.
+const IR_YTICKS: [f64; 8] = [-0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
+/// Impulse panel x range, in ms.
+const IR_XMIN: f64 = -1.0;
+/// Impulse panel x upper limit, in ms.
+const IR_XMAX: f64 = 4.0;
+/// Impulse panel y range.
+const IR_YMIN: f64 = -0.45;
+/// Impulse panel y upper limit.
+const IR_YMAX: f64 = 1.08;
+
+/// The pixel rectangle a panel's data occupies.
+///
+/// `ChartBuilder` is configured with `margin(0)`, `margin_top(TITLE_H)`,
+/// `x_label_area_size(X_LABEL_H)` and `y_label_area_size(Y_LABEL_W)`, so the plotting
+/// area is exactly this rectangle. The grid, tick labels, frame and legend are drawn
+/// against it by hand: `plotters` derives tick positions from the coordinate type, and a
+/// logarithmic axis can only produce decades plus fractional light points, never the
+/// fixed 1-2-5 octave list the reference pins with `FixedLocator`.
+fn plot_rect(band: &BitmapArea<'_>) -> (i32, i32, i32, i32) {
+    let (w, h) = band.dim_in_pixel();
+    let w = i32::try_from(w).unwrap_or(i32::MAX);
+    let h = i32::try_from(h).unwrap_or(i32::MAX);
+    (
+        Y_LABEL_W as i32,
+        TITLE_H as i32,
+        w,
+        (h - X_LABEL_H as i32).max(TITLE_H as i32 + 1),
+    )
 }
 
-/// Common log-frequency axis decoration: fixed tick count, labels, grid.
-macro_rules! freq_mesh {
-    ($chart:expr, $y_desc:expr, $yticks:expr) => {{
-        use plotters::prelude::*;
-        let ticks: Vec<f64> = $yticks.clone();
-        $chart
-            .configure_mesh()
-            .x_labels(10)
-            .y_labels(ticks.len().max(2))
-            .x_desc("Frequency (Hz)")
-            .y_desc($y_desc)
-            .axis_desc_style(("sans-serif", DESC_FONT).into_font().color(&TEXT.color()))
-            .label_style(("sans-serif", TICK_FONT).into_font().color(&TEXT.color()))
-            .axis_style(stroke(EDGE, 1))
-            .bold_line_style(stroke(GRID, 1))
-            .light_line_style(clear())
-            .x_label_formatter(&|f| format_hz(*f as f64))
-            .y_label_formatter(&|v| fmt_tick(*v))
-            .draw()
-            .map_err(dv)
-    }};
+/// The x pixel of a data value, unrounded. `log` matches the panel's log-frequency
+/// mapping and the same normalisation `plotters`' log coordinate applies.
+fn x_pix_f(v: f64, min: f64, max: f64, log: bool, rect: (i32, i32, i32, i32)) -> f64 {
+    let t = if log {
+        (v / min).ln() / (max / min).ln()
+    } else {
+        (v - min) / (max - min)
+    };
+    f64::from(rect.0) + f64::from(rect.2 - rect.0) * t
 }
 
-/// The shaded coupler-null bypass zone, drawn before any trace.
+/// The y pixel of a data value, unrounded; pixel rows grow downwards, data grows up.
+fn y_pix_f(v: f64, min: f64, max: f64, rect: (i32, i32, i32, i32)) -> f64 {
+    let t = (v - min) / (max - min);
+    f64::from(rect.3) - f64::from(rect.3 - rect.1) * t
+}
+
+/// The x pixel of a data value; `log` matches the panel's log-frequency mapping.
+fn x_pix(v: f64, min: f64, max: f64, log: bool, rect: (i32, i32, i32, i32)) -> i32 {
+    x_pix_f(v, min, max, log, rect).round() as i32
+}
+
+/// The y pixel of a data value; pixel rows grow downwards, data grows up.
+fn y_pix(v: f64, min: f64, max: f64, rect: (i32, i32, i32, i32)) -> i32 {
+    y_pix_f(v, min, max, rect).round() as i32
+}
+
+/// A pixel-space text element: what to draw, how big, in which colour, anchored where.
+struct TextSpec<'a> {
+    text: &'a str,
+    size: u32,
+    color: Rgb,
+    anchor: plotters::style::text_anchor::Pos,
+    rotate: bool,
+}
+
+/// Inverse of [`x_pix`]: the data value at a pixel column.
+fn x_from_pix(px: f64, min: f64, max: f64, log: bool, rect: (i32, i32, i32, i32)) -> f64 {
+    let t = (px - f64::from(rect.0)) / f64::from((rect.2 - rect.0).max(1));
+    if log {
+        min * (max / min).powf(t)
+    } else {
+        min + t * (max - min)
+    }
+}
+
+/// Inverse of [`y_pix`]: the data value at a pixel row.
+fn y_from_pix(py: f64, min: f64, max: f64, rect: (i32, i32, i32, i32)) -> f64 {
+    let t = (f64::from(rect.3) - py) / f64::from((rect.3 - rect.1).max(1));
+    min + t * (max - min)
+}
+
+/// The three corners of a filled arrow head sitting on `tip` and pointing along
+/// `tail -> tip`, given in data coordinates.
+///
+/// The head is specified in *pixels* and converted back to data space, so it keeps a
+/// constant size on a three-decade logarithmic axis instead of stretching with frequency
+/// the way a data-coordinate triangle would.
+#[must_use]
+pub fn arrow_head_points(
+    tail: (f64, f64),
+    tip: (f64, f64),
+    log_x: bool,
+    x_range: (f64, f64),
+    y_range: (f64, f64),
+    rect: (i32, i32, i32, i32),
+    len_px: f64,
+    half_width_px: f64,
+) -> [(f64, f64); 3] {
+    // Unrounded pixel positions: snapping to whole pixels here would change the head's
+    // length by up to a pixel depending on where it lands.
+    let tip_px = (
+        x_pix_f(tip.0, x_range.0, x_range.1, log_x, rect),
+        y_pix_f(tip.1, y_range.0, y_range.1, rect),
+    );
+    let tail_px = (
+        x_pix_f(tail.0, x_range.0, x_range.1, log_x, rect),
+        y_pix_f(tail.1, y_range.0, y_range.1, rect),
+    );
+    let dx = tip_px.0 - tail_px.0;
+    let dy = tip_px.1 - tail_px.1;
+    let norm = (dx * dx + dy * dy).sqrt();
+    if norm < 1e-9 {
+        return [(tip.0, tip.1), (tip.0, tip.1), (tip.0, tip.1)];
+    }
+    let (ux, uy) = (dx / norm, dy / norm);
+    // Base centre behind the tip, corners either side of the shaft.
+    let bx = tip_px.0 - ux * len_px;
+    let by = tip_px.1 - uy * len_px;
+    let corners_px = [
+        tip_px,
+        (bx - uy * half_width_px, by + ux * half_width_px),
+        (bx + uy * half_width_px, by - ux * half_width_px),
+    ];
+    corners_px.map(|(px, py)| {
+        (
+            x_from_pix(px, x_range.0, x_range.1, log_x, rect),
+            y_from_pix(py, y_range.0, y_range.1, rect),
+        )
+    })
+}
+
+/// Draw text in pixel space with an explicit anchor point, optionally rotated for a y
+/// unit label. `FontTransform::Rotate90` turns 90 degrees *clockwise*; matplotlib reads a
+/// y label bottom-to-top, which is the 270-degree variant.
+fn label(band: &BitmapArea<'_>, x: i32, y: i32, spec: &TextSpec<'_>) -> PlotResult {
+    use plotters::prelude::*;
+    let style = ("sans-serif", f64::from(spec.size))
+        .into_font()
+        .color(&spec.color.color())
+        .pos(spec.anchor);
+    let style = if spec.rotate {
+        style.transform(plotters::style::FontTransform::Rotate270)
+    } else {
+        style
+    };
+    band.draw_text(spec.text, &style, (x, y)).map_err(dv)
+}
+
+/// A stroked shape style with the reference's per-trace alpha.
+pub fn stroke_a(c: Rgb, width: u32, alpha: f64) -> plotters::style::ShapeStyle {
+    use plotters::style::Color as _;
+    plotters::style::ShapeStyle {
+        color: c.color().mix(alpha),
+        filled: false,
+        stroke_width: width,
+    }
+}
+
+/// A filled shape style. `Color -> ShapeStyle` sets `filled: false`, so handing a plain
+/// colour to `Rectangle::new` draws a hollow outline rather than a filled box.
+fn solid(c: Rgb) -> plotters::style::ShapeStyle {
+    use plotters::style::Color as _;
+    c.color().filled()
+}
+
+/// The rendered width of a string, measured on the active backend.
+fn text_w(band: &BitmapArea<'_>, text: &str, size: u32) -> Plot<i32> {
+    use plotters::prelude::*;
+    let style = ("sans-serif", f64::from(size))
+        .into_font()
+        .color(&TEXT.color());
+    let (w, _) = band.estimate_text_size(text, &style).map_err(dv)?;
+    Ok(i32::try_from(w).unwrap_or(i32::MAX))
+}
+
+/// A pixel-space horizontal segment.
+///
+/// `plotters` has no pixel-coordinate line element (only the data-coordinate
+/// `PathElement`), so a segment is drawn as a filled box `w` pixels thick.
+fn hline(band: &BitmapArea<'_>, y: i32, x0: i32, x1: i32, c: Rgb, w: u32) -> PlotResult {
+    if x1 <= x0 {
+        return Ok(());
+    }
+    band.draw(&plotters::element::Rectangle::new(
+        [(x0, y), (x1, y + i32::try_from(w).unwrap_or(1))],
+        solid(c),
+    ))
+    .map_err(dv)
+}
+
+/// A pixel-space vertical segment.
+fn vline(band: &BitmapArea<'_>, x: i32, y0: i32, y1: i32, c: Rgb, w: u32) -> PlotResult {
+    if y1 <= y0 {
+        return Ok(());
+    }
+    band.draw(&plotters::element::Rectangle::new(
+        [(x, y0), (x + i32::try_from(w).unwrap_or(1), y1)],
+        solid(c),
+    ))
+    .map_err(dv)
+}
+
+/// A dotted pixel-space vertical segment, for the reference's dotted `axvline`.
+fn dotted_vline(band: &BitmapArea<'_>, x: i32, y0: i32, y1: i32, c: Rgb, w: u32) -> PlotResult {
+    let mut y = y0;
+    while y < y1 {
+        vline(band, x, y, (y + 2).min(y1), c, w)?;
+        y += 6;
+    }
+    Ok(())
+}
+
+/// Everything one panel's hand-drawn axes need: the data window, which tick values to
+/// honour, and what to call the y axis.
+struct AxesSpec<'a> {
+    x_range: (f64, f64),
+    y_range: (f64, f64),
+    log_x: bool,
+    xticks: &'a [f64],
+    yticks: &'a [f64],
+    y_desc: &'a str,
+    zero_line: bool,
+}
+
+/// Panel background, grid, fixed tick labels, axis frame and unit label.
+///
+/// This is the hand-drawn replacement for `style_freq_axis`: major grid at `xticks`,
+/// light grid at [`MINOR_FREQS`] for a log axis, horizontal grid at `yticks`, the 0 dBr
+/// reference line, tick marks pointing outwards, and the tick labels at the same fixed
+/// values, plus the rotated y unit.
+fn draw_axes(band: &BitmapArea<'_>, config: &AxesSpec<'_>) -> PlotResult {
+    use plotters::style::text_anchor::{HPos, Pos, VPos};
+    let &AxesSpec {
+        x_range: xr,
+        y_range: yr,
+        log_x,
+        xticks,
+        yticks,
+        y_desc,
+        zero_line,
+    } = config;
+    let rect = plot_rect(band);
+
+    band.draw(&plotters::element::Rectangle::new(
+        [(rect.0, rect.1), (rect.2, rect.3)],
+        solid(PANEL_BG),
+    ))
+    .map_err(dv)?;
+
+    if log_x {
+        for &f in MINOR_FREQS.iter().filter(|f| **f > xr.0 && **f < xr.1) {
+            vline(
+                band,
+                x_pix(f, xr.0, xr.1, true, rect),
+                rect.1,
+                rect.3,
+                GRID_MINOR,
+                1,
+            )?;
+        }
+    }
+    for &f in xticks.iter().filter(|f| **f > xr.0 && **f < xr.1) {
+        let x = x_pix(f, xr.0, xr.1, log_x, rect);
+        vline(band, x, rect.1, rect.3, GRID, 1)?;
+        vline(band, x, rect.3, rect.3 + 3, EDGE, 1)?;
+        label(
+            band,
+            x,
+            rect.3 + 5,
+            &TextSpec {
+                text: &format_hz(f),
+                size: TICK_FONT,
+                color: TEXT,
+                anchor: Pos {
+                    h_pos: HPos::Center,
+                    v_pos: VPos::Top,
+                },
+                rotate: false,
+            },
+        )?;
+    }
+    for &t in yticks.iter().filter(|&&v| v > yr.0 && v < yr.1) {
+        let y = y_pix(t, yr.0, yr.1, rect);
+        hline(band, y, rect.0, rect.2, GRID, 1)?;
+        hline(band, y, rect.0 - 3, rect.0, EDGE, 1)?;
+        label(
+            band,
+            rect.0 - 6,
+            y,
+            &TextSpec {
+                text: &fmt_tick(t),
+                size: TICK_FONT,
+                color: TEXT,
+                anchor: Pos {
+                    h_pos: HPos::Right,
+                    v_pos: VPos::Center,
+                },
+                rotate: false,
+            },
+        )?;
+    }
+    // Edge ticks and labels that sit exactly on the limits would collide with the frame,
+    // so the limits are labelled without a grid line, like matplotlib's behaviour.
+    if zero_line && 0.0 > yr.0 && 0.0 < yr.1 {
+        hline(
+            band,
+            y_pix(0.0, yr.0, yr.1, rect),
+            rect.0,
+            rect.2,
+            ZERO_LINE,
+            1,
+        )?;
+    }
+
+    // Frame.
+    hline(band, rect.1, rect.0, rect.2, EDGE, 1)?;
+    hline(band, rect.3, rect.0, rect.2, EDGE, 1)?;
+    vline(band, rect.0, rect.1, rect.3, EDGE, 1)?;
+    vline(band, rect.2, rect.1, rect.3, EDGE, 1)?;
+
+    // The unit label, rotated beside the y tick column.
+    label(
+        band,
+        i32::try_from(DESC_FONT).unwrap_or(16) / 2 + 2,
+        (rect.1 + rect.3) / 2,
+        &TextSpec {
+            text: y_desc,
+            size: DESC_FONT,
+            color: TEXT,
+            anchor: Pos {
+                h_pos: HPos::Center,
+                v_pos: VPos::Center,
+            },
+            rotate: true,
+        },
+    )?;
+    Ok(())
+}
+
+/// Where a legend box sits inside its panel.
+#[derive(Clone, Copy)]
+enum LegendPos {
+    LowerLeft,
+    UpperLeft,
+    UpperRight,
+}
+
+/// A legend swatch: a line in the trace's style, or a filled patch.
+struct LegendItem<'a> {
+    text: &'a str,
+    swatch: Swatch,
+}
+
+/// The two kinds of swatch the reference's legend contains.
+enum Swatch {
+    Line {
+        color: Rgb,
+        width: u32,
+        dash: Option<(u32, u32)>,
+    },
+    Patch(Rgb),
+}
+
+/// The legend box, drawn by hand: `plotters` attaches swatches only through
+/// `.legend(closure)` on a series segment, and that closure receives data coordinates,
+/// which on a three-decade logarithmic axis cannot express a 25 px swatch.
+fn draw_legend(band: &BitmapArea<'_>, items: &[LegendItem<'_>], pos: LegendPos) -> PlotResult {
+    use plotters::style::text_anchor::{HPos, Pos, VPos};
+    if items.is_empty() {
+        return Ok(());
+    }
+    let rect = plot_rect(band);
+    let line_h = (f64::from(LEGEND_FONT) * 1.45).round() as i32;
+    let swatch_w = 26;
+    let pad = 6;
+    let widest = items
+        .iter()
+        .map(|i| text_w(band, i.text, LEGEND_FONT))
+        .collect::<Plot<Vec<_>>>()?
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    let box_w = (swatch_w + 8 + widest + 2 * pad).min((rect.2 - rect.0) - 8);
+    let box_h = line_h * items.len() as i32 + 2 * pad;
+    let x = match pos {
+        LegendPos::LowerLeft | LegendPos::UpperLeft => rect.0 + 8,
+        LegendPos::UpperRight => rect.2 - 8 - box_w,
+    };
+    let y = match pos {
+        LegendPos::LowerLeft => rect.3 - 8 - box_h,
+        LegendPos::UpperLeft | LegendPos::UpperRight => rect.1 + 8,
+    };
+
+    band.draw(&plotters::element::Rectangle::new(
+        [(x, y), (x + box_w, y + box_h)],
+        fill(LEGEND_BG, 0.92),
+    ))
+    .map_err(dv)?;
+    band.draw(&plotters::element::Rectangle::new(
+        [(x, y), (x + box_w, y + box_h)],
+        stroke(EDGE, 1),
+    ))
+    .map_err(dv)?;
+
+    for (i, item) in items.iter().enumerate() {
+        let cy = y + pad + line_h / 2 + line_h * i as i32;
+        match item.swatch {
+            Swatch::Patch(c) => band
+                .draw(&plotters::element::Rectangle::new(
+                    [
+                        (x + pad, cy - line_h / 3),
+                        (x + pad + swatch_w, cy + line_h / 3),
+                    ],
+                    fill(c, 0.55),
+                ))
+                .map_err(dv)?,
+            Swatch::Line { color, width, dash } => match dash {
+                None => hline(band, cy, x + pad, x + pad + swatch_w, color, width)?,
+                Some((d, g)) => {
+                    let mut sx = x + pad;
+                    while sx < x + pad + swatch_w {
+                        let e = (sx + d as i32).min(x + pad + swatch_w);
+                        hline(band, cy, sx, e, color, width)?;
+                        sx = e + g as i32;
+                    }
+                }
+            },
+        }
+        label(
+            band,
+            x + pad + swatch_w + 8,
+            cy,
+            &TextSpec {
+                text: item.text,
+                size: LEGEND_FONT,
+                color: LEGEND_TEXT,
+                anchor: Pos {
+                    h_pos: HPos::Left,
+                    v_pos: VPos::Center,
+                },
+                rotate: false,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// The panel title, centred over the data area like matplotlib's `set_title`, wrapped
+/// with measured glyph widths when the line would run past the panel.
+fn draw_title(band: &BitmapArea<'_>, text: &str, size: u32) -> PlotResult {
+    use plotters::style::text_anchor::{HPos, Pos, VPos};
+    if text.is_empty() {
+        return Ok(());
+    }
+    let rect = plot_rect(band);
+    let avail = rect.2 - rect.0;
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let trial = if cur.is_empty() {
+            word.to_string()
+        } else {
+            format!("{cur} {word}")
+        };
+        if cur.is_empty() || text_w(band, &trial, size)? <= avail {
+            cur = trial;
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur = word.to_string();
+        }
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+
+    let line_h = (f64::from(size) * 1.25).round() as i32;
+    let block = line_h * lines.len() as i32;
+    // Titles grow upwards from the top of the plot area, into the reserved caption band.
+    let top = (TITLE_H as i32 - block).max(2);
+    for (i, line) in lines.iter().enumerate() {
+        label(
+            band,
+            (rect.0 + rect.2) / 2,
+            top + line_h * i as i32,
+            &TextSpec {
+                text: line,
+                size,
+                color: TITLE,
+                anchor: Pos {
+                    h_pos: HPos::Center,
+                    v_pos: VPos::Top,
+                },
+                rotate: false,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+/// The shaded coupler-null bypass zone, drawn before any trace and clipped to the
+/// panel's own y range.
 macro_rules! bypass_span {
-    ($chart:expr, $self:expr) => {{
-        use plotters::prelude::*;
-        let lo = $self.ax1_ylim.0.min($self.ax2_ylim.0);
-        let hi = $self.ax1_ylim.1.max($self.ax2_ylim.1);
+    ($chart:expr, $from:expr, $to:expr, $y_lo:expr, $y_hi:expr) => {{
         $chart
-            .draw_series(vec![Rectangle::new(
-                [($self.hf_bypass_hz, lo), ($self.bypass_to_hz, hi)],
-                fill(BYPASS, 0.35),
+            .draw_series(vec![plotters::element::Rectangle::new(
+                [($from, $y_lo), ($to, $y_hi)],
+                $crate::plot::fill($crate::plot::BYPASS, 0.35),
             )])
-            .map_err(dv)?;
-        Ok::<(), crate::error::Error>(())
+            .map_err($crate::plot::dv)?;
     }};
 }
 
-/// One polyline in `(freq, level)` data coordinates, optionally registered in the legend.
+/// One polyline in data coordinates. Solid by default; `dash <len>, <gap>` draws the
+/// reference's `--` / `:` styles.
 macro_rules! trace {
-    ($chart:expr, $label:expr, $xs:expr, $ys:expr, $color:expr, $w:expr) => {{
-        use plotters::prelude::*;
+    ($chart:expr, $xs:expr, $ys:expr, $style:expr) => {{
         let xs: &[f64] = $xs;
         let ys: &[f64] = $ys;
-        if xs.is_empty() || ys.is_empty() {
-            Ok(())
-        } else {
-            let pts: Vec<(f64, f64)> = xs.iter().zip(ys).map(|(&x, &y)| (x, y)).collect();
-            let anno = $chart
-                .draw_series(LineSeries::new(pts, stroke($color, $w as u32)))
-                .map_err(dv)?;
-            if let Some(l) = $label {
-                anno.label(l.to_string());
-            }
-            Ok::<(), crate::error::Error>(())
+        let pts: Vec<(f64, f64)> = xs.iter().zip(ys).map(|(&x, &y)| (x, y)).collect();
+        if !pts.is_empty() {
+            $chart
+                .draw_series(LineSeries::new(pts, $style))
+                .map_err($crate::plot::dv)?;
+        }
+    }};
+    ($chart:expr, $xs:expr, $ys:expr, $style:expr, dash $len:expr, $gap:expr) => {{
+        let xs: &[f64] = $xs;
+        let ys: &[f64] = $ys;
+        let pts: Vec<(f64, f64)> = xs.iter().zip(ys).map(|(&x, &y)| (x, y)).collect();
+        if !pts.is_empty() {
+            $chart
+                .draw_series(plotters::prelude::DashedLineSeries::new(
+                    pts, $len, $gap, $style,
+                ))
+                .map_err($crate::plot::dv)?;
         }
     }};
 }
 
-/// A reference line that must not appear in the legend.
-macro_rules! guide {
-    ($chart:expr, $pts:expr, $color:expr, $w:expr) => {{
-        use plotters::prelude::*;
-        $chart
-            .draw_series(LineSeries::new($pts.to_vec(), stroke($color, $w as u32)))
-            .map_err(dv)?;
-    }};
-}
-
-/// The legend of everything registered with `.label(..)`.
-macro_rules! legend {
-    ($chart:expr, $pos:expr) => {{
-        use plotters::prelude::*;
-        $chart
-            .configure_series_labels()
-            .position($pos)
-            .background_style(fill(LEGEND_BG, 0.92))
-            .border_style(stroke(EDGE, 1))
-            .label_font(("sans-serif", TICK_FONT).into_font().color(&TEXT.color()))
-            .draw()
-            .map_err(dv)
-    }};
-}
-
-/// The panel-2 callouts: an arrow from each text block to its point on the curve, in
-/// data coordinates so the model's `plot_meta` positions are honoured exactly.
+/// The panel-2 callouts: a shaft from the text block to the point on the curve, an open
+/// arrow head at the tip (the reference's `arrowstyle="->"`), and the text.
+///
+/// The head is sized in *log* frequency, because the axis is logarithmic: a fixed number
+/// of hertz is a different number of pixels at 35 Hz and at 5 kHz, and a linear offset
+/// pushed the sub-100 Hz callouts off the left edge of the panel.
 macro_rules! annotations {
-    ($chart:expr, $self:expr) => {{
+    ($chart:expr, $self:expr, $rect:expr) => {{
         use plotters::prelude::*;
         let (y_lo, y_hi) = $self.ax2_ylim;
         let dy = (y_hi - y_lo) * 0.045;
         for a in &$self.annotations {
             let color = if a.green { ARROW_GREEN } else { ARROW_CYAN };
-            let head_x =
-                a.xy_x - dx_toward(a.xy_x, a.xytext.0) * (1.0 + (a.xy_x - a.xytext.0).abs() * 0.02);
+            // 0.8 % of a decade either way, so the head reads the same size everywhere.
+            let tail_y = (a.xytext.1 - dy * 0.4).clamp(y_lo + dy, y_hi - dy);
             $chart
                 .draw_series(vec![PathElement::new(
-                    vec![(a.xytext.0, a.xytext.1 - dy * 0.4), (a.xy_x, a.xy_y)],
-                    stroke(color, 2),
+                    vec![(a.xytext.0, tail_y), (a.xy_x, a.xy_y)],
+                    $crate::plot::stroke_a(color, 2, 0.95),
                 )])
-                .map_err(dv)?;
+                .map_err($crate::plot::dv)?;
+            // A filled head, sized in pixels: matplotlib's `->` arrow keeps its size at
+            // every frequency, which a data-coordinate triangle on a log axis cannot.
+            let head = $crate::plot::arrow_head_points(
+                (a.xytext.0, tail_y),
+                (a.xy_x, a.xy_y),
+                true,
+                ($crate::plot::F_MIN, $crate::plot::F_MAX),
+                (y_lo, y_hi),
+                $rect,
+                12.0,
+                5.0,
+            );
             $chart
-                .draw_series(vec![PathElement::new(
-                    vec![
-                        (a.xy_x, a.xy_y),
-                        (head_x, a.xy_y + dy * 0.55),
-                        (head_x, a.xy_y - dy * 0.55),
-                        (a.xy_x, a.xy_y),
-                    ],
-                    fill(color, 1.0),
+                .draw_series(vec![plotters::element::Polygon::new(
+                    head.to_vec(),
+                    $crate::plot::fill(color, 0.95),
                 )])
-                .map_err(dv)?;
+                .map_err($crate::plot::dv)?;
+
             for (i, line) in a.text.split('\n').enumerate() {
+                let ty = (a.xytext.1 - dy * (i as f64 + 0.8)).clamp(y_lo + dy, y_hi - dy);
                 $chart
                     .draw_series(vec![Text::new(
                         line.to_string(),
-                        (a.xytext.0, a.xytext.1 - dy * (i as f64 + 0.8)),
-                        ("sans-serif", ANNOT_FONT).into_font().color(&color.color()),
+                        (a.xytext.0, ty),
+                        ("sans-serif", $crate::plot::ANNOT_FONT)
+                            .into_font()
+                            .color(&color.color()),
                     )])
-                    .map_err(dv)?;
+                    .map_err($crate::plot::dv)?;
             }
         }
-        Ok::<(), crate::error::Error>(())
     }};
-}
-
-/// Unit step from `from` towards `to`, so an arrowhead always points back at the text.
-fn dx_toward(from: f64, to: f64) -> f64 {
-    (to - from).signum()
 }
 
 impl PlotData {
@@ -432,7 +913,7 @@ impl PlotData {
         // Panel 4: the linear-phase IR of the same magnitude (centred, so its energy
         // straddles 0 ms and pre-rings) against the minimum-phase IR, which starts at
         // 0 ms. Both normalised to the minimum-phase peak.
-        let ir_lin_centered = fftshift(&crate::ir::linear_phase_ir(in_.mag_lin, in_.n_fft_rt));
+        let ir_lin_centered = crate::ir::linear_phase_ir_centered(in_.mag_lin, in_.n_fft_rt);
         let peak_mp = in_
             .ir_rt
             .iter()
@@ -447,7 +928,7 @@ impl PlotData {
         // transient instead of being interpolated across the empty half of the panel.
         let lead_n = 48usize;
         let mp_t_ms: Vec<f64> = (0..lead_n)
-            .map(|i| -1.0 + (i as f64 + 1.0) / lead_n as f64)
+            .map(|i| -1.0 + (1.0 - 1e3 / fs) * i as f64 / (lead_n - 1) as f64)
             .chain((0..250.min(in_.ir_rt.len())).map(|i| i as f64 / fs * 1000.0))
             .collect();
         let mp_ir: Vec<f64> = vec![0.0; lead_n]
@@ -460,15 +941,16 @@ impl PlotData {
             meta.get(k).and_then(|v| v.as_str()).map(str::to_string)
         };
         let notch_db = crate::ir::notch_db_at(in_.active_ctrl, model.notch_ref_hz);
-        // The reference's labels are Python format templates; only these five fields
-        // ever appear in them.
-        let subst = |s: String| {
-            s.replace("{notch_mode}", in_.notch_mode)
-                .replace("{pre_rt:.2f}", &format!("{:.2}", in_.pre_rt))
-                .replace("{unwin_rt:.1f}", &format!("{:.1}", in_.unwin_rt))
-                .replace("{boost_rt:.2f}", &format!("{:.2}", in_.boost_rt))
-                .replace("{notch_db:.2f}", &format!("{:.2}", notch_db))
+        // The reference's labels are Python `str.format` templates over the same five
+        // values its `fmt_ctx` carries.
+        let ctx = FmtCtx {
+            notch_mode: in_.notch_mode,
+            pre_rt: in_.pre_rt,
+            unwin_rt: in_.unwin_rt,
+            boost_rt: in_.boost_rt,
+            notch_db,
         };
+        let subst = |s: String| substitute(&s, &ctx);
 
         let has_notch = model.notch_range_hz.is_some();
         let default_title = if has_notch {
@@ -511,34 +993,46 @@ impl PlotData {
         });
 
         let annotations = meta_annotations(meta, notch_db)
-            .unwrap_or_else(|| build_auto_annotations(&f_plot, &wav_eq, model.hf_bypass_hz));
+            .unwrap_or_else(|| build_auto_annotations(&f_plot, &wav_eq, model.hf_bypass_hz))
+            .into_iter()
+            .map(|mut a| {
+                a.text = substitute(&a.text, &ctx);
+                a
+            })
+            .collect();
 
         Self {
             title: subst(str_meta("title_template").unwrap_or(default_title)),
-            bypass_label: str_meta("bypass_label").unwrap_or_else(|| {
+            bypass_label: subst(str_meta("bypass_label").unwrap_or_else(|| {
                 format!(
                     "Uncorrected >{:.1} kHz Coupler Null Zone (Clamped to 0.0 dB)",
                     model.hf_bypass_hz / 1000.0
                 )
-            }),
-            lr_label: str_meta("lr_label").unwrap_or_else(|| "Raw L / R Channels".to_string()),
-            raw_label: str_meta("raw_label").unwrap_or_else(|| format!("Raw {}", model.name)),
-            target_label: str_meta("target_label").unwrap_or_else(|| {
+            })),
+            lr_label: subst(
+                str_meta("lr_label").unwrap_or_else(|| "Raw L / R Channels".to_string()),
+            ),
+            raw_label: subst(
+                str_meta("raw_label").unwrap_or_else(|| format!("Raw {}", model.name)),
+            ),
+            target_label: subst(str_meta("target_label").unwrap_or_else(|| {
                 if model.target_name == "harman_2018" {
                     "Harman Over-Ear 2018 Target".to_string()
                 } else {
                     format!("Target Curve ({})", model.target_name)
                 }
-            }),
-            autoeq_label: str_meta("autoeq_ax1_label")
-                .unwrap_or_else(|| "Standard AutoEq Response".to_string()),
+            })),
+            autoeq_label: subst(
+                str_meta("autoeq_ax1_label")
+                    .unwrap_or_else(|| "Standard AutoEq Response".to_string()),
+            ),
             wav_label: subst(str_meta("wav_ax1_label").unwrap_or(default_wav)),
-            gain_title: "Filter Gain: Raw Error vs. Standard AutoEq vs. Final WAV Convolver"
-                .to_string(),
-            raw_err_label: str_meta("raw_err_ax2_label")
-                .unwrap_or_else(|| "Raw Unsmoothed Error".to_string()),
-            autoeq_gain_label: str_meta("autoeq_ax2_label")
-                .unwrap_or_else(|| "Standard AutoEq Curve".to_string()),
+            raw_err_label: subst(
+                str_meta("raw_err_ax2_label").unwrap_or_else(|| "Raw Unsmoothed Error".to_string()),
+            ),
+            autoeq_gain_label: subst(
+                str_meta("autoeq_ax2_label").unwrap_or_else(|| "Standard AutoEq Curve".to_string()),
+            ),
             wav_gain_label: format!(
                 "Final WAV Convolver EQ Curve (Peak +{:.2} dB -> Normalized w/ {:.2} dB Preamp)",
                 in_.boost_rt, in_.pre_rt
@@ -570,20 +1064,64 @@ impl PlotData {
         }
     }
 
+    /// The four plot-area rectangles `(x0, y0, x1, y1)` in figure pixels.
+    ///
+    /// These mirror the band splits `render_to` performs; `plotters` keeps `Rect`'s own
+    /// splitting private, so the geometry is spelled out here and the rendered figure is
+    /// checked against it by a test (the axis frame has to land exactly on these edges).
+    #[must_use]
+    pub fn panel_rects() -> [(i32, i32, i32, i32); 4] {
+        let row_h = |h: u32| TITLE_H + h + X_LABEL_H;
+        let band1_y = M_TOP;
+        let band2_y = band1_y + row_h(ROW1_H) + ROW_GAP;
+        let band3_y = band2_y + row_h(ROW2_H) + ROW_GAP;
+        let left_band = M_LEFT - Y_LABEL_W;
+        let wide = M_RIGHT - M_LEFT;
+        let plot = |band_x: u32, band_y: u32, w: u32, h: u32| {
+            let x0 = band_x as i32 + Y_LABEL_W as i32;
+            let y0 = band_y as i32 + TITLE_H as i32;
+            (x0, y0, x0 + w as i32, y0 + h as i32)
+        };
+        // Each band is `Y_LABEL_W` wider than its plot area, so the second column's band
+        // starts a full label-area plus panel past the first one.
+        [
+            plot(left_band, band1_y, wide, ROW1_H),
+            plot(left_band, band2_y, wide, ROW2_H),
+            plot(left_band, band3_y, COL_W, ROW3_H),
+            plot(
+                left_band + Y_LABEL_W + COL_W + COL_GAP,
+                band3_y,
+                COL_W,
+                ROW3_H,
+            ),
+        ]
+    }
+
     /// Write `<file_prefix>_final_verification.png`; returns the path written.
+    ///
+    /// The bitmap backend would also flush when the areas are dropped, but that error is
+    /// unreachable, so `present()` is called explicitly: a failed write must be reported
+    /// rather than leave a truncated file behind an `Ok`.
     pub fn render(&self, prefix: &str) -> Result<std::path::PathBuf> {
+        self.render_to(&std::path::PathBuf::from(format!(
+            "{prefix}_final_verification.png"
+        )))
+    }
+
+    /// Render to an explicit path. `render` is this with the reference's file naming;
+    /// tests use this directly so they never have to move the process's working directory.
+    pub fn render_to(&self, path: &std::path::Path) -> Result<std::path::PathBuf> {
         use plotters::prelude::*;
 
-        let path = std::path::PathBuf::from(format!("{prefix}_final_verification.png"));
-        // The bitmap backend writes the file when it is dropped, i.e. when `root` and
-        // everything split from it go out of scope at the end of this function.
-        let written = path.clone();
-        let root = BitMapBackend::new(&path, (FIG_W, FIG_H)).into_drawing_area();
+        let written = path.to_path_buf();
+        let root = BitMapBackend::new(path, (FIG_W, FIG_H)).into_drawing_area();
         root.fill(&FIG_BG.color())
-            .map_err(|e| Error::msg(format!("figure background failed: {e}")))?;
+            .map_err(dv)
+            .map_err(io_err(path, "figure background failed"))?;
 
-        // Bands peel off the top; the inter-row gaps are drawn as throwaway bands so
-        // the figure background shows through them.
+        // Rows: `split_vertically(n)` returns the top `n` pixels and the remainder, so
+        // the inter-row gaps are the peeled bands that get dropped and let the figure
+        // background show through.
         let (_, rest) = root.split_vertically(M_TOP);
         let (band1, rest) = rest.split_vertically(TITLE_H + ROW1_H + X_LABEL_H);
         let (_, rest) = rest.split_vertically(ROW_GAP);
@@ -591,228 +1129,333 @@ impl PlotData {
         let (_, rest) = rest.split_vertically(ROW_GAP);
         let (band3, _) = rest.split_vertically(TITLE_H + ROW3_H + X_LABEL_H);
 
-        // Peel the left margin off first: with `y_label_area_size(Y_LABEL_W)` the plot
-        // area then begins exactly at M_LEFT and ends exactly at M_RIGHT.
-        let (row1, _) = band1.split_horizontally(M_LEFT - Y_LABEL_W);
-        let (band1, _) = row1.split_horizontally(Y_LABEL_W + (M_RIGHT - M_LEFT));
-        let (row2, _) = band2.split_horizontally(M_LEFT - Y_LABEL_W);
-        let (band2, _) = row2.split_horizontally(Y_LABEL_W + (M_RIGHT - M_LEFT));
+        // Columns: `split_horizontally(n)` returns the left `n` pixels *first* and the
+        // remainder second, so the left margin is the discarded first element and the
+        // panel is what remains. Peeling `M_LEFT - Y_LABEL_W` and then keeping
+        // `Y_LABEL_W + (M_RIGHT - M_LEFT)` puts every plot area exactly in
+        // `[M_LEFT, M_RIGHT)`, matching the reference's `left`/`right` figure margins.
+        let (_, row) = band1.split_horizontally(M_LEFT - Y_LABEL_W);
+        let (band1, _) = row.split_horizontally(Y_LABEL_W + (M_RIGHT - M_LEFT));
+        let (_, row) = band2.split_horizontally(M_LEFT - Y_LABEL_W);
+        let (band2, _) = row.split_horizontally(Y_LABEL_W + (M_RIGHT - M_LEFT));
 
-        self.draw_level(&band1).map_err(io_err(&path, "panel 1"))?;
-        self.draw_gain(&band2).map_err(io_err(&path, "panel 2"))?;
-
-        // Bottom row: left margin, [ y labels | plot ], gap, [ y labels | plot ].
-        let (row3, _) = band3.split_horizontally(M_LEFT - Y_LABEL_W);
-        let (col1, rest) = row3.split_horizontally(Y_LABEL_W + COL_W);
+        // Bottom row: [ y labels | plot ] , gap , [ y labels | plot ].
+        let (_, row) = band3.split_horizontally(M_LEFT - Y_LABEL_W);
+        let (band3, rest) = row.split_horizontally(Y_LABEL_W + COL_W);
         let (_, rest) = rest.split_horizontally(COL_GAP);
-        let (col2, _) = rest.split_horizontally(Y_LABEL_W + COL_W);
-        self.draw_phase(&col1).map_err(io_err(&path, "panel 3"))?;
-        self.draw_impulse(&col2).map_err(io_err(&path, "panel 4"))?;
+        let (band4, _) = rest.split_horizontally(Y_LABEL_W + COL_W);
 
+        self.draw_level(&band1).map_err(io_err(path, "panel 1"))?;
+        self.draw_gain(&band2).map_err(io_err(path, "panel 2"))?;
+        self.draw_phase(&band3).map_err(io_err(path, "panel 3"))?;
+        self.draw_impulse(&band4).map_err(io_err(path, "panel 4"))?;
+
+        root.present()
+            .map_err(dv)
+            .map_err(io_err(path, "PNG write failed"))?;
         Ok(written)
     }
 
     /// Panel 1: acoustic level — raw against target, AutoEq, and the built FIR.
     fn draw_level(&self, band: &BitmapArea<'_>) -> PlotResult {
         use plotters::prelude::*;
-        let (y0, y1) = self.ax1_ylim;
+        let autoeq_resp = add(&self.raw_avg, &self.autoeq);
+        let wav_resp = add(&self.raw_avg, &self.wav_eq);
+        // A metadata window is a floor, never a clip: the curves actually drawn widen it
+        // rather than run off the panel, and the 0 dBr line stays inside.
+        let (y0, y1) = widen_to(
+            self.ax1_ylim,
+            &[
+                (&self.raw_l, 1.0),
+                (&self.raw_r, 1.0),
+                (&self.raw_avg, 1.0),
+                (&self.harm_plot, 1.0),
+                (&autoeq_resp, 1.0),
+                (&wav_resp, 1.0),
+                (&[0.0][..], 0.0),
+            ],
+        );
+        draw_title(band, &self.title, TITLE_FONT)?;
+        draw_axes(
+            band,
+            &AxesSpec {
+                x_range: (F_MIN, F_MAX),
+                y_range: (y0, y1),
+                log_x: true,
+                xticks: &MAJOR_FREQS,
+                yticks: &self.ax1_yticks,
+                y_desc: "Acoustic Level (dBr)",
+                zero_line: true,
+            },
+        )?;
         let mut chart = ChartBuilder::on(band)
             .margin(0u32)
             .margin_top(TITLE_H)
             .x_label_area_size(X_LABEL_H)
             .y_label_area_size(Y_LABEL_W)
-            .caption(
-                self.title.as_str(),
-                ("sans-serif", TITLE_FONT).into_font().color(&TITLE.color()),
-            )
-            .build_cartesian_2d((20.0f64..20000.0f64).log_scale(), y0..y1)
+            .build_cartesian_2d((F_MIN..F_MAX).log_scale(), y0..y1)
             .map_err(dv)?;
-        chart.plotting_area().fill(&PANEL_BG.color()).map_err(dv)?;
-        let _ = freq_mesh!(chart, "Acoustic Level (dBr)", self.ax1_yticks);
 
-        let _ = bypass_span!(chart, self);
-        let _ = trace!(chart, None::<String>, &self.f_plot, &self.raw_l, RAW_LR, 2);
-        let _ = trace!(chart, None::<String>, &self.f_plot, &self.raw_r, RAW_LR, 2);
-        let _ = trace!(
+        bypass_span!(&mut chart, self.hf_bypass_hz, self.bypass_to_hz, y0, y1);
+        // The two raw channels sit under everything else, at the reference's alpha.
+        trace!(chart, &self.f_plot, &self.raw_l, stroke_a(RAW_LR, 2, 0.38), dash DOT.0, DOT.1);
+        trace!(chart, &self.f_plot, &self.raw_r, stroke_a(RAW_LR, 2, 0.38), dash DOT.0, DOT.1);
+        trace!(chart, &self.f_plot, &self.raw_avg, stroke_a(RAW, 3, 0.9), dash DASH.0, DASH.1);
+        trace!(
             chart,
-            Some(&self.raw_label),
-            &self.f_plot,
-            &self.raw_avg,
-            RAW,
-            3
-        );
-        let _ = trace!(
-            chart,
-            Some(&self.target_label),
             &self.f_plot,
             &self.harm_plot,
-            TARGET,
-            5
+            stroke_a(TARGET, 7, 0.88)
         );
-        let autoeq_resp = add(&self.raw_avg, &self.autoeq);
-        let _ = trace!(
+        trace!(
             chart,
-            Some(&self.autoeq_label),
             &self.f_plot,
             &autoeq_resp,
-            AUTOEQ_RED,
-            4
+            stroke_a(AUTOEQ_RED, 3, 0.92)
         );
-        let wav_resp = add(&self.raw_avg, &self.wav_eq);
-        let _ = trace!(
-            chart,
-            Some(&self.wav_label),
-            &self.f_plot,
-            &wav_resp,
-            WAV_GREEN,
-            5
-        );
-        legend!(&mut chart, SeriesLabelPosition::LowerLeft)
+        trace!(chart, &self.f_plot, &wav_resp, stroke_a(WAV_GREEN, 5, 0.98));
+
+        let items = [
+            LegendItem {
+                text: &self.bypass_label,
+                swatch: Swatch::Patch(BYPASS),
+            },
+            LegendItem {
+                text: &self.lr_label,
+                swatch: Swatch::Line {
+                    color: RAW_LR,
+                    width: 2,
+                    dash: Some(DOT),
+                },
+            },
+            LegendItem {
+                text: &self.raw_label,
+                swatch: Swatch::Line {
+                    color: RAW,
+                    width: 3,
+                    dash: Some(DASH),
+                },
+            },
+            LegendItem {
+                text: &self.target_label,
+                swatch: Swatch::Line {
+                    color: TARGET,
+                    width: 7,
+                    dash: None,
+                },
+            },
+            LegendItem {
+                text: &self.autoeq_label,
+                swatch: Swatch::Line {
+                    color: AUTOEQ_RED,
+                    width: 3,
+                    dash: None,
+                },
+            },
+            LegendItem {
+                text: &self.wav_label,
+                swatch: Swatch::Line {
+                    color: WAV_GREEN,
+                    width: 5,
+                    dash: None,
+                },
+            },
+        ];
+        draw_legend(band, &items, LegendPos::LowerLeft)
     }
 
-    /// Panel 2: filter gain, plus the callouts.
+    /// Panel 2: filter gain, plus the callouts. The reference gives this panel no title,
+    /// only a y unit, so none is drawn.
     fn draw_gain(&self, band: &BitmapArea<'_>) -> PlotResult {
         use plotters::prelude::*;
-        let (y0, y1) = self.ax2_ylim;
-        let mut chart = ChartBuilder::on(band)
-            .margin(0u32)
-            .margin_top(TITLE_H)
-            .x_label_area_size(X_LABEL_H)
-            .y_label_area_size(Y_LABEL_W)
-            .caption(
-                self.gain_title.as_str(),
-                ("sans-serif", GAIN_TITLE_FONT)
-                    .into_font()
-                    .color(&TITLE.color()),
-            )
-            .build_cartesian_2d((20.0f64..20000.0f64).log_scale(), y0..y1)
-            .map_err(dv)?;
-        chart.plotting_area().fill(&PANEL_BG.color()).map_err(dv)?;
-        let _ = freq_mesh!(chart, "Filter Gain (dBr)", self.ax2_yticks);
-        let _ = bypass_span!(chart, self);
-
         let err: Vec<f64> = self
             .harm_plot
             .iter()
             .zip(&self.raw_avg)
             .map(|(&h, &r)| h - r)
             .collect();
-        let _ = trace!(
-            chart,
-            Some(&self.raw_err_label),
-            &self.f_plot,
-            &err,
-            RAW_ERR,
-            2
+        let (y0, y1) = widen_to(
+            self.ax2_ylim,
+            &[
+                (&err, 1.0),
+                (&self.autoeq, 1.0),
+                (&self.wav_eq, 1.0),
+                (&[0.0][..], 0.0),
+            ],
         );
-        let _ = trace!(
+        draw_axes(
+            band,
+            &AxesSpec {
+                x_range: (F_MIN, F_MAX),
+                y_range: (y0, y1),
+                log_x: true,
+                xticks: &MAJOR_FREQS,
+                yticks: &self.ax2_yticks,
+                y_desc: "Filter Gain (dBr)",
+                zero_line: true,
+            },
+        )?;
+        let mut chart = ChartBuilder::on(band)
+            .margin(0u32)
+            .margin_top(TITLE_H)
+            .x_label_area_size(X_LABEL_H)
+            .y_label_area_size(Y_LABEL_W)
+            .build_cartesian_2d((F_MIN..F_MAX).log_scale(), y0..y1)
+            .map_err(dv)?;
+
+        bypass_span!(&mut chart, self.hf_bypass_hz, self.bypass_to_hz, y0, y1);
+        trace!(chart, &self.f_plot, &err, stroke_a(RAW_ERR, 2, 0.65), dash DOT.0, DOT.1);
+        trace!(chart, &self.f_plot, &self.autoeq, stroke_a(AUTOEQ_AMBER, 4, 0.95), dash DASH.0, DASH.1);
+        trace!(
             chart,
-            Some(&self.autoeq_gain_label),
-            &self.f_plot,
-            &self.autoeq,
-            AUTOEQ_AMBER,
-            4
-        );
-        let _ = trace!(
-            chart,
-            Some(&self.wav_gain_label),
             &self.f_plot,
             &self.wav_eq,
-            WAV_GREEN,
-            5
+            stroke_a(WAV_GREEN, 5, 0.98)
         );
-        legend!(&mut chart, SeriesLabelPosition::LowerLeft)?;
-        annotations!(&mut chart, self)
+
+        annotations!(&mut chart, self, plot_rect(band));
+
+        let items = [
+            LegendItem {
+                text: &self.raw_err_label,
+                swatch: Swatch::Line {
+                    color: RAW_ERR,
+                    width: 2,
+                    dash: Some(DOT),
+                },
+            },
+            LegendItem {
+                text: &self.autoeq_gain_label,
+                swatch: Swatch::Line {
+                    color: AUTOEQ_AMBER,
+                    width: 4,
+                    dash: Some(DASH),
+                },
+            },
+            LegendItem {
+                text: &self.wav_gain_label,
+                swatch: Swatch::Line {
+                    color: WAV_GREEN,
+                    width: 5,
+                    dash: None,
+                },
+            },
+        ];
+        draw_legend(band, &items, LegendPos::LowerLeft)
     }
 
     /// Panel 3: the minimum-phase phase angle of the same spectrum.
     fn draw_phase(&self, band: &BitmapArea<'_>) -> PlotResult {
         use plotters::prelude::*;
+        // `hypreq.py` leaves this axis to matplotlib's autoscaler, which pads the data
+        // range by five percent; the configured ticks label whatever falls inside it.
+        let (y0, y1) = autoscale(&[&self.wav_phase]);
+        draw_title(band, &self.phase_title, SMALL_TITLE_FONT)?;
+        draw_axes(
+            band,
+            &AxesSpec {
+                x_range: (F_MIN, F_MAX),
+                y_range: (y0, y1),
+                log_x: true,
+                xticks: &MAJOR_FREQS,
+                yticks: &PHASE_YTICKS,
+                y_desc: "Phase (deg)",
+                zero_line: true,
+            },
+        )?;
         let mut chart = ChartBuilder::on(band)
             .margin(0u32)
             .margin_top(TITLE_H)
             .x_label_area_size(X_LABEL_H)
             .y_label_area_size(Y_LABEL_W)
-            .caption(
-                self.phase_title.as_str(),
-                ("sans-serif", SMALL_TITLE_FONT)
-                    .into_font()
-                    .color(&TITLE.color()),
-            )
-            .build_cartesian_2d((20.0f64..20000.0f64).log_scale(), -90.0f64..90.0)
+            .build_cartesian_2d((F_MIN..F_MAX).log_scale(), y0..y1)
             .map_err(dv)?;
-        chart.plotting_area().fill(&PANEL_BG.color()).map_err(dv)?;
-        let _ = freq_mesh!(chart, "Phase (deg)", PHASE_YTICKS.to_vec());
-        let _ = trace!(
+        trace!(
             chart,
-            Some(&self.phase_label),
             &self.f_plot,
             &self.wav_phase,
-            PHASE,
-            4
+            stroke_a(PHASE, 4, 0.95)
         );
-        legend!(&mut chart, SeriesLabelPosition::UpperLeft)
+
+        let items = [LegendItem {
+            text: &self.phase_label,
+            swatch: Swatch::Line {
+                color: PHASE,
+                width: 4,
+                dash: None,
+            },
+        }];
+        draw_legend(band, &items, LegendPos::UpperLeft)
     }
 
-    /// Panel 4: minimum-phase against the linear-phase IR of the same magnitude.
+    /// Panel 4: the minimum-phase IR against the linear-phase IR of the same magnitude,
+    /// which pre-rings before the transient.
     fn draw_impulse(&self, band: &BitmapArea<'_>) -> PlotResult {
         use plotters::prelude::*;
+        draw_title(band, &self.ir_title, SMALL_TITLE_FONT)?;
+        draw_axes(
+            band,
+            &AxesSpec {
+                x_range: (IR_XMIN, IR_XMAX),
+                y_range: (IR_YMIN, IR_YMAX),
+                log_x: false,
+                xticks: &IR_XTICKS,
+                yticks: &IR_YTICKS,
+                y_desc: "Normalized Amplitude",
+                zero_line: false,
+            },
+        )?;
         let mut chart = ChartBuilder::on(band)
             .margin(0u32)
             .margin_top(TITLE_H)
             .x_label_area_size(X_LABEL_H)
             .y_label_area_size(Y_LABEL_W)
-            .caption(
-                self.ir_title.as_str(),
-                ("sans-serif", SMALL_TITLE_FONT)
-                    .into_font()
-                    .color(&TITLE.color()),
-            )
-            .build_cartesian_2d(-1.0f64..4.0f64, -0.45f64..1.08)
-            .map_err(dv)?;
-        chart.plotting_area().fill(&PANEL_BG.color()).map_err(dv)?;
-        chart
-            .configure_mesh()
-            .x_labels(6)
-            .y_labels(6)
-            .x_desc("Time Relative to Transient Peak (ms)")
-            .y_desc("Normalized Amplitude")
-            .axis_desc_style(("sans-serif", DESC_FONT).into_font().color(&TEXT.color()))
-            .label_style(("sans-serif", TICK_FONT).into_font().color(&TEXT.color()))
-            .axis_style(ShapeStyle::from(EDGE.color()).stroke_width(1))
-            .bold_line_style(ShapeStyle::from(GRID.color()).stroke_width(1))
-            .light_line_style(clear())
-            .draw()
+            .build_cartesian_2d(IR_XMIN..IR_XMAX, IR_YMIN..IR_YMAX)
             .map_err(dv)?;
 
-        // The 0 ms line is what the panel is about: anything the linear-phase trace has
-        // to its left is pre-ringing the minimum-phase design does not have.
-        guide!(chart, &[(-1.0, 0.0), (4.0, 0.0)], ZERO_LINE, 1);
-        guide!(chart, &[(0.0, -0.45), (0.0, 1.08)], ZERO_MS, 2);
-        let _ = trace!(
+        // The 0 ms guide, drawn under both traces like the reference's `axvline`.
+        let rect = plot_rect(band);
+        dotted_vline(
+            band,
+            x_pix(0.0, IR_XMIN, IR_XMAX, false, rect),
+            rect.1,
+            rect.3,
+            ZERO_MS,
+            2,
+        )?;
+
+        trace!(chart, &self.lin_t_ms, &self.lin_ir, stroke_a(AUTOEQ_RED, 3, 0.88), dash DASH.0, DASH.1);
+        trace!(
             chart,
-            Some(&self.lin_ir_label),
-            &self.lin_t_ms,
-            &self.lin_ir,
-            AUTOEQ_RED,
-            3
-        );
-        let _ = trace!(
-            chart,
-            Some(&self.mp_ir_label),
             &self.mp_t_ms,
             &self.mp_ir,
-            WAV_GREEN,
-            4
+            stroke_a(WAV_GREEN, 4, 0.96)
         );
-        legend!(&mut chart, SeriesLabelPosition::UpperRight)
+
+        let items = [
+            LegendItem {
+                text: &self.lin_ir_label,
+                swatch: Swatch::Line {
+                    color: AUTOEQ_RED,
+                    width: 3,
+                    dash: Some(DASH),
+                },
+            },
+            LegendItem {
+                text: &self.mp_ir_label,
+                swatch: Swatch::Line {
+                    color: WAV_GREEN,
+                    width: 4,
+                    dash: None,
+                },
+            },
+        ];
+        draw_legend(band, &items, LegendPos::UpperRight)
     }
 }
 
 /// Font sizes, in pixels, for a 1950 x 1725 figure.
 const TITLE_FONT: u32 = 26;
-/// Panel-2 caption.
-const GAIN_TITLE_FONT: u32 = 24;
 /// Bottom-row captions.
 const SMALL_TITLE_FONT: u32 = 20;
 /// Tick label font.
@@ -829,6 +1472,8 @@ const LEGEND_BG: Rgb = Rgb(0x16, 0x19, 0x1D);
 /// Drawing errors from `plotters` carry a backend-specific type, so every call site
 /// funnels them through these aliases instead of naming the type.
 type PlotResult = std::result::Result<(), crate::error::Error>;
+/// A drawing result carrying a value.
+type Plot<T> = std::result::Result<T, crate::error::Error>;
 /// The area type every panel is drawn into: a bitmap backend at the figure origin.
 type BitmapArea<'a> =
     plotters::drawing::DrawingArea<plotters::prelude::BitMapBackend<'a>, plotters::coord::Shift>;
@@ -841,6 +1486,137 @@ fn io_err<'a>(
     what: &'static str,
 ) -> impl Fn(crate::error::Error) -> crate::error::Error + 'a {
     move |e| Error::msg(format!("{what} in '{}': {e}", path.display()))
+}
+
+/// Widen a configured axis window until every given curve (with a margin in data units)
+/// and every listed point fits inside it.
+fn widen_to(range: (f64, f64), series: &[(&[f64], f64)]) -> (f64, f64) {
+    let mut out = range;
+    for &(values, margin) in series {
+        for &v in values.iter().filter(|v| v.is_finite()) {
+            out.0 = out.0.min(v - margin);
+            out.1 = out.1.max(v + margin);
+        }
+    }
+    out
+}
+
+/// matplotlib's autoscale: the data range padded by five percent, with a flat trace
+/// getting a unit window around itself.
+fn autoscale(series: &[&[f64]]) -> (f64, f64) {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for s in series {
+        for &v in s.iter().filter(|v| v.is_finite()) {
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    if !lo.is_finite() || !hi.is_finite() {
+        return (0.0, 1.0);
+    }
+    if (hi - lo) < 1e-9 {
+        return (lo - 0.5, hi + 0.5);
+    }
+    let pad = (hi - lo) * 0.05;
+    (lo - pad, hi + pad)
+}
+
+/// The values `hypreq.py` keeps in `fmt_ctx` for `str.format` on plot labels.
+pub struct FmtCtx<'a> {
+    notch_mode: &'a str,
+    pre_rt: f64,
+    unwin_rt: f64,
+    boost_rt: f64,
+    notch_db: f64,
+}
+
+/// Expand the reference's `str.format` fields, e.g. `{notch_mode}`, `{pre_rt:.2f}`,
+/// `{notch_db:+.2f}`. Doubled braces are literal braces in either direction, as in Python.
+/// An unknown field is left exactly as written, so a typo in the database stays visible in the
+/// figure instead of being papered over with a number.
+#[must_use]
+pub fn substitute(text: &str, ctx: &FmtCtx<'_>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '}' => {
+                out.push('}');
+                if chars.peek() == Some(&'}') {
+                    chars.next();
+                }
+            }
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                out.push('{');
+            }
+            '{' => {
+                let mut field = String::new();
+                let mut closed = false;
+                for ch in chars.by_ref() {
+                    if ch == '}' {
+                        closed = true;
+                        break;
+                    }
+                    field.push(ch);
+                }
+                match (closed, ctx.field(&field)) {
+                    (true, Some(value)) => out.push_str(&value),
+                    // Unknown field: reproduce the text as written, brace and all.
+                    _ => {
+                        out.push('{');
+                        out.push_str(&field);
+                        if closed {
+                            out.push('}');
+                        }
+                    }
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+impl FmtCtx<'_> {
+    /// The value behind one `name:spec` field, or `None` when the name is unknown.
+    fn field(&self, field: &str) -> Option<String> {
+        let (name, spec) = match field.split_once(':') {
+            Some((n, s)) => (n, Some(s)),
+            None => (field, None),
+        };
+        match name {
+            "notch_mode" => Some(self.notch_mode.to_string()),
+            "pre_rt" => Some(format_number(self.pre_rt, spec)),
+            "unwin_rt" => Some(format_number(self.unwin_rt, spec)),
+            "boost_rt" => Some(format_number(self.boost_rt, spec)),
+            "notch_db" => Some(format_number(self.notch_db, spec)),
+            _ => None,
+        }
+    }
+}
+
+/// Python's `format(v, spec)` for the fixed-point specs the database uses: an optional
+/// leading `+` and an optional `.Nf` precision, e.g. `+.2f`. Anything else falls back to
+/// the default float rendering, which is what an empty spec does in Python.
+#[must_use]
+pub fn format_number(v: f64, spec: Option<&str>) -> String {
+    let spec = spec.unwrap_or("");
+    let plus = spec.starts_with('+');
+    let digits = spec
+        .trim_start_matches('+')
+        .strip_suffix('f')
+        .and_then(|t| t.strip_prefix('.'))
+        .and_then(|d| d.parse::<usize>().ok());
+    let mut out = match digits {
+        Some(d) => format!("{v:.d$}"),
+        None => format!("{v}"),
+    };
+    if plus && !out.starts_with('-') {
+        out.insert(0, '+');
+    }
+    out
 }
 
 /// Tick label: whole numbers without a decimal point, halves with one.
@@ -868,16 +1644,6 @@ pub fn format_hz(f: f64) -> String {
     } else {
         format!("{f:.1}")
     }
-}
-
-/// `numpy.fft.fftshift` for an even-length real array: swap the two halves.
-#[must_use]
-pub fn fftshift(x: &[f64]) -> Vec<f64> {
-    let h = x.len() / 2;
-    let mut out = Vec::with_capacity(x.len());
-    out.extend_from_slice(&x[h..]);
-    out.extend_from_slice(&x[..h]);
-    out
 }
 
 /// The variable-bandwidth Gaussian blur standing in for AutoEq's smoothing.
@@ -1000,7 +1766,7 @@ pub fn build_auto_annotations(
     };
     let (f_bass, g_bass) = pick(35.0, 350.0, Pick::Abs);
     let (f_mid, g_mid) = pick(350.0, 3000.0, Pick::Abs);
-    let treb_hi = hf_bypass_hz.min(16000.0).max(4800.0);
+    let treb_hi = hf_bypass_hz.clamp(4800.0, 16000.0);
     let (f_treb, g_treb) = pick(4500.0, treb_hi, Pick::SignedMin);
 
     vec![
@@ -1196,12 +1962,6 @@ mod tests {
     }
 
     #[test]
-    fn fftshift_swaps_the_two_halves() {
-        let x: Vec<f64> = (0..8).map(|i| f64::from(i)).collect();
-        assert_eq!(fftshift(&x), vec![4.0, 5.0, 6.0, 7.0, 0.0, 1.0, 2.0, 3.0]);
-    }
-
-    #[test]
     fn autoeq_blur_stays_sharp_low_and_halves_high() {
         // A step in the requested correction must stay sharp at 1 kHz and both spread
         // and halve by 8 kHz — that asymmetry is the whole point of this helper.
@@ -1394,29 +2154,331 @@ mod tests {
         assert_eq!(d2.annotations.len(), 5);
     }
 
+    /// A scratch directory unique to this test: the suite runs tests in parallel, and no
+    /// test may touch the process's working directory.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("hypreq-plot-{}-{name}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// Decode a rendered figure into `(width, height, RGB8 pixels row-major)`.
+    fn decode_png(path: &std::path::Path) -> (u32, u32, Vec<u8>) {
+        let mut decoder = png::Decoder::new(std::fs::File::open(path).expect("open png"));
+        decoder.set_transformations(png::Transformations::normalize_to_color8());
+        let mut reader = decoder.read_info().expect("png header");
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).expect("png frame");
+        let px = info.width as usize * info.height as usize * 3;
+        buf.truncate(px);
+        (info.width, info.height, buf)
+    }
+
+    fn at(pixels: &[u8], w: u32, x: usize, y: usize) -> [u8; 3] {
+        let i = (y * w as usize + x) * 3;
+        [pixels[i], pixels[i + 1], pixels[i + 2]]
+    }
+
+    fn close(c: [u8; 3], want: Rgb, tol: i32) -> bool {
+        let plotters::prelude::RGBColor(r, g, b) = want.color();
+        let want = [r, g, b];
+        (0..3)
+            .map(|k| (i32::from(c[k]) - i32::from(want[k])).abs())
+            .sum::<i32>()
+            <= tol
+    }
+
+    /// A realistically sized input pair for the render tests: the figure reads the IR
+    /// spectrum at `n_fft_rt`, so a toy FFT length would hide geometry bugs.
+    fn full_inputs() -> (Vec<f64>, Vec<f64>) {
+        let n = 4096usize;
+        let ir: Vec<f64> = (0..n)
+            .map(|i| {
+                let t = i as f64 / 48.0;
+                (t * 0.7).sin() * (-t / 40.0).exp() * 0.4
+            })
+            .collect();
+        let mag: Vec<f64> = (0..n / 2 + 1)
+            .map(|k| 1.0 - 0.4 * (k as f64 / n as f64))
+            .collect();
+        (ir, mag)
+    }
+
+    fn full_inputs_ref<'a>(ir: &'a [f64], mag: &'a [f64]) -> PlotInputs<'a> {
+        PlotInputs {
+            ir_rt: ir,
+            mag_lin: mag,
+            n_fft_rt: 4096,
+            fs: 48000,
+            boost_rt: 4.25,
+            pre_rt: -6.5,
+            unwin_rt: -152.6,
+            active_ctrl: &[(20.0, 2.0), (1000.0, 0.0), (20000.0, 4.0)],
+            notch_mode: "safe",
+        }
+    }
+
     #[test]
     fn render_writes_a_png_of_the_expected_size() {
-        // Small enough to run in the suite; the geometry assertions above are what
-        // keep the full-size figure honest.
-        let dir = std::env::temp_dir().join(format!("hypreq-plot-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let ir: Vec<f64> = (0..64).map(|i| (i as f64 * 0.2).sin() * 0.5).collect();
-        let mag: Vec<f64> = (0..33).map(|_| 1.0).collect();
-        let d = PlotData::build(&model(), &inputs(&ir, &mag));
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&dir).unwrap();
-        let out = d.render("test");
-        let path = out.expect("render");
-        // The path is relative to the working directory render() ran in, so read it
-        // before that directory is restored.
+        let dir = scratch("size");
+        let (ir, mag) = full_inputs();
+        let d = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        let path = d.render_to(&dir.join("figure.png")).expect("render");
         let bytes = std::fs::read(&path).unwrap();
-        std::env::set_current_dir(&prev).unwrap();
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "not a PNG");
-        assert!(
-            bytes.len() > 20_000,
-            "suspiciously small figure: {}",
-            bytes.len()
-        );
+        // IHDR width and height are the two big-endian u32s at offsets 16 and 20.
+        let w = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+        let h = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+        assert_eq!((w, h), (FIG_W, FIG_H), "figure must be 1950x1725");
+        assert!(bytes.len() > 20_000, "suspiciously small figure");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rendered_figure_draws_ink_in_every_panel_at_the_expected_place() {
+        let dir = scratch("ink");
+        let (ir, mag) = full_inputs();
+        let d = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        let path = d.render_to(&dir.join("figure.png")).expect("render");
+        let (w, h, px) = decode_png(&path);
+        assert_eq!((w, h), (FIG_W, FIG_H));
+
+        // The figure margin outside every band stays the untouched figure background.
+        for (x, y) in [(4usize, 4usize), (30, 900), (1930, 1710), (30, 1710)] {
+            assert!(
+                close(at(&px, w, x, y), FIG_BG, 4),
+                "margin pixel ({x},{y}) was drawn over: {:?}",
+                at(&px, w, x, y)
+            );
+        }
+
+        for (idx, &(x0, y0, x1, y1)) in PlotData::panel_rects().iter().enumerate() {
+            let (x0, y0, x1, y1) = (x0 as usize, y0 as usize, x1 as usize, y1 as usize);
+            let rows = ((y0 + 2)..(y1 - 2)).step_by(2);
+            let n = ((y1 - y0 - 4) / 2).max(1);
+
+            // Just outside the left and right edges the figure background must show
+            // through: that is what pins the panel to these exact coordinates.
+            let left_gutter = rows
+                .clone()
+                .filter(|&y| close(at(&px, w, x0 - 4, y), FIG_BG, 6))
+                .count();
+            assert!(
+                left_gutter * 20 > n * 19,
+                "panel {} is not bounded on the left at x={x0}: {left_gutter}/{n}",
+                idx + 1
+            );
+            let right_gutter = rows
+                .clone()
+                .filter(|&y| close(at(&px, w, x1 + 3, y), FIG_BG, 6))
+                .count();
+            assert!(
+                right_gutter * 20 > n * 19,
+                "panel {} is not bounded on the right at x={x1}: {right_gutter}/{n}",
+                idx + 1
+            );
+
+            // Inside, the panel background plus its content must cover the area (nothing
+            // of the figure background may leak in), and real ink must be present.
+            let mut panelish = 0usize;
+            let mut ink = 0usize;
+            for y in rows.clone() {
+                for x in ((x0 + 2)..(x1 - 2)).step_by(2) {
+                    let p = at(&px, w, x, y);
+                    if close(p, FIG_BG, 6) {
+                        continue;
+                    }
+                    panelish += 1;
+                    if !close(p, PANEL_BG, 8) {
+                        ink += 1;
+                    }
+                }
+            }
+            let samples = (((y1 - y0 - 4) / 2) * ((x1 - x0 - 4) / 2)).max(1);
+            assert!(
+                panelish * 20 > samples * 19,
+                "panel {} leaks figure background: {panelish}/{samples}",
+                idx + 1
+            );
+            let fraction = ink as f64 / samples as f64;
+            assert!(
+                fraction > 0.02,
+                "panel {} has only {:.4} non-background pixels",
+                idx + 1,
+                fraction
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn arrow_head_keeps_its_pixel_size_across_the_log_axis() {
+        let rect = (0i32, 0i32, 1755i32, 440i32);
+        let xr = (20.0f64, 20000.0f64);
+        let yr = (-10.0f64, 10.0f64);
+        let len_px = 12.0;
+        let half_px = 5.0;
+        for tip_hz in [25.0f64, 1000.0, 15000.0] {
+            let pts = arrow_head_points(
+                (tip_hz * 3.0, 5.0),
+                (tip_hz, 0.0),
+                true,
+                xr,
+                yr,
+                rect,
+                len_px,
+                half_px,
+            );
+            let px = |p: (f64, f64)| {
+                (
+                    x_pix_f(p.0, xr.0, xr.1, true, rect),
+                    y_pix_f(p.1, yr.0, yr.1, rect),
+                )
+            };
+            let dist = |a: (f64, f64), b: (f64, f64)| {
+                ((px(a).0 - px(b).0).powi(2) + (px(a).1 - px(b).1).powi(2)).sqrt()
+            };
+            // The head is a triangle: tip, and two base corners either side of the shaft.
+            // Its length is tip to the base centre, its width the distance between corners.
+            let base_c = (
+                x_from_pix((px(pts[1]).0 + px(pts[2]).0) / 2.0, xr.0, xr.1, true, rect),
+                y_from_pix((px(pts[1]).1 + px(pts[2]).1) / 2.0, yr.0, yr.1, rect),
+            );
+            let length = dist((tip_hz, 0.0), base_c);
+            let width = dist(pts[1], pts[2]);
+            assert!(
+                (length - len_px).abs() < 0.05,
+                "head at {tip_hz} Hz is {length:.3} px long"
+            );
+            assert!(
+                (width - 2.0 * half_px).abs() < 0.05,
+                "head at {tip_hz} Hz is {width:.3} px wide"
+            );
+        }
+    }
+
+    #[test]
+    fn substitution_expands_every_reference_field() {
+        let ctx = FmtCtx {
+            notch_mode: "zero",
+            pre_rt: -6.5,
+            unwin_rt: -152.63,
+            boost_rt: 4.25,
+            notch_db: 1.4999,
+        };
+        assert_eq!(substitute("Mode {notch_mode}", &ctx), "Mode zero");
+        assert_eq!(substitute("Preamp {pre_rt:.2f}", &ctx), "Preamp -6.50");
+        assert_eq!(
+            substitute("({notch_db:+.2f}dB in '{notch_mode}' mode)", &ctx),
+            "(+1.50dB in 'zero' mode)"
+        );
+        assert_eq!(substitute("Floor {unwin_rt:.1f}", &ctx), "Floor -152.6");
+        assert_eq!(substitute("Peak {boost_rt:.2f}", &ctx), "Peak 4.25");
+        assert_eq!(
+            substitute("bare {notch_db} and {pre_rt}", &ctx),
+            "bare 1.4999 and -6.5"
+        );
+        // Python escapes a literal brace by doubling it, and an unknown field name raises;
+        // here it stays visible in the figure instead of being silently dropped.
+        assert_eq!(substitute("{{literal}}", &ctx), "{literal}");
+        assert_eq!(
+            substitute("unknown {nope:.2f} stays", &ctx),
+            "unknown {nope:.2f} stays"
+        );
+        assert_eq!(
+            substitute("unterminated {brace", &ctx),
+            "unterminated {brace"
+        );
+    }
+
+    #[test]
+    fn format_number_matches_pythons_format() {
+        assert_eq!(format_number(-6.5, None), "-6.5");
+        assert_eq!(
+            format_number(-6.5, Some(":.2f".trim_start_matches(':'))),
+            "-6.50"
+        );
+        assert_eq!(format_number(4.25, Some("+.2f")), "+4.25");
+        assert_eq!(format_number(-4.25, Some("+.2f")), "-4.25");
+        assert_eq!(format_number(-152.63, Some(".1f")), "-152.6");
+    }
+
+    #[test]
+    fn metadata_annotations_substitute_their_template_fields() {
+        let mut m = model();
+        m.plot_meta = serde_json::from_str(
+            r#"{"annotations":[{"text":"4. Concha Zero\n({notch_db:+.2f}dB in '{notch_mode}' mode)","xy":[3703.0,"notch_db"],"xytext":[1500.0,7.3],"color":"green"}]}"#,
+        )
+        .unwrap();
+        let (ir, mag) = inputs_64();
+        let d = PlotData::build(&m, &inputs(&ir, &mag));
+        assert_eq!(d.annotations.len(), 1);
+        assert!(
+            !d.annotations[0].text.contains('{'),
+            "unsubstituted template survived: {:?}",
+            d.annotations[0].text
+        );
+        assert!(
+            d.annotations[0].text.contains("in 'safe' mode"),
+            "{:?}",
+            d.annotations[0].text
+        );
+    }
+
+    #[test]
+    fn minimum_phase_time_axis_has_no_duplicated_zero() {
+        let (ir, mag) = inputs_64();
+        let d = PlotData::build(&model(), &inputs(&ir, &mag));
+        let lead = 48;
+        // The lead-in ends one sample before the transient, then the IR itself starts at
+        // 0 ms: 0 ms must appear exactly once or the trace doubles back on itself.
+        assert!(
+            (d.mp_t_ms[lead - 1] + 1e3 / 48000.0).abs() < 1e-12,
+            "lead-in ends at {} ms",
+            d.mp_t_ms[lead - 1]
+        );
+        assert_eq!(d.mp_t_ms[lead], 0.0);
+        assert_eq!(d.mp_t_ms.iter().filter(|t| **t == 0.0).count(), 1);
+        assert_eq!(d.mp_t_ms.len(), d.mp_ir.len());
+        assert!(d.mp_ir[..lead].iter().all(|&v| v == 0.0));
+    }
+
+    #[test]
+    fn linear_phase_ir_peaks_at_zero_ms_inside_the_window() {
+        // A flat magnitude inverts to a single sample at index 0, which the centring moves
+        // to the middle of the array, i.e. exactly 0 ms on the panel's time axis.
+        let (ir, _) = full_inputs();
+        let mag: Vec<f64> = vec![1.0; 2049];
+        let d = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        assert!(d.lin_t_ms.len() > 100, "window too small to test");
+        let peak = d
+            .lin_ir
+            .iter()
+            .enumerate()
+            .fold((0usize, 0.0f64), |acc, (i, &v)| {
+                if v.abs() > acc.1 {
+                    (i, v.abs())
+                } else {
+                    acc
+                }
+            })
+            .0;
+        // `linear_phase_ir` already centres the peak; a second shift would push it to an
+        // edge of the panel window instead of sitting it on the 0 ms guide.
+        assert_eq!(d.lin_t_ms[peak], 0.0, "linear-phase peak must sit at 0 ms");
+        assert!(
+            peak > 0 && peak + 1 < d.lin_ir.len(),
+            "peak pinned to a window edge"
+        );
+    }
+
+    /// The small fixture used by the data-level tests.
+    fn inputs_64() -> (Vec<f64>, Vec<f64>) {
+        let ir: Vec<f64> = (0..64).map(|i| (f64::from(i) * 0.2).sin() * 0.5).collect();
+        let mag: Vec<f64> = (0..33).map(|_| 1.0).collect();
+        (ir, mag)
     }
 }

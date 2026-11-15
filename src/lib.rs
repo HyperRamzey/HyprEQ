@@ -98,5 +98,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[doc(hidden)]
 #[must_use]
 pub fn oracle_dir() -> Option<String> {
-    std::env::var("HYPREQ_ORACLE").ok().filter(|s| !s.is_empty())
+    std::env::var("HYPREQ_ORACLE")
+        .ok()
+        .filter(|s| !s.is_empty())
 }

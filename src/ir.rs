@@ -265,10 +265,14 @@ fn db_floor(ir: &[f64], n: usize) -> f64 {
     20.0 * (peak + 1e-25).log10()
 }
 
-/// The linear-phase counterpart of a synthesis, for the plot's pre-ringing trace:
-/// `fftshift(irfft(mag_lin, n_fft))`.
+/// The linear-phase counterpart of a synthesis, for the plot's pre-ringing trace.
+///
+/// This is the *centred* transform, `fftshift(irfft(mag_lin, n_fft))`, matching
+/// `ir_lin_centered` in `hypreq.py`: the energy sits at `n_fft / 2`, so the plot's time
+/// axis (which is zero at that index) shows the pre-ringing on the left. Callers must not
+/// shift it again.
 #[must_use]
-pub fn linear_phase_ir(mag_lin: &[f64], n_fft: usize) -> Vec<f64> {
+pub fn linear_phase_ir_centered(mag_lin: &[f64], n_fft: usize) -> Vec<f64> {
     // NumPy accepts a real array here and reads it as a spectrum whose imaginary
     // part is zero everywhere — a linear phase. Handing `irfft` the same thing is
     // the whole translation; the magnitude itself is untouched.
@@ -635,5 +639,30 @@ mod tests {
         assert_eq!(row1.split(',').count(), 5);
         assert_eq!(p.file_name().unwrap(), "unitmodel_audit_data.csv");
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod linear_probe_tests {
+    use super::*;
+
+    #[test]
+    fn linear_phase_ir_is_centred() {
+        // A flat magnitude with zero phase is the identity filter: `irfft` puts a single
+        // sample at index 0, and the centring moves it to `n_fft / 2`. Off by one shift in
+        // either direction and this lands at 0 or at the far end instead.
+        let n = 4096usize;
+        let ir = linear_phase_ir_centered(&vec![1.0; n / 2 + 1], n);
+        let peak = ir.iter().enumerate().fold((0usize, 0.0f64), |a, (i, &v)| {
+            if v.abs() > a.1 {
+                (i, v.abs())
+            } else {
+                a
+            }
+        });
+        assert_eq!(peak.0, n / 2, "energy must sit at the centre sample");
+        assert!((peak.1 - 1.0).abs() < 1e-9, "peak magnitude {}", peak.1);
+        assert!(ir[..n / 2 - 1].iter().all(|&v| v.abs() < 1e-9));
+        assert!(ir[n / 2 + 1..].iter().all(|&v| v.abs() < 1e-9));
     }
 }

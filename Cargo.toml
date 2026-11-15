@@ -13,25 +13,39 @@ path = "src/main.rs"
 [dependencies]
 rustfft = "6.4"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` keeps `measurements.json` model order (and every object key) as written;
+# the default map sorts keys alphabetically, which would reorder `--list-models`, `--headphone
+# all` and the default model.
+serde_json = { version = "1", features = ["preserve_order"] }
 clap = { version = "4", features = ["derive"] }
 plotters = { version = "0.3", default-features = false, features = [
+    # PNG output, TrueType text, and the line/dashed series the figure draws. The y-axis
+    # unit label is rotated text, which the `ttf` (font-kit) resolver supplies through the
+    # system fontconfig, so a machine without fontconfig configured will fall back to
+    # plotters' built-in naive glyph rasteriser rather than fail to build.
     "bitmap_backend",
     "bitmap_encoder",
     "ttf",
     "line_series",
-    "area_series",
-    "full_palette",
 ] }
+
+[dev-dependencies]
+# Only used to read back the rendered verification figure in tests.
+png = "0.17"
 
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-# Numerical note: the true-peak interpolator, the
-# two-stage gain scheduler and the Hilbert-cepstral minimum-phase fold must stay
-# IEEE-754 exact. Rust already compiles `+ - *` with fp-contract=off (no FMA
-# contraction), which is what keeps the port bit-identical to the NumPy original
-# within FFT noise. Do NOT add `-C target-cpu=native` with fma,
-# `-C llvm-args=--fp-contract=fast`, or any fast-math here: `cargo test` fails
-# the IR-floor and dBTP-tolerance tests if FMA ever shows up in the DSP path.
+# Numerical note: the true-peak interpolator, the two-stage gain scheduler and the
+# Hilbert-cepstral minimum-phase fold must stay IEEE-754 exact. Rust compiles `+ - *` with
+# fp-contract=off by default (no FMA contraction), and that must not change: do NOT add
+# `-C target-cpu=native` with fma, `-C llvm-args=--fp-contract=fast`, or any fast-math flag
+# here, because a fused multiply-add rounds once instead of twice and the limiter and
+# true-peak results would drift off the reference.
+#
+# Separate from that: the convolver itself is only bit-identical to the reference within a
+# couple of ULP, because rustfft and NumPy's pocketfft factor the same transform
+# differently and therefore sum the same terms in a different order. That residual is
+# transform structure, not instruction selection, and it is what the f32 real-time
+# convolvers' 1-ULP parity tolerance absorbs.

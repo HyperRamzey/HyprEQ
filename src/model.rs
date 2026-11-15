@@ -297,7 +297,10 @@ pub fn derive_ctrl_pts_from_raw(
             } else if f <= hf_taper_start_hz {
                 e
             } else if f < hf_bypass_hz {
-                let w = 0.5 * (1.0 + (std::f64::consts::PI * (f / hf_taper_start_hz).log2() / log_ratio).cos());
+                let w = 0.5
+                    * (1.0
+                        + (std::f64::consts::PI * (f / hf_taper_start_hz).log2() / log_ratio)
+                            .cos());
                 e * w
             } else {
                 0.0
@@ -360,7 +363,9 @@ pub fn normalize_model_entry(
     targets: &BTreeMap<String, Vec<(f64, f64)>>,
     base_dir: &Path,
 ) -> Result<Model, ModelError> {
-    let defaults = built_in_metadata(key).and_then(|v| v.as_object().cloned()).unwrap_or_default();
+    let defaults = built_in_metadata(key)
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
 
     let target_name = cfg
         .get("target")
@@ -368,7 +373,9 @@ pub fn normalize_model_entry(
         .unwrap_or("harman_2018")
         .to_string();
     let Some(target_pts) = targets.get(&target_name) else {
-        return err(format!("Model '{key}' references unknown target '{target_name}'"));
+        return err(format!(
+            "Model '{key}' references unknown target '{target_name}'"
+        ));
     };
     let target_pts = sort_and_dedup_pairs(target_pts);
 
@@ -378,10 +385,10 @@ pub fn normalize_model_entry(
         arr.iter()
             .map(|row| {
                 row.as_array()
-                    .and_then(|r| {
-                        r.iter().map(as_f64).collect::<Option<Vec<f64>>>()
+                    .and_then(|r| r.iter().map(as_f64).collect::<Option<Vec<f64>>>())
+                    .ok_or_else(|| {
+                        ModelError(format!("Model '{key}': raw_pts row is not numeric: {row}"))
                     })
-                    .ok_or_else(|| ModelError(format!("Model '{key}': raw_pts row is not numeric: {row}")))
             })
             .collect::<Result<Vec<_>, ModelError>>()?
     } else if let Some(rel) = cfg.get("raw_csv").and_then(Value::as_str) {
@@ -393,11 +400,17 @@ pub fn normalize_model_entry(
     };
     let raw_pts = sort_and_dedup_points(&raw_pts);
     if raw_pts.is_empty() {
-        return err(format!("Model '{key}' resolved to zero raw measurement points."));
+        return err(format!(
+            "Model '{key}' resolved to zero raw measurement points."
+        ));
     }
 
-    let ctrl_inline = cfg.get("ctrl_pts").and_then(Value::as_array).filter(|a| !a.is_empty());
-    let has_manual_ctrl = (cfg.contains_key("ctrl_csv") && ctrl_inline.is_none()) || ctrl_inline.is_some();
+    let ctrl_inline = cfg
+        .get("ctrl_pts")
+        .and_then(Value::as_array)
+        .filter(|a| !a.is_empty());
+    let has_manual_ctrl =
+        (cfg.contains_key("ctrl_csv") && ctrl_inline.is_none()) || ctrl_inline.is_some();
     let should_norm_1k = cfg
         .get("normalize_1khz")
         .and_then(Value::as_bool)
@@ -416,21 +429,19 @@ pub fn normalize_model_entry(
         let pairs: Vec<(f64, f64)> = arr
             .iter()
             .map(|row| {
-                let r = row
-                    .as_array()
-                    .ok_or_else(|| ModelError(format!("Model '{key}': ctrl_pts row is not an array: {row}")))?;
-                let f = r
-                    .first()
-                    .and_then(as_f64)
-                    .ok_or_else(|| {
-                        ModelError(format!("Model '{key}': ctrl_pts row needs a numeric frequency"))
-                    })?;
-                let g = r
-                    .get(1)
-                    .and_then(as_f64)
-                    .ok_or_else(|| {
-                        ModelError(format!("Model '{key}': ctrl_pts row needs a numeric gain"))
-                    })?;
+                let r = row.as_array().ok_or_else(|| {
+                    ModelError(format!(
+                        "Model '{key}': ctrl_pts row is not an array: {row}"
+                    ))
+                })?;
+                let f = r.first().and_then(as_f64).ok_or_else(|| {
+                    ModelError(format!(
+                        "Model '{key}': ctrl_pts row needs a numeric frequency"
+                    ))
+                })?;
+                let g = r.get(1).and_then(as_f64).ok_or_else(|| {
+                    ModelError(format!("Model '{key}': ctrl_pts row needs a numeric gain"))
+                })?;
                 Ok((f, g))
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
@@ -466,7 +477,10 @@ pub fn normalize_model_entry(
     let notch_ref_hz = match cfg.get("notch_ref_hz") {
         Some(v) if !v.is_null() => as_f64(v),
         Some(_) => None,
-        None => defaults.get("notch_ref_hz").filter(|v| !v.is_null()).and_then(as_f64),
+        None => defaults
+            .get("notch_ref_hz")
+            .filter(|v| !v.is_null())
+            .and_then(as_f64),
     };
 
     let mut plot_meta = defaults
@@ -491,7 +505,10 @@ pub fn normalize_model_entry(
     let autoeq_offset_db = match cfg.get("autoeq_offset_db") {
         Some(v) if !v.is_null() => as_f64(v),
         Some(_) => None,
-        None => defaults.get("autoeq_offset_db").filter(|v| !v.is_null()).and_then(as_f64),
+        None => defaults
+            .get("autoeq_offset_db")
+            .filter(|v| !v.is_null())
+            .and_then(as_f64),
     };
 
     let name = str_opt(cfg, "name").unwrap_or_else(|| key.to_string());
@@ -568,7 +585,10 @@ impl Database {
         if self.get(requested).is_some() {
             return Some(requested);
         }
-        let target = MODEL_ALIASES.iter().find(|(a, _)| *a == requested).map(|&(_, t)| t)?;
+        let target = MODEL_ALIASES
+            .iter()
+            .find(|(a, _)| *a == requested)
+            .map(|&(_, t)| t)?;
         self.get(target).map(move |_| target)
     }
 }
@@ -659,7 +679,11 @@ pub fn load_measurement_database(
                 .as_object()
                 .ok_or_else(|| ModelError(format!("'{}' is not a JSON object", path.display())))?
                 .clone();
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
             let key = cfg
                 .get("key")
                 .and_then(Value::as_str)
@@ -675,7 +699,11 @@ pub fn load_measurement_database(
         }
 
         for path in csvs {
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
             if db.get(&stem).is_some() {
                 continue;
             }
@@ -731,13 +759,21 @@ pub fn upgrade_measurements_json(data_file: &Path) -> Result<PathBuf, ModelError
     if let Some(map) = raw_db.get_mut("models").and_then(Value::as_object_mut) {
         let keys: Vec<String> = map.keys().cloned().collect();
         for key in keys {
-            let Some(defs) = built_in_metadata(&key) else { continue };
-            let Some(cfg) = map.get_mut(&key).and_then(Value::as_object_mut) else { continue };
+            let Some(defs) = built_in_metadata(&key) else {
+                continue;
+            };
+            let Some(cfg) = map.get_mut(&key).and_then(Value::as_object_mut) else {
+                continue;
+            };
             let defs = defs.as_object().cloned().unwrap_or_default();
-            for field in ["short_title", "notch_ref_hz", "autoeq_offset_db", "gauss_apodize"] {
+            for field in [
+                "short_title",
+                "notch_ref_hz",
+                "autoeq_offset_db",
+                "gauss_apodize",
+            ] {
                 if let Some(v) = defs.get(field) {
-                    cfg.entry(field.to_string())
-                        .or_insert_with(|| v.clone());
+                    cfg.entry(field.to_string()).or_insert_with(|| v.clone());
                 }
             }
             let mut pm = defs
@@ -771,19 +807,38 @@ mod tests {
 
     #[test]
     fn sort_and_dedup_keeps_the_last_write_per_frequency() {
-        let pts = vec![pt(&[1000.0, 1.0]), pt(&[20.0, 3.0]), pt(&[1000.0, -2.0]), pt(&[0.0, 9.0])];
+        let pts = vec![
+            pt(&[1000.0, 1.0]),
+            pt(&[20.0, 3.0]),
+            pt(&[1000.0, -2.0]),
+            pt(&[0.0, 9.0]),
+        ];
         let got = sort_and_dedup_points(&pts);
         assert_eq!(got.len(), 2, "freq 0 is dropped, 1000 is deduped");
         assert_eq!(got[0], pt(&[20.0, 3.0]));
-        assert_eq!(got[1], pt(&[1000.0, -2.0]), "later row wins, like the Python dict");
+        assert_eq!(
+            got[1],
+            pt(&[1000.0, -2.0]),
+            "later row wins, like the Python dict"
+        );
     }
 
     #[test]
     fn normalize_1khz_shifts_every_column_together() {
-        let raw = vec![pt(&[500.0, 2.0, -1.0, 0.5]), pt(&[1000.0, 3.0, 0.0, 1.5]), pt(&[2000.0, 1.0, -2.0, -0.5])];
+        let raw = vec![
+            pt(&[500.0, 2.0, -1.0, 0.5]),
+            pt(&[1000.0, 3.0, 0.0, 1.5]),
+            pt(&[2000.0, 1.0, -2.0, -0.5]),
+        ];
         let n = normalize_raw_near_1khz(&raw, 1000.0);
-        assert!((n[1][3] - 0.0).abs() < 1e-12, "average column is 0 at 1 kHz");
-        assert!((n[1][1] - n[1][2] - 3.0).abs() < 1e-12, "L-R delta preserved verbatim");
+        assert!(
+            (n[1][3] - 0.0).abs() < 1e-12,
+            "average column is 0 at 1 kHz"
+        );
+        assert!(
+            (n[1][1] - n[1][2] - 3.0).abs() < 1e-12,
+            "L-R delta preserved verbatim"
+        );
         assert_eq!(n[0][0], 500.0, "frequency column untouched");
     }
 
@@ -809,7 +864,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("no knot near {f}"))
                 .1
         };
-        assert_eq!(at(8249.252765802705), 3.86, "still full error below the taper");
+        assert_eq!(
+            at(8249.252765802705),
+            3.86,
+            "still full error below the taper"
+        );
         assert_eq!(at(9847.765263413483), 0.15, "inside the log-cosine taper");
 
         // Everything at or past the bypass frequency is a flat wire.
@@ -822,7 +881,10 @@ mod tests {
 
         // The taper is monotonic through the window and every gain sits on the
         // 0.01 dB grid the audit is printed with.
-        let in_taper = ctrl.iter().filter(|(f, _)| *f > 8800.0 && *f < 10000.0).count();
+        let in_taper = ctrl
+            .iter()
+            .filter(|(f, _)| *f > 8800.0 && *f < 10000.0)
+            .count();
         assert!(in_taper >= 1, "taper window must contain a knot");
         assert!(
             ctrl.iter()
@@ -851,12 +913,27 @@ mod tests {
 
     #[test]
     fn subbass_discount_is_gaussian_in_log2_and_zero_at_65hz() {
-        let raw = vec![pt(&[20.0, 0.0]), pt(&[40.0, 0.0]), pt(&[64.0, 0.0]), pt(&[70.0, 0.0])];
+        let raw = vec![
+            pt(&[20.0, 0.0]),
+            pt(&[40.0, 0.0]),
+            pt(&[64.0, 0.0]),
+            pt(&[70.0, 0.0]),
+        ];
         let target = vec![(20.0, 3.0), (1000.0, 3.0)];
         let ctrl = derive_ctrl_pts_from_raw(&raw, &target, 0.0, 8800.0, 9500.0, 2.5);
-        assert!(ctrl[0].1 < ctrl[1].1 && ctrl[1].1 < ctrl[2].1, "monotone recovery toward the target");
-        assert!(ctrl[0].1 < 3.0 - 2.0, "20 Hz is discounted by most of 2.5 dB: {}", ctrl[0].1);
-        assert_eq!(ctrl[3].1, 3.0, "above 65 Hz the discount is not applied at all");
+        assert!(
+            ctrl[0].1 < ctrl[1].1 && ctrl[1].1 < ctrl[2].1,
+            "monotone recovery toward the target"
+        );
+        assert!(
+            ctrl[0].1 < 3.0 - 2.0,
+            "20 Hz is discounted by most of 2.5 dB: {}",
+            ctrl[0].1
+        );
+        assert_eq!(
+            ctrl[3].1, 3.0,
+            "above 65 Hz the discount is not applied at all"
+        );
     }
 
     #[test]
@@ -917,12 +994,24 @@ mod tests {
     #[test]
     fn built_in_metadata_covers_the_shipped_models() {
         for k in ["jbl770nc", "dt770_80", "ft1pro"] {
-            let m = built_in_metadata(k).unwrap_or_else(|| panic!("missing built-in metadata for {k}"));
-            let pm = m.get("plot_meta").and_then(Value::as_object).expect("plot_meta");
+            let m =
+                built_in_metadata(k).unwrap_or_else(|| panic!("missing built-in metadata for {k}"));
+            let pm = m
+                .get("plot_meta")
+                .and_then(Value::as_object)
+                .expect("plot_meta");
             assert!(pm.contains_key("title_template"), "{k}");
-            assert!(pm.get("annotations").and_then(Value::as_array).map_or(false, |a| !a.is_empty()), "{k} annotations");
+            assert!(
+                pm.get("annotations")
+                    .and_then(Value::as_array)
+                    .map_or(false, |a| !a.is_empty()),
+                "{k} annotations"
+            );
         }
-        assert!(built_in_metadata("hd600").is_none(), "custom models have no built-in metadata");
+        assert!(
+            built_in_metadata("hd600").is_none(),
+            "custom models have no built-in metadata"
+        );
         // The dt770 concha callout anchors on the notch knot as a *string* token.
         let dt = built_in_metadata("dt770_80").unwrap();
         assert_eq!(dt.get("notch_ref_hz").and_then(as_f64), Some(3703.0));

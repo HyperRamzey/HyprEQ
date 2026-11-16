@@ -95,14 +95,26 @@ filter that "fixes" it puts a matching spike into the headphone and does nothing
 negotiates the demand down where it does not:
 
 ```text
-=== Regularization (knee 3.76 dB of deviation, shrunk the shipped knots toward a bypass) ===
-  Knots moved     : 36 of 128 (largest -4.07 dB @ 3703 Hz)
-  Extreme shifted : +4.26 dB -> +0.19 dB at that knot
+================================================================================
+MODEL: Beyerdynamic DT 770 Pro (80 Ω) | Notch: safe
+================================================================================
+=== Regularization (knee 4.27 dB of deviation, shrunk the shipped knots toward a bypass) ===
+  Knots moved     : 33 of 128 (largest -4.16 dB @ 3703 Hz)
+  Extreme shifted : +4.26 dB -> +0.10 dB at that knot
 ```
 
-On the DT 770 Pro that knee lands on the 3.7 kHz and 8–17 kHz deviations — the narrow HF notches
-— and leaves the bass and mid-band corrections alone. `auto` reads the knee from the curve's own
-top-decile deviation with a 3 dB floor; a number sets the knee directly, in dB of deviation.
+That knot is the case the flag exists for: the measurement sits 4.87 dB *below* unity at 3703 Hz,
+the published curve asks `+4.26 dB` to fill the hole, and the load walks it back to almost
+nothing. On the DT 770 Pro the knee lands on the 3.7 kHz and 8–17 kHz deviations — the narrow HF
+notches — and leaves the bass and mid-band corrections alone; the largest change to a *cut* on
+any shipped model at `auto` is 0.78 dB. `auto` reads the knee from the curve's own top-decile
+deviation with a 3 dB floor; a number sets the knee directly, in dB of deviation.
+
+Two things it does not do. It does not depend on how the measurement was saved: the load is
+weighed against `|S|²`, so the curve is referred to its own level first, and a capture written in
+dB SPL regularizes the same as the same curve in dBFS. And it does not lift the notch ceiling:
+`--notch-mode safe` still applies afterwards, because `safe_cap_db` says what this model allows in
+its concha-null band whatever the measurement looks like.
 
 It is **not the default**, and `off` writes the curve the reference program writes, byte for byte.
 The reason is the honest one: the regularizer decides which parts of a published correction are

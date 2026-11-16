@@ -245,10 +245,62 @@ byte for byte. What it does is arithmetic, so the rules are numbers:
   null and one with a 20 dB null.
 - The closed form is `G = (S*D + βA) / (|S|² + β)` with `A = 1`, which penalises the deviation
   from an all-pass reference. `β → 0` reproduces `target − raw` exactly; `β → ∞` gives 0 dB, a
-  bypass. The better-known published form (`S*D / (S*S + β|ε|²)`, Norcross et al. 2006, and what
-  `pyfar.dsp.RegularizedSpectrumInversion` ships) penalises `‖G‖²` instead and sends the same
-  band to silence — at `β = 10¹²` and a 20 dB null, `-230 dB` where `0 dB` was needed. Asserted
-  in `infinite_load_bypasses_and_zero_load_is_todays_curve` so the two cannot be swapped quietly.
+  bypass. The better-known published form (`S*D / (S*S + β|ε|²)`, Norcross et al. 2006 — what
+  AKtools' `AKffdInverseFilter.m` and `pyfar`'s `RegularizedSpectrumInversion` both ship) penalises
+  the filter's magnitude instead and sends the same band to silence — at `β = 10¹²` and a 20 dB
+  null, `-230 dB` where `0 dB` was needed. Asserted in
+  `infinite_load_bypasses_and_zero_load_is_todays_curve` so the two cannot be swapped quietly.
+  **Substituting the unity reference for zero is HyprEQ's, not the literature's**: no source
+  reviewed penalises deviation from an all-pass, and the sentence must not be written as if one
+  did.
+- `S` is the measurement **referred to its own level** (`fit::reference_db`, the median of the
+  curve). `β` is weighed against `|S|²`, so an absolute offset `C` on the curve is arithmetically
+  the same as dividing `β` by `10^(C/10)` and moves the knee by `C/κ`: a capture saved in dB SPL
+  (+94 dB, `κ = 8`) is an 11 dB knee change, and `--regularize` would have done nothing at all on
+  it while doing everything on the same curve written in dBFS. The **median** and not the value at
+  1 kHz because a reference read at one frequency is only a reference where nothing is happening,
+  and the test fixture that caught that has a 12 dB null at 1 kHz. Pinned by
+  `a_curve_saved_in_absolute_units_carries_the_same_policy` and
+  `hand_tuned_knots_are_shrunk_the_same_whatever_units_the_measurement_came_in`.
+- The shrink is a weighted mean of the curve's gain and a bypass in **linear amplitude**, so it is
+  trapped between them: it can soften a correction, never deepen one, and it changes no sign.
+  Pinned across a sweep in `the_shrink_lands_between_the_curve_and_bypass_and_never_past_either`,
+  which also pins the DT 770's worst knot at `+0.18 dB` — an amplitude weighting (`|S|` where the
+  form wants `|S|²`) gives `+0.30`, and dropping the `|S|²` weight gives `+0.50`.
+- The window mean is the **trapezoid integral of the curve over the window**, each knot weighted by
+  its own slice of the log axis (halfway to its neighbours, half a spacing at the two ends). The
+  unweighted mean of the samples whose centres fell inside is that integral only on a log-uniform
+  axis, and hand-placed knots are not: on the axis in
+  `uneven_knot_spacing_is_weighted_by_the_axis_it_covers` the window is 69 % inside one knot's cell
+  and 31 % inside its neighbour's, so the curve there is **8.21 dB** where counting two samples
+  says 6.00. What weighting cannot do is reach a knot further away than the window:
+  `a_window_narrower_than_a_knot_spacing_has_nothing_to_average` pins that, because a curve that
+  sparse has to be resampled before it is smoothed and nothing here does that.
+- The prefix sums behind the window are **compensated** (`accum::prefix_sums`, the same Neumaier
+  recurrence as the energy sums). A plain `prefix[i+1] = prefix[i] + x[i]` inherits every bit the
+  earlier additions dropped, so one absurd sample makes a window of ordinary ones total exactly
+  zero: measured, a curve of 1 dB reads a mean of **0.00 dB** at every frequency above a 1e16
+  outlier. Compensation recovers the terms; the residual error is then one ulp of the prefix
+  (0.0039 there, about 0.008 dB of mean), which is the tolerance
+  `a_window_far_from_an_outlier_still_averages_what_it_covers` allows.
+- A non-finite value reaches **the windows that contain it and no others**, and a non-finite
+  frequency leaves the log axis instead of sitting on it. Both used to be global: the poisoned
+  prefix made every later window `NaN`, and a `NaN` frequency stalls both edge cursors for good,
+  because `NaN < lo` and `NaN <= hi` are both false. The documented policy did not change — a
+  broken curve still reads broken where the break is.
+- The fixture shaping (HF taper, sub-65 Hz leak discount) is applied to the correction **before**
+  the load, not after it. After the load, the leak discount subtracts itself from a band the load
+  already took to 0 dB and delivers a fabricated sub-bass cut: `−6 dB at 20 Hz` on a curve whose
+  deviation said "change nothing". So a fully bypassed derivation is 0 dB everywhere,
+  `a_fully_bypassed_derivation_is_a_flat_wire_below_65_hz_too`, and with no load anywhere the
+  regularized derivation is the plain one to the last bit,
+  `an_infinite_knee_reproduces_the_plain_derivation`.
+- In the CLI the notch ceiling runs **after** the regularizer, and both run. `β(f)` knows what one
+  measurement supports; `safe_cap_db` knows what this model's metadata allows in the band where a
+  coupler resonance lives, and neither answers the other's question.
+  `the_notch_cap_still_binds_on_a_regularized_curve` pins the order: at a knee that trusts
+  everything the cap is what stops a +12 dB knot, and at a knee that shrinks it to about +6 dB the
+  curve still lands *at* the ceiling (0.45 dB is what cap-first produces).
 - A hand-tuned curve is regularized with the same form, taking its implied target to be
   `D = S·G`, which makes it `G_reg = (|S|²G + β) / (|S|² + β)`. That is algebraically the same
   expression, and `shrinking_a_plain_inversion_is_the_same_as_inverting_the_target` asserts the
@@ -264,7 +316,8 @@ byte for byte. What it does is arithmetic, so the rules are numbers:
   a central statistic reads ~0 on every curve (measured MAD: 0.00 on a flat curve *and* on one
   with a 12 dB notch), and a lone notch must not raise the knee and negotiate its way out of
   being bypassed.
-- The deviation is smoothed **once** (half-octave residual, then 1/6-octave on its magnitude).
+- The deviation is smoothed **once** (half-octave residual, then 1/6-octave on its magnitude,
+  both by the weighted integral above).
   Smoothing it a second time when looking it up at a knot frequency erases the narrow features
   it exists to find — measured: a 10 dB coupler notch's peak went from 3.5 dB to 1.8 dB and
   stopped being bypassed. `regularized_curve` interpolates the deviation, it does not re-filter

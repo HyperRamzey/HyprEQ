@@ -24,7 +24,7 @@ Those are different claims, and the difference is the whole content of this sect
 | **True-peak** limiting, not sample-peak: interpolating detector, two-stage slow/transient gain, lookahead and release accounting, per-channel and group meters | Post-EQ clipping is the most common way "correcting" a headphone makes it worse, and sample-peak meters do not see inter-sample overs |
 | Every run writes an **audit CSV** (raw, target, raw error, applied EQ per control knot) and a 4-panel verification figure, and both are checked against a reference implementation | The curve can be audited after the fact, which is the difference between a tool and a preset |
 | Reproducible numerical contract: NumPy-compatible FFT/PCHIP/dither semantics, TPDF dither with a fixed stream, ties-to-even rounding, and a parity harness that diffs artefacts against the reference | The port is testable rather than plausible |
-| The engine is small and legible: `model → pchip → ir → convolve → limiter → plot`, with ~190 unit tests | A base you can read is a base you can extend |
+| The engine is small and legible: `model → pchip → ir → convolve → limiter → plot`, with 236 library tests, 12 CLI tests and 3 that run the built binary | A base you can read is a base you can extend |
 
 ### What caps it — the honest list
 
@@ -153,8 +153,12 @@ likely way this tool produces a bad filter.
 > — objective and subjective evaluation of magnitude and phase equalization of the HETF;
 > phase linearity was found to matter for the decay speed of the corresponding transient.
 >
-> Further: *Audibility of Group-Delay Equalization* (Aalto, 2021), on when group-delay
-> correction is and is not audible.
+> Further: Juho Liski, Aki Mäkivirta & Vesa Välimäki, *Audibility of Group-Delay
+> Equalization*, **IEEE/ACM Transactions on Audio, Speech and Language Processing, vol. 29,
+> pp. 2189–2201 (2021)**, art. [`9450008`](https://doi.org/10.1109/TASLP.2021.3094413)
+> — a peer-reviewed journal article (not a thesis), which is where the thresholds quoted in
+> PR 5 come from: about −0.56 ms of negative and +0.64 ms of positive group delay at threshold
+> for a pink-noise impulse.
 
 Minimum-phase is the sane default for headphone correction: it puts no pre-ringing in
 front of a transient and matches how loudspeaker crossovers already behave. But it is a
@@ -195,18 +199,27 @@ a bypass was wanted, and it does it more visibly the larger λ gets. Any regular
 added here has to be looked at for this: an HF region that droops as λ rises is showing
 the penalty, not the headphone.
 
-The published routines regularize the *deviation from the all-pass reference* instead, or
-equivalently load the diagonal with a frequency-dependent weight so that a band is only
-flattened where it has earned it:
+What the published routines actually compute is a regularized least-squares inversion whose
+penalty is on the **filter's own magnitude**, referred to a regularization curve `ε(f)`:
 
 ```text
-g = (HᴴH + diag(β))⁻¹ Hᴴ d ,     β(f) ≥ 0
+G(f) = H*(f)·d(f) / (H*(f)H(f) + β·|ε(f)|²)          β ≥ 0
+
+g  = (HᴴH + diag(β))⁻¹ (Hᴴ d + diag(β)·a)            the general weighted form
 ```
 
-with `β` derived from the response itself — §3.1's residual between the raw curve and its
-octave-smoothed version is exactly such a source — so a smooth band gets a small `β`
-(correction proceeds) and a wild band gets a large one (correction falls back to `d`,
-which is unity). Two properties follow, and both are testable rather than aspirational:
+The first line is what AKtools and pyfar ship (§3.6's prior-art note), and it cites Norcross
+2006; the second is the same weighted least-squares problem with the penalty taken about a
+**reference `a`** instead of about zero. The first line has a consequence this project will not
+ship: as `β·|ε|² → ∞` the filter goes to zero, so a band the measurement discredits is not
+left alone, it is *silenced*. Putting the reference at unity — `a = 1`, no correction — is what
+makes `β → ∞` mean "give up on this band" rather than "mute this band", and **that substitution
+is HyprEQ's, not the literature's**: no source reviewed here penalises deviation from an
+all-pass reference. Everything else is straight from the sources: `β` is derived from the
+response itself (§3.1's residual between the raw curve and its octave-smoothed version is
+exactly such a source), so a smooth band gets a small `β` (correction proceeds) and a wild band
+gets a large one (correction falls back to the reference). Two properties follow, and both are
+testable rather than aspirational:
 
 * **the weight is referred to the unity level, not to `max|H|`.** A `λ` scaled by the peak
   of the response means one thing on a set with a 6 dB null and another thing on a set with
@@ -215,17 +228,28 @@ which is unity). Two properties follow, and both are testable rather than aspira
 * **`β(f) → ∞` gives `|G(f)| → 1`, not `0`.** One assertion, and it is what stops the naive
   form from coming back in a later refactor.
 
-Prior art worth reading before writing it: the same construction ships as
-`AKregulatedInversion` in **AKtools** (TU Berlin Audio Techniques; MATLAB), and the
-3GPP VR characterisation in **TR 26.818 §8.3.8** used it to build 16 384-tap compensation
-filters as regularized least-squares inversions with **1/6-octave-smoothed inverted copies
-of the measured responses as the regularization curves** — an industry document choosing the
-smoothed-inverse formulation over the raw one, which is the same argument §3.1 makes from
-perception. In Python it exists as `pyfar.dsp.regularized_spectrum_inversion` (pyfar 0.8.1,
-MIT). Neither is a dependency here: AKtools ships its licence as a PDF bundled with the
-toolbox, so it is maths to re-derive rather than code to link, and pyfar is a numerics
-package this crate has no reason to pull in for one equation. §5 states the rule; PR 1
-implements the maths in `f64` against this document.
+Prior art, read at the source rather than from a summary:
+
+* **AKtools** (TU Berlin Audio Techniques, MATLAB): `AKregulatedInversion.m` calls
+  `AKffdInverseFilter.m`, which computes `G = conj(C)·A / (|C|² + β|ε|²)` and names
+  *Norcross 2006* in its own header. Licence is the **EUPL 1.1 or later** (TU Berlin's page and
+  every source header), not GPL.
+* **3GPP TR 26.818 §8.3.8** used that same `AKregulatedInversion` to build **16 384-sample**
+  compensation FIRs by "regularized least mean squares inversion", with **1/6-octave-smoothed
+  inverted copies of the measured responses as the regularization curves and β = 0.2** — an
+  industry document choosing the smoothed-inverse formulation over the raw one, which is §3.1's
+  argument made from a different direction. (The document then smooths and time-windows the
+  filters to 256 samples; that later step is not the FIR length.)
+* **pyfar** (MIT) exports `RegularizedSpectrumInversion` and the older
+  `regularized_spectrum_inversion`, publishing `S⁻¹(f) = S*(f)·D(f) / (S*(f)S(f) + β|ε(f)|²)`;
+  the function carries a `PyfarDeprecationWarning` saying it goes away **in pyfar 0.10.0** in
+  favour of the class, and cites Norcross 2006 (the function additionally cites Kirkeby &
+  Nelson).
+
+None of them is a dependency. AKtools is EUPL and MATLAB, so it is maths to re-derive rather
+than code to link into a tree that ships under MIT; pyfar is a numerics package this crate has
+no reason to pull in for one equation. What we took from each is the equation and the citation,
+which is also the rule in §5.
 
 ### 3.7 Robust statistics, and a smoothing loop that costs `O(N)`
 
@@ -285,9 +309,39 @@ distinguishes a regularizer from a shrinker.
 **Shipped as:** `src/fit.rs` (pure `f64`) plus `--regularize off|auto|<λ>`, wired at both places
 a correction curve is formed — `model::derive_ctrl_pts_from_raw_regularized` for a model whose
 knots come from inverting a target, and `Model::regularize`'s knot path for a model that ships
-hand-tuned knots, which every model in this database does. Notch capping in
-`ir::apply_notch_mode` was **not** changed: the regularizer supersedes it rather than stacking on
-it, and `--notch-mode` keeps its own meaning.
+hand-tuned knots, which every model in this database does.
+
+`ir::apply_notch_mode` **still applies, after** the regularizer. That is the opposite of an early
+note in this document, which claimed the regularizer "supersedes" the cap; the code never said so
+and the claim was wrong on its merits. The two answer different questions: `β(f)` asks how well
+*this measurement* supports a band, and `safe_cap_db` says what this *model's metadata* allows in
+the band where a coupler resonance lives. A model can be measured beautifully and still not be
+allowed a +12 dB boost inside its notch range. So the pipeline is regularize, then cap, in that
+order — the ceiling is the last word — and
+`the_notch_cap_still_binds_on_a_regularized_curve` pins it: with a knee that trusts everything the
+cap is what stops a +12 dB knot; with a knee that shrinks it to about +6 dB the curve still comes
+back *at* the ceiling rather than below it, which is what cap-first would have produced.
+
+Three properties of the shipped form are worth stating because they are not the obvious
+implementation:
+
+* **The deviation smoother is an integral, not a count.** Each knot is weighted by its own slice
+  of the log-frequency axis (the trapezoid rule on a log axis: halfway to its neighbours, half a
+  spacing at the two ends). An unweighted mean of "the samples that landed in the window" is that
+  integral only on a log-uniform grid, and a hand-placed CSV axis is not: unevenly spaced knots
+  then carry weight by how many happen to sit nearby, worth 2.2 dB of phantom regularization on
+  the axis in `uneven_knot_spacing_is_weighted_by_the_axis_it_covers`.
+* **`|S|²` is taken from the curve referred to its own level** (`fit::reference_db`, the median).
+  `β` is compared against `|S|²`, so feeding in a curve saved in dB SPL divides the load by
+  `10^9.4` — the *same measurement*, written in different units, was a different policy. The
+  median, not the value at 1 kHz, because a reference read at one frequency is only a reference if
+  nothing is happening there, and a 12 dB coupler null at 1 kHz is exactly the thing these curves
+  contain.
+* **The fixture shaping is applied before the load, not after.** Below 65 Hz the derivation
+  discounts sub-bass leak; applied to an already-bypassed band, that discount subtracts itself
+  from zero and delivers a fabricated cut where the measurement said to change nothing. A fully
+  bypassed curve is 0 dB everywhere, `a_fully_bypassed_derivation_is_a_flat_wire_below_65_hz_too`
+  says, including under 65 Hz.
 
 The shape differs from the sketch in one place worth naming. `regularization_lambda(g)` and
 `notch_cap(lambda)` became a *frequency-dependent* `β(f)` plus a knee, because the §3.6 argument
@@ -298,23 +352,58 @@ untouched while bypassing a notch an octave away, which is the whole behaviour.
 - `infinite_load_bypasses_and_zero_load_is_todays_curve` is the §3.6 test: `β → ∞` gives 0 dB,
   `β = 0` gives `target − raw` to 1e-12, and the same band under the `‖G‖²` form is asserted to
   collapse to silence, so the two forms cannot be interchanged quietly.
-- `the_smoother_divides_by_the_samples_inside_the_window` compares every bin against a naive
-  recomputation on a random curve, edges included.
+- `the_smoother_is_the_log_domain_integral_of_the_window` compares every bin against the window's
+  trapezoid integral computed independently and slowly from the definition, and checks that a flat
+  curve stays flat at the two truncated ends; `uneven_knot_spacing_is_weighted_by_the_axis_it_covers`
+  pins the 8.21 dB that an axis with uneven knots actually says where counting samples says 6.00;
+  `one_bad_sample_reaches_the_windows_that_hold_it_and_no_others` and
+  `a_window_far_from_an_outlier_still_averages_what_it_covers` cover propagation and the
+  compensated prefix; `a_window_narrower_than_a_knot_spacing_has_nothing_to_average` states the
+  limit that weighting cannot fix.
 - `the_fit_measures_shape_not_level` (invariant to a 12 dB offset; a broad shelf does not read as
   a fit failure), `the_auto_knee_ignores_a_sparse_notch_and_follows_broad_texture` (a sparse 12 dB
   notch leaves the knee at the floor; ±9 dB broad texture lifts it to the measured 7.9 dB),
   `texture_is_left_alone_and_a_notch_is_walked_back` (measured knee shape),
   `a_narrow_notch_stops_being_corrected_and_its_neighbourhood_does_not` and
   `a_hand_tuned_curve_keeps_its_shelf_and_loses_its_notch_chase` end to end.
+- `a_curve_saved_in_absolute_units_carries_the_same_policy` and
+  `hand_tuned_knots_are_shrunk_the_same_whatever_units_the_measurement_came_in` re-save the same
+  measurement +94, −40 and +0.5 dB off and require the regularized curve to be the same curve;
+  `a_fully_bypassed_derivation_is_a_flat_wire_below_65_hz_too` and
+  `an_infinite_knee_reproduces_the_plain_derivation` pin the two ends of the load;
+  `the_shrink_lands_between_the_curve_and_bypass_and_never_past_either` sweeps the form and
+  asserts it can only ever soften a correction, pinned to the DT 770's worst knot.
 - `regularize_off_hands_back_the_models_own_curve` asserts `off` returns `model.ctrl_pts`
-  untouched and prints nothing, and that a knee far above every deviation is an exact no-op;
-  parity stays **98/98** with the flag present in the parser.
+  untouched and prints nothing, and that a knee far above every deviation is an exact no-op — and
+  that the no-op is *reported* as nothing moving rather than as a largest change of `+0.00 dB` at
+  a `0 Hz` knot that does not exist. Parity stays **98/98** with the flag present in the parser,
+  and `tests/cli_report.rs` runs the real binary to hold the report's section order.
 - Sabotage runs, each killing tests: swapping the all-pass reference for the `‖G‖²` penalty;
-  dividing the smoother's window by its nominal width instead of the samples inside it; pinning
-  `β` to a constant so the knee does nothing; re-smoothing the deviation at lookup.
-- End to end on a shipped model: `--regularize auto` on `dt770_80` estimates a 3.76 dB knee,
-  moves 36 of 128 knots, the largest `-4.07 dB @ 3703 Hz` — one of the two bands the real-curve
-  scan flagged, and `--regularize off` writes the same bytes as before the flag existed.
+  dividing the smoother's window by its nominal width instead of integrating it; counting samples
+  where the form wants log-domain widths; dropping the compensation from the prefix sums; letting
+  a non-finite value poison every later window; leaving a `NaN` frequency on the axis to stall the
+  cursors; putting amplitude where the form wants power, or dropping the `|S|²` weight; skipping
+  the reference level on either regularizing path; shaping after the shrink; printing the block
+  before the model banner; accepting `--notch-mode SAFE` the way the library tolerates it; and
+  reporting a worst knot when nothing moved.
+- End to end on a shipped model, measured after the level reference and the integral smoother
+  landed: `--regularize auto` on `dt770_80` estimates a **4.27 dB** knee, moves **33 of 128**
+  knots, the largest **−4.16 dB @ 3703 Hz** — the measurement there sits 4.87 dB *below* unity and
+  the shipped curve asks +4.26 dB to fill it, which is the notch-chase the flag exists to refuse.
+  The largest walk-back of a *cut* on any shipped model is 0.78 dB (JBL 770NC at 8481 Hz), and
+  FT1 Pro's is 0.40 dB. `--regularize off` writes the same bytes as before the flag existed.
+
+**The symmetry decision, stated.** The shrink is symmetric: a band the load discredits is moved
+toward 0 dB whether it is a boost or a cut. Nothing in the reviewed literature asks for anything
+else — Norcross, Kirkeby, pyfar's `RegularizedSpectrumInversion` and AKtools' `AKffdInverseFilter`
+are all symmetric about their reference, and the JAES paper estimates a single amount per response
+— so an asymmetric penalty would be a HyprEQ product decision, not a citation, and may not be
+described as one if it is ever added. The argument for adding it is real (the damage this flag
+manages — headroom, noise floor, true peak — is done by boosts, and a cut cannot do it), and the
+argument against is that a sharp cut is the same chase of measurement texture seen from the other
+side. The measurements decide it stays symmetric for now: at `auto`, boosts are walked back by up
+to 4.16 dB and cuts by at most 0.78 dB, so the asymmetry the literature does not require is
+already the shape the form produces.
 
 **What did not ship: the figure overlay.** The acceptance list asked for a panel drawing auto and
 off together. That item was substituted, not implemented, and the reason is scope on this turn,
@@ -459,9 +548,9 @@ inside the MIT licence this project ships under. Versions are the ones `Cargo.lo
 plumbing — decoding, encoding, transforms, text. The numerics this project is graded
 against stay in-tree. Where an algorithm in this roadmap has a published reference
 implementation, it is cited for its equations and not for its code: the regularized
-inversion work in AKtools is MATLAB under GPL, so it could not be linked or translated
-into a tree that ships under MIT even if a translation were worth the effort, and the
-MIT-licensed equivalent in pyfar is not a dependency here either. Anything the roadmap
+inversion work in AKtools is MATLAB under the **EUPL 1.1 or later** — a copyleft the MIT tree
+cannot absorb, so it could not be linked or translated even if a translation were worth the
+effort — and the MIT-licensed equivalent in pyfar is not a dependency here either. Anything the roadmap
 adopts is re-implemented in `f64` from the published maths, with the paper cited in the
 commit that adds it.
 

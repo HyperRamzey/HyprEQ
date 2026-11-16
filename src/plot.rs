@@ -12,11 +12,15 @@
 //! 4. **Impulse response** — minimum-phase against the linear-phase IR of the same
 //!    magnitude, so the pre-ringing that minimum-phase removes is visible.
 //!
+//! The axes are drawn by hand rather than through a `plotters` mesh: the reference fixes
+//! its own major and minor frequency ticks and its own y-tick values, and every polyline
+//! is clipped to its panel because `draw_series` does not clip.
+//!
 //! The curves are computed in [`PlotData::build`] from the same inputs the report
 //! printed; [`PlotData::render`] only draws. The split is deliberate: the numbers behind
-//! the figure are unit-testable (geometry, the AutoEq blur, the callout selection),
-//! while the PNG is checked by eye — `plotters` has no dash patterns, so line *style*
-//! differences of the reference figure become line *width* differences here.
+//! the figure are unit-testable (geometry, the AutoEq blur, the callout selection, the
+//! clipping), while the PNG is checked by a test that decodes it and measures the ink in
+//! each panel.
 
 use crate::error::{Error, Result};
 use crate::fft::{self, Complex64};
@@ -40,6 +44,12 @@ const TITLE_H: u32 = 34;
 const X_LABEL_H: u32 = 52;
 /// Pixels reserved left of a plot area for y ticks and the y label.
 const Y_LABEL_W: u32 = 62;
+/// Pixels kept free at a band's right edge.
+///
+/// A drawing area clips at its own last column, so a frame line or an edge tick drawn at
+/// `x == width` silently disappears. Reserving a few pixels puts the right frame and the
+/// 20 kHz / 4 ms ticks inside the clip rectangle instead of on its boundary.
+const RIGHT_PAD: u32 = 4;
 /// Height of the panel-1 plot area.
 const ROW1_H: u32 = 440;
 /// Height of the panel-2 plot area.
@@ -110,6 +120,8 @@ pub const AX1_YTICKS: [f64; 5] = [-10.0, -5.0, 0.0, 5.0, 10.0];
 pub const AX2_YTICKS: [f64; 9] = [-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0];
 /// Y ticks for the phase panel, fixed by the reference.
 pub const PHASE_YTICKS: [f64; 5] = [-90.0, -45.0, 0.0, 45.0, 90.0];
+/// The phase panel's y window (`ax3.set_ylim(-90, 90)`), wide enough for every tick above.
+pub const PHASE_YLIM: (f64, f64) = (-90.0, 90.0);
 
 /// One callout on panel 2: text, the point it points at, where the text sits.
 #[derive(Clone, Debug)]
@@ -189,8 +201,13 @@ pub struct PlotData {
     pub bypass_to_hz: f64,
     /// Panel 1 y limits.
     pub ax1_ylim: (f64, f64),
+    /// `true` when `plot_meta` pinned panel 1's window, which the reference then treats
+    /// as exact rather than as a floor.
+    pub ax1_ylim_fixed: bool,
     /// Panel 2 y limits.
     pub ax2_ylim: (f64, f64),
+    /// `true` when `plot_meta` pinned panel 2's window.
+    pub ax2_ylim_fixed: bool,
     /// Panel 1 y ticks (from `plot_meta.ax1_yticks`, or [`AX1_YTICKS`]).
     pub ax1_yticks: Vec<f64>,
     /// Panel 2 y ticks.
@@ -289,7 +306,7 @@ fn plot_rect(band: &BitmapArea<'_>) -> (i32, i32, i32, i32) {
     (
         Y_LABEL_W as i32,
         TITLE_H as i32,
-        w,
+        (w - RIGHT_PAD as i32).max(Y_LABEL_W as i32 + 1),
         (h - X_LABEL_H as i32).max(TITLE_H as i32 + 1),
     )
 }
@@ -486,7 +503,23 @@ struct AxesSpec<'a> {
     xticks: &'a [f64],
     yticks: &'a [f64],
     y_desc: &'a str,
+    /// The reference labels only the bottom row, so the upper panels pass `None`.
+    x_desc: Option<&'a str>,
     zero_line: bool,
+}
+
+/// Tick values inside the axis window, **endpoints included**: matplotlib draws the tick
+/// mark and its label for a value sitting exactly on a limit and only omits the grid
+/// line there, which is the difference between `20`/`20k` appearing and vanishing.
+fn ticks_in(ticks: &[f64], range: (f64, f64)) -> impl Iterator<Item = &f64> {
+    ticks
+        .iter()
+        .filter(move |v| **v >= range.0 && **v <= range.1)
+}
+
+/// Whether a tick earns a grid line, i.e. is strictly inside the window.
+fn grid_line_inside(v: f64, range: (f64, f64)) -> bool {
+    v > range.0 && v < range.1
 }
 
 /// Panel background, grid, fixed tick labels, axis frame and unit label.
@@ -504,6 +537,7 @@ fn draw_axes(band: &BitmapArea<'_>, config: &AxesSpec<'_>) -> PlotResult {
         xticks,
         yticks,
         y_desc,
+        x_desc,
         zero_line,
     } = config;
     let rect = plot_rect(band);
@@ -526,9 +560,11 @@ fn draw_axes(band: &BitmapArea<'_>, config: &AxesSpec<'_>) -> PlotResult {
             )?;
         }
     }
-    for &f in xticks.iter().filter(|f| **f > xr.0 && **f < xr.1) {
+    for &f in ticks_in(xticks, xr) {
         let x = x_pix(f, xr.0, xr.1, log_x, rect);
-        vline(band, x, rect.1, rect.3, GRID, 1)?;
+        if grid_line_inside(f, xr) {
+            vline(band, x, rect.1, rect.3, GRID, 1)?;
+        }
         vline(band, x, rect.3, rect.3 + 3, EDGE, 1)?;
         label(
             band,
@@ -546,9 +582,11 @@ fn draw_axes(band: &BitmapArea<'_>, config: &AxesSpec<'_>) -> PlotResult {
             },
         )?;
     }
-    for &t in yticks.iter().filter(|&&v| v > yr.0 && v < yr.1) {
+    for &t in ticks_in(yticks, yr) {
         let y = y_pix(t, yr.0, yr.1, rect);
-        hline(band, y, rect.0, rect.2, GRID, 1)?;
+        if grid_line_inside(t, yr) {
+            hline(band, y, rect.0, rect.2, GRID, 1)?;
+        }
         hline(band, y, rect.0 - 3, rect.0, EDGE, 1)?;
         label(
             band,
@@ -566,8 +604,8 @@ fn draw_axes(band: &BitmapArea<'_>, config: &AxesSpec<'_>) -> PlotResult {
             },
         )?;
     }
-    // Edge ticks and labels that sit exactly on the limits would collide with the frame,
-    // so the limits are labelled without a grid line, like matplotlib's behaviour.
+    // The loop above already labels the limits; only their grid line is skipped, which
+    // is exactly matplotlib's behaviour on a FixedLocator axis.
     if zero_line && 0.0 > yr.0 && 0.0 < yr.1 {
         hline(
             band,
@@ -601,6 +639,25 @@ fn draw_axes(band: &BitmapArea<'_>, config: &AxesSpec<'_>) -> PlotResult {
             rotate: true,
         },
     )?;
+
+    // The x unit, centred under the tick-label row (`set_xlabel` on the bottom row).
+    if let Some(text) = x_desc {
+        label(
+            band,
+            (rect.0 + rect.2) / 2,
+            rect.3 + i32::try_from(X_LABEL_H).unwrap_or(52) - 4,
+            &TextSpec {
+                text,
+                size: DESC_FONT,
+                color: TEXT,
+                anchor: Pos {
+                    h_pos: HPos::Center,
+                    v_pos: VPos::Bottom,
+                },
+                rotate: false,
+            },
+        )?;
+    }
     Ok(())
 }
 
@@ -764,37 +821,157 @@ fn draw_title(band: &BitmapArea<'_>, text: &str, size: u32) -> PlotResult {
     Ok(())
 }
 
-/// The shaded coupler-null bypass zone, drawn before any trace and clipped to the
-/// panel's own y range.
+/// The data window one panel draws into. Polylines are clipped to it, because
+/// `ChartContext::draw_series` is not: an unclipped trace runs across the margin and off
+/// the canvas.
+#[derive(Clone, Copy)]
+struct Window {
+    xr: (f64, f64),
+    yr: (f64, f64),
+    log_x: bool,
+}
+
+/// Clip the segment `a -> b` against the axis-aligned box `[lo, hi]` (Liang–Barsky),
+/// returning the visible sub-segment or `None` when the segment misses the box.
+fn liang_barsky(
+    a: (f64, f64),
+    b: (f64, f64),
+    lo: (f64, f64),
+    hi: (f64, f64),
+) -> Option<((f64, f64), (f64, f64))> {
+    let d = (b.0 - a.0, b.1 - a.1);
+    let mut t0 = 0.0f64;
+    let mut t1 = 1.0f64;
+    // (p, q) per slab edge: entering/exiting x, then entering/exiting y.
+    for (p, q) in [
+        (-d.0, a.0 - lo.0),
+        (d.0, hi.0 - a.0),
+        (-d.1, a.1 - lo.1),
+        (d.1, hi.1 - a.1),
+    ] {
+        if p == 0.0 {
+            // Parallel to this edge: visible only if already inside the slab.
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 {
+                    return None;
+                }
+                t0 = t0.max(r);
+            } else {
+                if r < t0 {
+                    return None;
+                }
+                t1 = t1.min(r);
+            }
+        }
+    }
+    Some((
+        (a.0 + t0 * d.0, a.1 + t0 * d.1),
+        (a.0 + t1 * d.0, a.1 + t1 * d.1),
+    ))
+}
+
+fn flush_run(cur: &mut Option<(Vec<f64>, Vec<f64>)>, runs: &mut Vec<(Vec<f64>, Vec<f64>)>) {
+    if let Some(run) = cur.take() {
+        if run.0.len() >= 2 {
+            runs.push(run);
+        }
+    }
+}
+
+/// Split a polyline into the runs that lie inside `w`, with the boundary crossings
+/// interpolated.
+///
+/// Clipping happens in the space the axis actually maps (`ln x` on a log-frequency panel),
+/// so a segment that is straight on screen stays straight and its endpoint lands exactly
+/// on the border rather than somewhere along an unclipped overshoot.
+fn clip_polyline(xs: &[f64], ys: &[f64], w: Window) -> Vec<(Vec<f64>, Vec<f64>)> {
+    let fwd = |x: f64| if w.log_x { x.ln() } else { x };
+    let inv = |u: f64| if w.log_x { u.exp() } else { u };
+    // A non-positive frequency has no log image, so it breaks the polyline instead of
+    // dragging -inf through the transform.
+    let usable = |x: f64, y: f64| x.is_finite() && y.is_finite() && (!w.log_x || x > 0.0);
+    let lo = (fwd(w.xr.0.max(f64::MIN_POSITIVE)), w.yr.0);
+    let hi = (fwd(w.xr.1), w.yr.1);
+    let mut runs = Vec::new();
+    let mut cur: Option<(Vec<f64>, Vec<f64>)> = None;
+    for i in 0..xs.len().saturating_sub(1) {
+        let (Some((&x0, &y0)), Some((&x1, &y1))) =
+            (xs.get(i).zip(ys.get(i)), xs.get(i + 1).zip(ys.get(i + 1)))
+        else {
+            flush_run(&mut cur, &mut runs);
+            continue;
+        };
+        if !usable(x0, y0) || !usable(x1, y1) {
+            flush_run(&mut cur, &mut runs);
+            continue;
+        }
+        match liang_barsky((fwd(x0), y0), (fwd(x1), y1), lo, hi) {
+            Some((a, b)) => {
+                // Snap the clipped endpoints back onto the window: the round trip through
+                // `ln`/`exp` and the `t` interpolation are otherwise a fraction of an ULP
+                // outside, and a point "inside" the panel would still be reported as a
+                // border breach.
+                let point = |p: (f64, f64)| {
+                    (
+                        inv(p.0.clamp(lo.0, hi.0)).clamp(w.xr.0, w.xr.1),
+                        p.1.clamp(w.yr.0, w.yr.1),
+                    )
+                };
+                let run = cur.get_or_insert_with(|| (Vec::new(), Vec::new()));
+                if run.0.is_empty() {
+                    let a = point(a);
+                    run.0.push(a.0);
+                    run.1.push(a.1);
+                }
+                let b = point(b);
+                run.0.push(b.0);
+                run.1.push(b.1);
+            }
+            None => flush_run(&mut cur, &mut runs),
+        }
+    }
+    flush_run(&mut cur, &mut runs);
+    runs
+}
+
+/// The shaded coupler-null bypass zone, drawn before any trace and clamped to the panel's
+/// own window, so a model whose bypass starts past the plot edge draws nothing instead of
+/// painting over the frame.
 macro_rules! bypass_span {
-    ($chart:expr, $from:expr, $to:expr, $y_lo:expr, $y_hi:expr) => {{
-        $chart
-            .draw_series(vec![plotters::element::Rectangle::new(
-                [($from, $y_lo), ($to, $y_hi)],
-                $crate::plot::fill($crate::plot::BYPASS, 0.35),
-            )])
-            .map_err($crate::plot::dv)?;
+    ($chart:expr, $from:expr, $to:expr, $win:expr) => {{
+        let w = $win;
+        let from = $from.max(w.xr.0);
+        let to = $to.min(w.xr.1);
+        if from < to {
+            $chart
+                .draw_series(vec![plotters::element::Rectangle::new(
+                    [(from, w.yr.0), (to, w.yr.1)],
+                    $crate::plot::fill($crate::plot::BYPASS, 0.35),
+                )])
+                .map_err($crate::plot::dv)?;
+        }
     }};
 }
 
-/// One polyline in data coordinates. Solid by default; `dash <len>, <gap>` draws the
-/// reference's `--` / `:` styles.
+/// One polyline in data coordinates, clipped to the panel window. Solid by default;
+/// `dash <len>, <gap>` draws the reference's `--` / `:` styles.
 macro_rules! trace {
-    ($chart:expr, $xs:expr, $ys:expr, $style:expr) => {{
-        let xs: &[f64] = $xs;
-        let ys: &[f64] = $ys;
-        let pts: Vec<(f64, f64)> = xs.iter().zip(ys).map(|(&x, &y)| (x, y)).collect();
-        if !pts.is_empty() {
+    ($chart:expr, $win:expr, $xs:expr, $ys:expr, $style:expr) => {{
+        for (tx, ty) in $crate::plot::clip_polyline($xs, $ys, $win) {
+            let pts: Vec<(f64, f64)> = tx.into_iter().zip(ty).collect();
             $chart
                 .draw_series(LineSeries::new(pts, $style))
                 .map_err($crate::plot::dv)?;
         }
     }};
-    ($chart:expr, $xs:expr, $ys:expr, $style:expr, dash $len:expr, $gap:expr) => {{
-        let xs: &[f64] = $xs;
-        let ys: &[f64] = $ys;
-        let pts: Vec<(f64, f64)> = xs.iter().zip(ys).map(|(&x, &y)| (x, y)).collect();
-        if !pts.is_empty() {
+    ($chart:expr, $win:expr, $xs:expr, $ys:expr, $style:expr, dash $len:expr, $gap:expr) => {{
+        for (tx, ty) in $crate::plot::clip_polyline($xs, $ys, $win) {
+            let pts: Vec<(f64, f64)> = tx.into_iter().zip(ty).collect();
             $chart
                 .draw_series(plotters::prelude::DashedLineSeries::new(
                     pts, $len, $gap, $style,
@@ -804,21 +981,55 @@ macro_rules! trace {
     }};
 }
 
-/// The panel-2 callouts: a shaft from the text block to the point on the curve, an open
+/// Where the lines of a callout block sit, and where its arrow leaves.
+///
+/// matplotlib anchors an `annotate` block at `xytext` with `va="baseline"`, so a multi-line
+/// block grows **upwards** from that y. Growing it downwards made a two-line callout clamp
+/// both rows onto the same line, left the secondary arrows (which have no text of their
+/// own) pointing at nothing, and started the shaft above the first row so it sliced
+/// through its own text.
+#[must_use]
+pub fn callout_layout(lines: usize, xytext_y: f64, xy_y: f64, dy: f64) -> (Vec<f64>, f64) {
+    // Baseline-to-centre of one row, in units of the line pitch.
+    let baseline = 0.4;
+    let n = lines as f64;
+    let centres = (0..lines)
+        .map(|i| xytext_y + (n - f64::from(i as u32) - 1.0 + baseline) * dy)
+        .collect();
+    let tail_y = if xy_y > xytext_y {
+        xytext_y + n * dy // top of the block
+    } else {
+        xytext_y // bottom of the block
+    };
+    (centres, tail_y)
+}
+
+/// The panel-2 callouts: a shaft from the text block to the point on the curve, a filled
 /// arrow head at the tip (the reference's `arrowstyle="->"`), and the text.
 ///
-/// The head is sized in *log* frequency, because the axis is logarithmic: a fixed number
-/// of hertz is a different number of pixels at 35 Hz and at 5 kHz, and a linear offset
-/// pushed the sub-100 Hz callouts off the left edge of the panel.
+/// The head is sized in *pixels* through [`arrow_head_points`], because the axis is
+/// logarithmic: a fixed number of hertz is a different number of pixels at 35 Hz and at
+/// 5 kHz, and a linear offset pushed the sub-100 Hz callouts off the left edge.
 macro_rules! annotations {
-    ($chart:expr, $self:expr, $rect:expr) => {{
+    ($chart:expr, $self:expr, $rect:expr, $win:expr) => {{
         use plotters::prelude::*;
-        let (y_lo, y_hi) = $self.ax2_ylim;
+        let w = $win;
+        let (y_lo, y_hi) = w.yr;
         let dy = (y_hi - y_lo) * 0.045;
         for a in &$self.annotations {
+            // A log axis cannot place a non-positive frequency at all.
+            if a.xy_x <= 0.0 || a.xytext.0 <= 0.0 || !a.xy_y.is_finite() {
+                continue;
+            }
             let color = if a.green { ARROW_GREEN } else { ARROW_CYAN };
-            // 0.8 % of a decade either way, so the head reads the same size everywhere.
-            let tail_y = (a.xytext.1 - dy * 0.4).clamp(y_lo + dy, y_hi - dy);
+            let lines: Vec<&str> = if a.text.is_empty() {
+                Vec::new()
+            } else {
+                a.text.split('\n').collect()
+            };
+            let (centres, block_tail) =
+                $crate::plot::callout_layout(lines.len(), a.xytext.1, a.xy_y, dy);
+            let tail_y = block_tail.clamp(y_lo, y_hi);
             $chart
                 .draw_series(vec![PathElement::new(
                     vec![(a.xytext.0, tail_y), (a.xy_x, a.xy_y)],
@@ -844,8 +1055,7 @@ macro_rules! annotations {
                 )])
                 .map_err($crate::plot::dv)?;
 
-            for (i, line) in a.text.split('\n').enumerate() {
-                let ty = (a.xytext.1 - dy * (i as f64 + 0.8)).clamp(y_lo + dy, y_hi - dy);
+            for (line, &ty) in lines.iter().zip(&centres) {
                 $chart
                     .draw_series(vec![Text::new(
                         line.to_string(),
@@ -1057,7 +1267,9 @@ impl PlotData {
             hf_bypass_hz: model.hf_bypass_hz,
             bypass_to_hz: 20000.0,
             ax1_ylim,
+            ax1_ylim_fixed: meta_pair(meta, "ax1_ylim").is_some(),
             ax2_ylim,
+            ax2_ylim_fixed: meta_pair(meta, "ax2_ylim").is_some(),
             ax1_yticks: meta_ticks(meta, "ax1_yticks", &AX1_YTICKS),
             ax2_yticks: meta_ticks(meta, "ax2_yticks", &AX2_YTICKS),
             annotations,
@@ -1080,7 +1292,7 @@ impl PlotData {
         let plot = |band_x: u32, band_y: u32, w: u32, h: u32| {
             let x0 = band_x as i32 + Y_LABEL_W as i32;
             let y0 = band_y as i32 + TITLE_H as i32;
-            (x0, y0, x0 + w as i32, y0 + h as i32)
+            (x0, y0, x0 + (w - RIGHT_PAD) as i32, y0 + h as i32)
         };
         // Each band is `Y_LABEL_W` wider than its plot area, so the second column's band
         // starts a full label-area plus panel past the first one.
@@ -1161,20 +1373,15 @@ impl PlotData {
         use plotters::prelude::*;
         let autoeq_resp = add(&self.raw_avg, &self.autoeq);
         let wav_resp = add(&self.raw_avg, &self.wav_eq);
-        // A metadata window is a floor, never a clip: the curves actually drawn widen it
-        // rather than run off the panel, and the 0 dBr line stays inside.
-        let (y0, y1) = widen_to(
-            self.ax1_ylim,
-            &[
-                (&self.raw_l, 1.0),
-                (&self.raw_r, 1.0),
-                (&self.raw_avg, 1.0),
-                (&self.harm_plot, 1.0),
-                (&autoeq_resp, 1.0),
-                (&wav_resp, 1.0),
-                (&[0.0][..], 0.0),
-            ],
-        );
+        // `hypreq.py:2415` uses a metadata window verbatim (`set_ylim(*meta["ax1_ylim"])`)
+        // and lets matplotlib clip the traces; only when the model omits one does it fall
+        // back to padding around the curves. Widening a configured window would defeat it.
+        let (y0, y1) = self.level_window();
+        let win = Window {
+            xr: (F_MIN, F_MAX),
+            yr: (y0, y1),
+            log_x: true,
+        };
         draw_title(band, &self.title, TITLE_FONT)?;
         draw_axes(
             band,
@@ -1185,49 +1392,120 @@ impl PlotData {
                 xticks: &MAJOR_FREQS,
                 yticks: &self.ax1_yticks,
                 y_desc: "Acoustic Level (dBr)",
+                x_desc: None,
                 zero_line: true,
             },
         )?;
         let mut chart = ChartBuilder::on(band)
             .margin(0u32)
             .margin_top(TITLE_H)
+            .margin_right(RIGHT_PAD)
             .x_label_area_size(X_LABEL_H)
             .y_label_area_size(Y_LABEL_W)
             .build_cartesian_2d((F_MIN..F_MAX).log_scale(), y0..y1)
             .map_err(dv)?;
 
-        bypass_span!(&mut chart, self.hf_bypass_hz, self.bypass_to_hz, y0, y1);
+        bypass_span!(&mut chart, self.hf_bypass_hz, self.bypass_to_hz, win);
         // The two raw channels sit under everything else, at the reference's alpha.
-        trace!(chart, &self.f_plot, &self.raw_l, stroke_a(RAW_LR, 2, 0.38), dash DOT.0, DOT.1);
-        trace!(chart, &self.f_plot, &self.raw_r, stroke_a(RAW_LR, 2, 0.38), dash DOT.0, DOT.1);
-        trace!(chart, &self.f_plot, &self.raw_avg, stroke_a(RAW, 3, 0.9), dash DASH.0, DASH.1);
+        trace!(chart, win, &self.f_plot, &self.raw_l, stroke_a(RAW_LR, 2, 0.38), dash DOT.0, DOT.1);
+        trace!(chart, win, &self.f_plot, &self.raw_r, stroke_a(RAW_LR, 2, 0.38), dash DOT.0, DOT.1);
+        trace!(chart, win, &self.f_plot, &self.raw_avg, stroke_a(RAW, 3, 0.9), dash DASH.0, DASH.1);
         trace!(
             chart,
+            win,
             &self.f_plot,
             &self.harm_plot,
             stroke_a(TARGET, 7, 0.88)
         );
         trace!(
             chart,
+            win,
             &self.f_plot,
             &autoeq_resp,
             stroke_a(AUTOEQ_RED, 3, 0.92)
         );
-        trace!(chart, &self.f_plot, &wav_resp, stroke_a(WAV_GREEN, 5, 0.98));
+        trace!(
+            chart,
+            win,
+            &self.f_plot,
+            &wav_resp,
+            stroke_a(WAV_GREEN, 5, 0.98)
+        );
 
-        let items = [
-            LegendItem {
-                text: &self.bypass_label,
-                swatch: Swatch::Patch(BYPASS),
-            },
-            LegendItem {
+        draw_legend(band, &self.level_legend(), LegendPos::LowerLeft)
+    }
+
+    /// Panel 1's y window.
+    ///
+    /// A window the model configured through `plot_meta.ax1_ylim` is used verbatim, the
+    /// way `hypreq.py:2415` hands it straight to `set_ylim`; only when the model omits one
+    /// is the fallback padded around the curves that are actually drawn. Widening a
+    /// configured window would defeat the model author's choice.
+    #[must_use]
+    pub fn level_window(&self) -> (f64, f64) {
+        if self.ax1_ylim_fixed {
+            return self.ax1_ylim;
+        }
+        let autoeq_resp = add(&self.raw_avg, &self.autoeq);
+        let wav_resp = add(&self.raw_avg, &self.wav_eq);
+        widen_to(
+            self.ax1_ylim,
+            &[
+                (&self.raw_l, 1.0),
+                (&self.raw_r, 1.0),
+                (&self.raw_avg, 1.0),
+                (&self.harm_plot, 1.0),
+                (&autoeq_resp, 1.0),
+                (&wav_resp, 1.0),
+                (&[0.0][..], 0.0),
+            ],
+        )
+    }
+
+    /// Panel 2's y window, with the same configured-or-computed rule as [`Self::level_window`].
+    #[must_use]
+    pub fn gain_window(&self) -> (f64, f64) {
+        if self.ax2_ylim_fixed {
+            return self.ax2_ylim;
+        }
+        let err: Vec<f64> = self
+            .harm_plot
+            .iter()
+            .zip(&self.raw_avg)
+            .map(|(&h, &r)| h - r)
+            .collect();
+        widen_to(
+            self.ax2_ylim,
+            &[
+                (&err, 1.0),
+                (&self.autoeq, 1.0),
+                (&self.wav_eq, 1.0),
+                (&[0.0][..], 0.0),
+            ],
+        )
+    }
+
+    /// Panel 1's legend, in the reference's order.
+    ///
+    /// The raw L/R entry only appears when the measurement really carries both columns:
+    /// `hypreq.py:2412` labels that trace inside `if len(raw_pts[0]) >= 4`, so a 2-column
+    /// model must not show a swatch for a line that was never drawn.
+    fn level_legend(&self) -> Vec<LegendItem<'_>> {
+        let mut items = vec![LegendItem {
+            text: &self.bypass_label,
+            swatch: Swatch::Patch(BYPASS),
+        }];
+        if !self.raw_l.is_empty() {
+            items.push(LegendItem {
                 text: &self.lr_label,
                 swatch: Swatch::Line {
                     color: RAW_LR,
                     width: 2,
                     dash: Some(DOT),
                 },
-            },
+            });
+        }
+        items.extend([
             LegendItem {
                 text: &self.raw_label,
                 swatch: Swatch::Line {
@@ -1260,8 +1538,8 @@ impl PlotData {
                     dash: None,
                 },
             },
-        ];
-        draw_legend(band, &items, LegendPos::LowerLeft)
+        ]);
+        items
     }
 
     /// Panel 2: filter gain, plus the callouts. The reference gives this panel no title,
@@ -1274,15 +1552,12 @@ impl PlotData {
             .zip(&self.raw_avg)
             .map(|(&h, &r)| h - r)
             .collect();
-        let (y0, y1) = widen_to(
-            self.ax2_ylim,
-            &[
-                (&err, 1.0),
-                (&self.autoeq, 1.0),
-                (&self.wav_eq, 1.0),
-                (&[0.0][..], 0.0),
-            ],
-        );
+        let (y0, y1) = self.gain_window();
+        let win = Window {
+            xr: (F_MIN, F_MAX),
+            yr: (y0, y1),
+            log_x: true,
+        };
         draw_axes(
             band,
             &AxesSpec {
@@ -1292,28 +1567,33 @@ impl PlotData {
                 xticks: &MAJOR_FREQS,
                 yticks: &self.ax2_yticks,
                 y_desc: "Filter Gain (dBr)",
+                x_desc: None,
                 zero_line: true,
             },
         )?;
         let mut chart = ChartBuilder::on(band)
             .margin(0u32)
             .margin_top(TITLE_H)
+            .margin_right(RIGHT_PAD)
             .x_label_area_size(X_LABEL_H)
             .y_label_area_size(Y_LABEL_W)
             .build_cartesian_2d((F_MIN..F_MAX).log_scale(), y0..y1)
             .map_err(dv)?;
 
-        bypass_span!(&mut chart, self.hf_bypass_hz, self.bypass_to_hz, y0, y1);
-        trace!(chart, &self.f_plot, &err, stroke_a(RAW_ERR, 2, 0.65), dash DOT.0, DOT.1);
-        trace!(chart, &self.f_plot, &self.autoeq, stroke_a(AUTOEQ_AMBER, 4, 0.95), dash DASH.0, DASH.1);
+        bypass_span!(&mut chart, self.hf_bypass_hz, self.bypass_to_hz, win);
+        trace!(chart, win, &self.f_plot, &err, stroke_a(RAW_ERR, 2, 0.65), dash DOT.0, DOT.1);
+        trace!(chart, win, &self.f_plot, &self.autoeq, stroke_a(AUTOEQ_AMBER, 4, 0.95), dash DASH.0, DASH.1);
         trace!(
             chart,
+            win,
             &self.f_plot,
             &self.wav_eq,
             stroke_a(WAV_GREEN, 5, 0.98)
         );
 
-        annotations!(&mut chart, self, plot_rect(band));
+        // The callouts are drawn in this panel's own window, so their arrowheads are
+        // measured against the same y-scale the chart maps with.
+        annotations!(&mut chart, self, plot_rect(band), win);
 
         let items = [
             LegendItem {
@@ -1347,9 +1627,15 @@ impl PlotData {
     /// Panel 3: the minimum-phase phase angle of the same spectrum.
     fn draw_phase(&self, band: &BitmapArea<'_>) -> PlotResult {
         use plotters::prelude::*;
-        // `hypreq.py` leaves this axis to matplotlib's autoscaler, which pads the data
-        // range by five percent; the configured ticks label whatever falls inside it.
-        let (y0, y1) = autoscale(&[&self.wav_phase]);
+        // `hypreq.py:2473` pins this axis with `set_ylim(-90, 90)`, so the configured
+        // ticks (-90, -45, 0, 45, 90) always have room; autoscaling to the data, which
+        // stays inside roughly +/-35 deg, would leave 0 as the only visible tick.
+        let (y0, y1) = PHASE_YLIM;
+        let win = Window {
+            xr: (F_MIN, F_MAX),
+            yr: (y0, y1),
+            log_x: true,
+        };
         draw_title(band, &self.phase_title, SMALL_TITLE_FONT)?;
         draw_axes(
             band,
@@ -1360,18 +1646,21 @@ impl PlotData {
                 xticks: &MAJOR_FREQS,
                 yticks: &PHASE_YTICKS,
                 y_desc: "Phase (deg)",
+                x_desc: Some("Frequency (Hz)"),
                 zero_line: true,
             },
         )?;
         let mut chart = ChartBuilder::on(band)
             .margin(0u32)
             .margin_top(TITLE_H)
+            .margin_right(RIGHT_PAD)
             .x_label_area_size(X_LABEL_H)
             .y_label_area_size(Y_LABEL_W)
             .build_cartesian_2d((F_MIN..F_MAX).log_scale(), y0..y1)
             .map_err(dv)?;
         trace!(
             chart,
+            win,
             &self.f_plot,
             &self.wav_phase,
             stroke_a(PHASE, 4, 0.95)
@@ -1402,12 +1691,19 @@ impl PlotData {
                 xticks: &IR_XTICKS,
                 yticks: &IR_YTICKS,
                 y_desc: "Normalized Amplitude",
-                zero_line: false,
+                x_desc: Some("Time Relative to Transient Peak (ms)"),
+                zero_line: true,
             },
         )?;
+        let win = Window {
+            xr: (IR_XMIN, IR_XMAX),
+            yr: (IR_YMIN, IR_YMAX),
+            log_x: false,
+        };
         let mut chart = ChartBuilder::on(band)
             .margin(0u32)
             .margin_top(TITLE_H)
+            .margin_right(RIGHT_PAD)
             .x_label_area_size(X_LABEL_H)
             .y_label_area_size(Y_LABEL_W)
             .build_cartesian_2d(IR_XMIN..IR_XMAX, IR_YMIN..IR_YMAX)
@@ -1424,9 +1720,10 @@ impl PlotData {
             2,
         )?;
 
-        trace!(chart, &self.lin_t_ms, &self.lin_ir, stroke_a(AUTOEQ_RED, 3, 0.88), dash DASH.0, DASH.1);
+        trace!(chart, win, &self.lin_t_ms, &self.lin_ir, stroke_a(AUTOEQ_RED, 3, 0.88), dash DASH.0, DASH.1);
         trace!(
             chart,
+            win,
             &self.mp_t_ms,
             &self.mp_ir,
             stroke_a(WAV_GREEN, 4, 0.96)
@@ -1499,27 +1796,6 @@ fn widen_to(range: (f64, f64), series: &[(&[f64], f64)]) -> (f64, f64) {
         }
     }
     out
-}
-
-/// matplotlib's autoscale: the data range padded by five percent, with a flat trace
-/// getting a unit window around itself.
-fn autoscale(series: &[&[f64]]) -> (f64, f64) {
-    let mut lo = f64::INFINITY;
-    let mut hi = f64::NEG_INFINITY;
-    for s in series {
-        for &v in s.iter().filter(|v| v.is_finite()) {
-            lo = lo.min(v);
-            hi = hi.max(v);
-        }
-    }
-    if !lo.is_finite() || !hi.is_finite() {
-        return (0.0, 1.0);
-    }
-    if (hi - lo) < 1e-9 {
-        return (lo - 0.5, hi + 0.5);
-    }
-    let pad = (hi - lo) * 0.05;
-    (lo - pad, hi + pad)
 }
 
 /// The values `hypreq.py` keeps in `fmt_ctx` for `str.format` on plot labels.
@@ -1700,7 +1976,9 @@ pub fn autoeq_from_geq(geq_str: &str, offset_db: Option<f64>, ctrl: &[(f64, f64)
             .split_whitespace()
             .filter_map(|t| t.parse().ok())
             .collect();
-        if nums.len() >= 2 {
+        // The curve is interpolated in log frequency, so a non-positive knot would put
+        // -inf into the grid and poison every point below it.
+        if nums.len() >= 2 && nums[0] > 0.0 && nums[1].is_finite() {
             pts.push((nums[0], nums[1]));
         }
     }
@@ -1737,7 +2015,8 @@ pub fn build_auto_annotations(
     wav_eq: &[f64],
     hf_bypass_hz: f64,
 ) -> Vec<Annotation> {
-    let g_20 = wav_eq[0];
+    // A model with nothing to plot still gets the bypass note rather than panicking here.
+    let g_20 = wav_eq.first().copied().unwrap_or(0.0);
     // Select by |gain| (or signed min for the treble dip), report the signed gain
     // at the selected grid point.
     let pick = |lo: f64, hi: f64, mode: Pick| -> (f64, f64) {
@@ -1815,7 +2094,9 @@ pub fn build_auto_annotations(
                 "5. >{:.1}kHz Coupler Null Bypass\n(0.0dB ultrasonic wire)",
                 hf_bypass_hz / 1000.0
             ),
-            xy_x: (hf_bypass_hz * 1.18).min(14000.0).max(hf_bypass_hz + 500.0),
+            // `hypreq.py:2324` is `min(14000, max(f*1.18, f+500))`: the 14 kHz cap is
+            // applied last, so a bypass that starts at 13.5 kHz or higher stays inside.
+            xy_x: (hf_bypass_hz * 1.18).max(hf_bypass_hz + 500.0).min(14000.0),
             xy_y: 0.0,
             xytext: (5400.0, 4.5),
             green: false,
@@ -2358,6 +2639,366 @@ mod tests {
                 "head at {tip_hz} Hz is {width:.3} px wide"
             );
         }
+    }
+
+    #[test]
+    fn ticks_on_the_axis_limits_are_still_labelled() {
+        // The reference pins its ticks with FixedLocator, and matplotlib labels a tick that
+        // sits exactly on the limit while omitting only its grid line. Filtering with a
+        // strict inequality deleted 20 Hz, 20 kHz, -1/4 ms and the -15/-90/90 rows.
+        let xf: Vec<f64> = ticks_in(&MAJOR_FREQS, (F_MIN, F_MAX)).copied().collect();
+        assert_eq!(xf.first(), Some(&20.0), "left edge tick vanished");
+        assert_eq!(xf.last(), Some(&20000.0), "right edge tick vanished");
+        assert_eq!(xf.len(), MAJOR_FREQS.len());
+
+        let ir_x: Vec<f64> = ticks_in(&IR_XTICKS, (IR_XMIN, IR_XMAX)).copied().collect();
+        assert_eq!(ir_x.first(), Some(&-1.0));
+        assert_eq!(ir_x.last(), Some(&4.0));
+
+        let phase: Vec<f64> = ticks_in(&PHASE_YTICKS, PHASE_YLIM).copied().collect();
+        assert_eq!(
+            phase,
+            PHASE_YTICKS.to_vec(),
+            "every phase tick must survive"
+        );
+
+        let y: Vec<f64> = ticks_in(&[-15.0, -10.0, 0.0, 14.0], (-15.0, 14.0))
+            .copied()
+            .collect();
+        assert_eq!(y, vec![-15.0, -10.0, 0.0, 14.0]);
+
+        // …and only the interior ones earn a grid line, so nothing is drawn over the frame.
+        assert!(!grid_line_inside(20.0, (F_MIN, F_MAX)));
+        assert!(!grid_line_inside(20000.0, (F_MIN, F_MAX)));
+        assert!(grid_line_inside(1000.0, (F_MIN, F_MAX)));
+    }
+
+    #[test]
+    fn phase_panel_spans_the_full_range_the_ticks_need() {
+        // `hypreq.py:2473` pins ax3 with set_ylim(-90, 90); the window the panel actually
+        // uses is asserted on the rendered tick marks (rendered_panels_tick_their_axis_limits),
+        // because autoscaling to the data - which stays inside +/-35 deg - would leave 0 as
+        // the only visible tick.
+        assert_eq!(PHASE_YLIM, (-90.0, 90.0));
+        for t in PHASE_YTICKS {
+            assert!(
+                t >= PHASE_YLIM.0 && t <= PHASE_YLIM.1,
+                "tick {t} falls outside the window"
+            );
+        }
+        assert_eq!(
+            ticks_in(&PHASE_YTICKS, PHASE_YLIM).count(),
+            PHASE_YTICKS.len()
+        );
+        // The window is fixed, so a phase trace that swings past +/-90 deg is clipped at
+        // the border instead of rescaling the axis and hiding the outer ticks.
+        let (ir, mag) = full_inputs();
+        let d = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        let w = Window {
+            xr: (F_MIN, F_MAX),
+            yr: PHASE_YLIM,
+            log_x: true,
+        };
+        let runs = clip_polyline(&d.f_plot, &d.wav_phase, w);
+        assert!(!runs.is_empty(), "the phase trace disappeared");
+        for (fx, ph) in &runs {
+            assert!(
+                fx.iter()
+                    .zip(ph)
+                    .all(|(&f, &p)| (F_MIN..=F_MAX).contains(&f) && (-90.0..=90.0).contains(&p)),
+                "phase trace escaped the fixed window"
+            );
+        }
+    }
+
+    #[test]
+    fn legend_only_offers_the_traces_that_were_drawn() {
+        // The 4-column fixture carries L and R, so the legend has an entry for them; a
+        // 2-column measurement draws no such trace and must not advertise one.
+        let (ir, mag) = inputs_64();
+        let stereo = PlotData::build(&model(), &inputs(&ir, &mag));
+        assert!(!stereo.raw_l.is_empty());
+        let names: Vec<&str> = stereo.level_legend().iter().map(|i| i.text).collect();
+        assert_eq!(names.len(), 6, "{names:?}");
+        assert!(names.contains(&stereo.lr_label.as_str()), "{names:?}");
+
+        let mut mono = model();
+        mono.raw_pts = mono.raw_pts.iter().map(|p| vec![p[0], p[1]]).collect();
+        let mono = PlotData::build(&mono, &inputs(&ir, &mag));
+        assert!(mono.raw_l.is_empty(), "2-column raw data has no L/R trace");
+        let names: Vec<&str> = mono.level_legend().iter().map(|i| i.text).collect();
+        assert_eq!(names.len(), 5, "{names:?}");
+        assert!(
+            !names.iter().any(|t| *t == mono.lr_label.as_str()),
+            "phantom legend entry for a trace that was never drawn: {names:?}"
+        );
+    }
+
+    /// Is there tick-mark ink just outside the panel edge at this column/row?
+    fn tick_ink(px: &[u8], w: u32, x: usize, y: usize) -> bool {
+        // Tick marks are drawn in `EDGE`, which is clearly separated from the figure
+        // background, and they are the only thing drawn outside the panel frame.
+        let sep = (i32::from(EDGE.0) - i32::from(FIG_BG.0))
+            + (i32::from(EDGE.1) - i32::from(FIG_BG.1))
+            + (i32::from(EDGE.2) - i32::from(FIG_BG.2));
+        let p = at(px, w, x, y);
+        let d = |want: Rgb| {
+            (i32::from(p[0]) - i32::from(want.0)).abs()
+                + (i32::from(p[1]) - i32::from(want.1)).abs()
+                + (i32::from(p[2]) - i32::from(want.2)).abs()
+        };
+        d(EDGE) <= 24 && d(FIG_BG) > sep / 2
+    }
+
+    #[test]
+    fn rendered_panels_tick_their_axis_limits() {
+        // The reported defect dropped the tick *and* its label wherever a fixed tick sat
+        // exactly on a limit, so the panels lost 20 Hz, 20 kHz, -1/4 ms and (with the
+        // autoscaled phase window) everything except 0 deg. This checks the marks are
+        // really on the canvas, at the coordinates the panels claim.
+        let dir = scratch("edgeticks");
+        let (ir, mag) = full_inputs();
+        let d = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        let path = d.render_to(&dir.join("figure.png")).expect("render");
+        let (w, _, px) = decode_png(&path);
+        let rects = PlotData::panel_rects();
+
+        // Frequency panels: the 20 Hz and 20 kHz marks hang below the bottom frame.
+        for panel in [0usize, 1, 2] {
+            let (x0, _, x1, y1) = rects[panel];
+            for (f, want) in [(F_MIN, "20 Hz"), (F_MAX, "20 kHz")] {
+                let t = (f / F_MIN).ln() / (F_MAX / F_MIN).ln();
+                let col = (f64::from(x0) + f64::from(x1 - x0) * t).round() as usize;
+                assert!(
+                    tick_ink(&px, w, col, y1 as usize + 2),
+                    "panel {} has no tick at {want}",
+                    panel + 1
+                );
+            }
+        }
+        // The phase panel needs its -90 and +90 marks, which only exist if the window is
+        // the reference's -90..90 rather than a window autoscaled to +/-35 deg.
+        let (x0, y0, _, y1) = rects[2];
+        for v in [-90.0f64, 90.0] {
+            let frac = (v - PHASE_YLIM.0) / (PHASE_YLIM.1 - PHASE_YLIM.0);
+            let row = (f64::from(y1) - f64::from(y1 - y0) * frac).round() as usize;
+            assert!(
+                tick_ink(&px, w, x0 as usize - 2, row),
+                "panel 3 has no tick at {v} deg (row {row})"
+            );
+        }
+        // The impulse panel: -1 ms and 4 ms, on a linear axis.
+        let (x0, _, x1, y1) = rects[3];
+        for ms in [IR_XMIN, IR_XMAX] {
+            let t = (ms - IR_XMIN) / (IR_XMAX - IR_XMIN);
+            let col = (f64::from(x0) + f64::from(x1 - x0) * t).round() as usize;
+            assert!(
+                tick_ink(&px, w, col, y1 as usize + 2),
+                "panel 4 has no tick at {ms} ms"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_configured_axis_window_is_used_verbatim() {
+        let mut m = model();
+        m.plot_meta =
+            serde_json::from_str(r#"{"ax2_ylim": [-3.0, 3.0], "ax1_ylim": [-4.0, 4.0]}"#).unwrap();
+        let (ir, mag) = full_inputs();
+        let d = PlotData::build(&m, &full_inputs_ref(&ir, &mag));
+        // The fixture's unsmoothed error reaches +5 dBr at 20 kHz, i.e. past the
+        // configured ceiling: widening the window (as the reference never does) would
+        // turn this into 6.0 and shift every arrowhead in the panel.
+        let err_max = d
+            .harm_plot
+            .iter()
+            .zip(&d.raw_avg)
+            .map(|(&h, &r)| h - r)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(err_max > 3.0, "fixture must exceed the window: {err_max}");
+        assert_eq!(d.gain_window(), (-3.0, 3.0));
+        assert_eq!(d.level_window(), (-4.0, 4.0));
+
+        // Without a configured window the fallback pads around the correction, so the same
+        // model with 20 dB more correction gets a visibly taller window. Only the IR
+        // changed between the two, so the difference is entirely the padding rule.
+        let plain = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        assert!(!plain.ax2_ylim_fixed);
+        let mut louder = ir.clone();
+        louder.iter_mut().for_each(|v| *v *= 10.0);
+        let loud = PlotData::build(&model(), &full_inputs_ref(&louder, &mag));
+        assert!(
+            loud.gain_window().1 > plain.gain_window().1,
+            "window must grow with the boost: {:?} vs {:?}",
+            loud.gain_window(),
+            plain.gain_window()
+        );
+        assert_eq!(
+            d.gain_window(),
+            (-3.0, 3.0),
+            "a configured window stays put no matter how loud the curves get"
+        );
+        assert!(max_of(&loud.wav_eq) > max_of(&plain.wav_eq) + 19.0);
+    }
+
+    #[test]
+    fn callout_block_grows_upwards_from_its_anchor() {
+        // matplotlib anchors an annotate() block at xytext with va="baseline", so a
+        // two-line callout occupies [xytext.y, xytext.y + 2*dy], not the band below it.
+        let dy = 0.9585;
+        let (centres, tail) = callout_layout(2, -9.2, -13.0, dy);
+        assert_eq!(centres.len(), 2);
+        assert!(
+            centres[0] > centres[1],
+            "line 0 must sit above line 1: {centres:?}"
+        );
+        assert!(
+            (centres[1] - (-9.2 + 0.4 * dy)).abs() < 1e-9,
+            "bottom row must sit on the anchor: {centres:?}"
+        );
+        assert!(
+            (centres[0] - centres[1] - dy).abs() < 1e-9,
+            "rows must be one pitch apart: {centres:?}"
+        );
+        assert!(
+            (centres[1] - centres[0]).abs() > 1e-6,
+            "rows may never share a y (that is the line-on-line collision)"
+        );
+        assert!(
+            (tail - (-9.2)).abs() < 1e-9,
+            "pointing down, the shaft leaves the bottom of the block: {tail}"
+        );
+
+        // Pointing up, it leaves the top, which is where the text-free secondary arrows
+        // of the shipped models are anchored.
+        let (_, tail_up) = callout_layout(2, -9.2, -4.0, dy);
+        assert!((tail_up - (-9.2 + 2.0 * dy)).abs() < 1e-9, "{tail_up}");
+
+        // A single-row callout is the same rule with n = 1.
+        let (one, tail_one) = callout_layout(1, 4.5, 0.0, dy);
+        assert_eq!(one.len(), 1);
+        assert!((tail_one - 4.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn polylines_are_clipped_to_their_panel() {
+        let w = Window {
+            xr: (20.0, 20000.0),
+            yr: (-10.0, 10.0),
+            log_x: true,
+        };
+        let xs: Vec<f64> = fft::geomspace(1.0, 1e6, 60);
+        let ys: Vec<f64> = (0..60).map(|i| -60.0 + i as f64 * 2.0).collect();
+        let runs = clip_polyline(&xs, &ys, w);
+        assert!(!runs.is_empty(), "a crossing trace must still be drawn");
+        for (tx, ty) in &runs {
+            assert!(tx.len() >= 2);
+            for (&x, &y) in tx.iter().zip(ty) {
+                assert!(
+                    (20.0..=20000.0).contains(&x) && (-10.0..=10.0).contains(&y),
+                    "unclipped point ({x}, {y}) escaped the panel"
+                );
+            }
+        }
+
+        // A trace that leaves the window and comes back must split into two runs rather
+        // than bridge the gap along the border. Touching the edge and turning back is not
+        // a gap, so that case stays one run.
+        let split = clip_polyline(
+            &[100.0, 1000.0, 2000.0, 10000.0],
+            &[0.0, 100.0, 100.0, 0.0],
+            w,
+        );
+        assert_eq!(split.len(), 2, "expected two visible runs");
+        let touch = clip_polyline(&[100.0, 1000.0, 10000.0], &[0.0, 100.0, 0.0], w);
+        assert_eq!(touch.len(), 1, "a turn-around at the border stays one run");
+
+        // Non-positive x has no place on a log axis: it breaks the run instead of
+        // producing a -inf coordinate.
+        let bad = clip_polyline(&[-5.0, 100.0, 1000.0], &[0.0, 1.0, 2.0], w);
+        assert_eq!(bad.len(), 1);
+        assert!(bad[0].0.iter().all(|&x| x > 0.0));
+    }
+
+    #[test]
+    fn the_impulse_trace_stops_at_the_panel_edge() {
+        // mp_t_ms runs 250 samples past 0 ms (5.19 ms at 48 kHz) while the panel stops at
+        // 4.0 ms; unclipped, that drew straight over the margin and off the canvas.
+        let (ir, mag) = full_inputs();
+        let d = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        let w = Window {
+            xr: (IR_XMIN, IR_XMAX),
+            yr: (IR_YMIN, IR_YMAX),
+            log_x: false,
+        };
+        assert!(
+            d.mp_t_ms.iter().any(|&t| t > IR_XMAX),
+            "fixture must overshoot to test the clip"
+        );
+        for (tx, ty) in clip_polyline(&d.mp_t_ms, &d.mp_ir, w) {
+            for (&t, &v) in tx.iter().zip(&ty) {
+                assert!(
+                    (IR_XMIN..=IR_XMAX).contains(&t) && (IR_YMIN..=IR_YMAX).contains(&v),
+                    "impulse trace escaped panel 4 at ({t}, {v})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_bypass_callout_respects_the_14khz_cap() {
+        // hypreq.py: min(14000, max(f*1.18, f+500)). Applying .min before .max put the
+        // arrow past 14 kHz for a model whose bypass starts at 13.5 kHz or higher.
+        for hf in [9000.0, 13000.0, 13500.0, 15000.0, 19000.0] {
+            let ann = build_auto_annotations(&[20.0, 1000.0, 20000.0], &[0.0; 3], hf);
+            assert!(
+                ann[4].xy_x <= 14000.0,
+                "hf bypass {hf} Hz put the callout at {} Hz",
+                ann[4].xy_x
+            );
+            if hf < 14000.0 {
+                assert!(
+                    ann[4].xy_x > hf,
+                    "the callout must sit right of the bypass edge"
+                );
+            }
+        }
+        // Nothing to plot still yields the bypass note instead of indexing an empty curve.
+        let ann = build_auto_annotations(&[], &[], 9000.0);
+        assert_eq!(ann.len(), 5);
+    }
+
+    #[test]
+    fn geq_knots_must_be_positive_and_finite() {
+        // The overlay is interpolated in log frequency, so a 0 Hz knot would put -inf in
+        // the grid and poison everything below it with NaN.
+        let ctrl = [(100.0, 0.0), (1000.0, 3.0), (10000.0, 1.0)];
+        let out = autoeq_from_geq("0 5 0.7 0; 1000 -2 0.7 0; 8000 4 0.7 0", Some(0.0), &ctrl);
+        assert!(out.iter().all(|v| v.is_finite()), "non-finite overlay");
+        assert_eq!(out.len(), 1200);
+    }
+
+    #[test]
+    fn rendered_impulse_panel_draws_the_zero_reference_line() {
+        // hypreq.py:2497 draws ax4.axhline(0.0, ...). Passing zero_line: false deleted it.
+        let dir = scratch("zeroline");
+        let (ir, mag) = full_inputs();
+        let d = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        let path = d.render_to(&dir.join("figure.png")).expect("render");
+        let (w, _, px) = decode_png(&path);
+        let (x0, y0, x1, y1) = PlotData::panel_rects()[3];
+        let frac = (0.0 - IR_YMIN) / (IR_YMAX - IR_YMIN);
+        let row = (f64::from(y1) - f64::from(y1 - y0) * frac).round() as usize;
+        let hits = ((x0 + 4) as usize..(x1 - 4) as usize)
+            .filter(|&x| close(at(&px, w, x, row), ZERO_LINE, 12))
+            .count();
+        let span = (x1 - x0 - 8).max(1) as usize;
+        assert!(
+            hits * 3 > span,
+            "panel 4 has no 0.0 reference line: {hits}/{span} pixels at row {row}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

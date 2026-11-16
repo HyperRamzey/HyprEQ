@@ -19,10 +19,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 clap = { version = "4", features = ["derive"] }
 plotters = { version = "0.3", default-features = false, features = [
-    # PNG output, TrueType text, and the line/dashed series the figure draws. The y-axis
-    # unit label is rotated text, which the `ttf` (font-kit) resolver supplies through the
-    # system fontconfig, so a machine without fontconfig configured will fall back to
-    # plotters' built-in naive glyph rasteriser rather than fail to build.
+    # PNG output, TrueType text, and the line series (solid, dashed and dotted) the figure
+    # draws. Everything else is off: the axes, legend and tick marks are drawn by hand, so
+    # the area/point/series features and the palette would only add compile time.
+    #
+    # `ttf` is a build- and run-time requirement, not a nice-to-have: it pulls font-kit,
+    # which links against the system fontconfig and freetype, so those C libraries must be
+    # installed to link at all, and fontconfig must be able to resolve "sans-serif" or the
+    # figure panics while drawing text. Use `--no-plot` on a machine that has neither.
     "bitmap_backend",
     "bitmap_encoder",
     "ttf",

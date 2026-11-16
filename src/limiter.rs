@@ -719,18 +719,6 @@ impl Limiter {
         self.latency
     }
 
-    /// Post-limiter true peak per channel, dBTP.
-    ///
-    /// [`Report::post_dbtp`] is the group maximum, because that is what the ceiling is
-    /// judged against — the ceiling holds for every channel, so one number has to hold.
-    /// A meter panel wants the breakdown, and the difference is not cosmetic: on 5.1
-    /// material the group maximum and the loudest single channel can disagree by several
-    /// dB once the LFE is in the group.
-    #[must_use]
-    pub fn per_channel_post_dbtp(&self) -> Vec<f64> {
-        self.out_meter.per_channel_dbtp()
-    }
-
     #[must_use]
     pub fn report(&self) -> Report {
         let mut r = self.report;

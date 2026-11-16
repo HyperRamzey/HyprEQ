@@ -77,11 +77,6 @@ impl Pcg64 {
         }
     }
 
-    /// Explicit state, for tests and for continuing a saved stream.
-    pub fn from_state_inc(state: u128, inc: u128) -> Self {
-        Self { state, inc }
-    }
-
     /// `pcg64_next64`: step, then permute the new state.
     pub fn next_u64(&mut self) -> u64 {
         self.state = self
@@ -104,14 +99,6 @@ impl Pcg64 {
     #[inline]
     pub fn next_uniform_half(&mut self) -> f64 {
         -0.5 + self.next_double()
-    }
-
-    /// Burn `n` draws without producing them — used to line up with a Python
-    /// array that was drawn in full and then sliced.
-    pub fn advance_draws(&mut self, n: usize) {
-        for _ in 0..n {
-            self.next_u64();
-        }
     }
 }
 

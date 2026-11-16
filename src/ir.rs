@@ -443,12 +443,6 @@ pub fn notch_db_at(ctrl_pts: &[(f64, f64)], notch_ref_hz: Option<f64>) -> f64 {
     crate::pchip::pchip_eval1(&f, &g, ref_hz)
 }
 
-/// Convenience for callers that only have a path to write the CSV next to.
-#[must_use]
-pub fn audit_csv_path(dir: &Path, model_key: &str) -> PathBuf {
-    dir.join(format!("{model_key}_audit_data.csv"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

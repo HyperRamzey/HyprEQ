@@ -175,13 +175,6 @@ pub fn pchip_eval1(f_nodes: &[f64], g_nodes: &[f64], f_hz: f64) -> f64 {
     Pchip::new(f_nodes, g_nodes).eval(f_hz)
 }
 
-/// `numpy.logspace`-free geometric grid over the audible band, shared by the plot
-/// and the audit export so both ask the curve the same questions.
-#[must_use]
-pub fn audio_grid(n: usize) -> Vec<f64> {
-    crate::fft::geomspace(20.0, 20000.0, n)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

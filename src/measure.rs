@@ -316,12 +316,6 @@ pub fn build_convolver_probe(fs: u32, duration_s: f64) -> Vec<f64> {
     probe
 }
 
-/// Print the probe's own measurement block (used by `--measure-probe`).
-pub fn print_probe_measurements(probe: &[f64], fs: u32, ratio: Ratio) {
-    let m = measure_signal(&[probe.to_vec()], fs, ratio);
-    print_signal_measurements("Convolver Probe (0 dBTP @ x16)", &m);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

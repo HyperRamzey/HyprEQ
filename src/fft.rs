@@ -203,14 +203,6 @@ pub fn interp_grid(x: &[f64], xp: &[f64], fp: &[f64]) -> Vec<f64> {
     x.iter().map(|&v| interp(v, xp, fp)).collect()
 }
 
-/// `np.log10`-space linear interpolation with clamping at both ends — the
-/// `np.interp(np.log10(f), np.log10(f_geq), g)` idiom used by the AutoEq overlay.
-#[must_use]
-pub fn interp_log10(x: &[f64], xp: &[f64], fp: &[f64]) -> Vec<f64> {
-    let lx: Vec<f64> = xp.iter().map(|v| v.log10()).collect();
-    x.iter().map(|&v| interp(v.log10(), &lx, fp)).collect()
-}
-
 /// Smallest power of two `>= n`.
 #[must_use]
 pub fn next_pow2(n: usize) -> usize {

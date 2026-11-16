@@ -87,9 +87,6 @@ pub mod tp;
 pub mod wav;
 pub mod window;
 
-/// Crate version, for `--version`.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 /// Directory holding the recorded Python reference artefacts, when the operator
 /// points `HYPREQ_ORACLE` at them.
 ///

@@ -13,10 +13,9 @@
 //! documented on [`level_to_param`].
 //!
 //! HyprEQ meters a planar buffer of arbitrary channel count, so the meter count is a
-//! constructor argument ([`Meters::with_channels`]) rather than a fixed layout, and
-//! samples arrive as `f64` ([`Meters::observe_planar`]). [`MeterTap`] is a plain
-//! inherent-method tap: single writer (the audio thread), many readers, so each meter
-//! is one `AtomicU32` holding `f32` bits — no lock, and a torn read is impossible.
+//! constructor argument ([`Meters::with_channels`]) and samples arrive as `f64`
+//! ([`Meters::observe_planar`]). One writer, many readers, so each meter is a single
+//! `AtomicU32` holding `f32` bits — no lock, and a torn read is impossible.
 //!
 //! The f32 storage width is deliberate and load-bearing: every stored level is rounded
 //! through `f32`, which is where the ≈1.2e-7 m^-1 slope of [`param_to_db`] near the top
@@ -29,18 +28,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrd};
 /// Peak-hold release time constant, seconds. Matches `METER_FALL_S`.
 pub const METER_FALL_S: f64 = 0.30;
 
-/// Input meters: VST channel -> DSP slot, matching the plugin's `g_slot`.
-pub const IN_SLOTS: [usize; 8] = [0, 1, 2, 3, 4, 5, 9, 10];
-
-pub const IN_CHANNELS: usize = 8;
-pub const OUT_CHANNELS: usize = 2;
-pub const TOTAL: usize = IN_CHANNELS + OUT_CHANNELS;
-
-pub const IN_LABELS: [&str; IN_CHANNELS] = [
-    "In1 FL", "In2 FR", "In3 FC", "In4 LFE", "In5 BL", "In6 BR", "In7 SL", "In8 SR",
-];
-pub const OUT_LABELS: [&str; OUT_CHANNELS] = ["OutL", "OutR"];
-
 /// Live meter state, shared between the audio/callback thread and the UI.
 #[derive(Debug, Default)]
 pub struct Meters {
@@ -49,15 +36,9 @@ pub struct Meters {
     rate_bits: AtomicU32,
     block: AtomicU64,
     frames: AtomicU64,
-    xruns: AtomicU64,
 }
 
 impl Meters {
-    /// The plugin's ten-meter layout.
-    pub fn new() -> Self {
-        Self::with_channels(TOTAL)
-    }
-
     /// `channels` meters, for a caller that is metering a planar buffer
     /// directly instead of the plugin's slot table.
     pub fn with_channels(channels: usize) -> Self {
@@ -66,7 +47,6 @@ impl Meters {
             rate_bits: AtomicU32::new(0),
             block: AtomicU64::new(0),
             frames: AtomicU64::new(0),
-            xruns: AtomicU64::new(0),
         }
     }
 
@@ -131,18 +111,6 @@ impl Meters {
         peak
     }
 
-    /// Feed one processed block: `planar` is indexed by DSP slot, `n` frames.
-    pub fn observe_block(&self, planar: &[Option<&[f64]>], l: &[f64], r: &[f64], n: usize) {
-        for (i, &slot) in IN_SLOTS.iter().enumerate() {
-            if let Some(Some(buf)) = planar.get(slot) {
-                self.hold(i, Self::peak_of(buf, n));
-            }
-        }
-        self.hold(IN_CHANNELS, Self::peak_of(l, n));
-        self.hold(IN_CHANNELS + 1, Self::peak_of(r, n));
-        self.frames.fetch_add(n as u64, AtomicOrd::Relaxed);
-    }
-
     /// Feed one block straight from a planar buffer, one meter per channel.
     ///
     /// This is the path HyprEQ's `measure_signal` uses: no slot table, no
@@ -155,13 +123,6 @@ impl Meters {
             self.hold(c, Self::peak_of(buf, n));
         }
         self.frames.fetch_add(n as u64, AtomicOrd::Relaxed);
-    }
-
-    /// Release-only tick, for a source that went silent (or between files).
-    pub fn decay_once(&self) {
-        for i in 0..self.values.len() {
-            self.hold(i, 0.0);
-        }
     }
 
     /// Linear peak, 0.0 .. >1.0 (above 1.0 means the encoder will clip).
@@ -185,20 +146,11 @@ impl Meters {
         self.frames.load(AtomicOrd::Relaxed)
     }
 
-    pub fn xruns(&self) -> u64 {
-        self.xruns.load(AtomicOrd::Relaxed)
-    }
-
-    pub fn note_xrun(&self, n: u64) {
-        self.xruns.fetch_add(n, AtomicOrd::Relaxed);
-    }
-
     pub fn reset(&self) {
         for v in &self.values {
             v.store(0, AtomicOrd::Relaxed);
         }
         self.frames.store(0, AtomicOrd::Relaxed);
-        self.xruns.store(0, AtomicOrd::Relaxed);
     }
 }
 
@@ -239,61 +191,13 @@ pub fn param_to_db(p: f32) -> f64 {
     (p as f64) * 60.0 - 60.0
 }
 
-/// A meter-only tap: no device, no output, no `cpal`.
-///
-/// This is what keeps levels alive during a render. A render is the only thing
-/// that can say what the chain produced, so the meters are fed by the render
-/// itself rather than by a parallel "just measure it" path that would drift from
-/// the real one the first time a filter changed.
-///
-/// One of these per file, not one per batch: two files sharing a meter show a
-/// third level that belongs to neither.
-pub struct MeterTap {
-    meters: std::sync::Arc<Meters>,
-    rate: AtomicU32,
-}
-
-impl MeterTap {
-    pub fn new(meters: std::sync::Arc<Meters>) -> Self {
-        Self {
-            meters,
-            // Until `will_render` says otherwise, assume the rate the plugin ran
-            // at; a wrong guess only moves the release constant, never a sample.
-            rate: AtomicU32::new(48_000),
-        }
-    }
-
-    pub fn meters(&self) -> &std::sync::Arc<Meters> {
-        &self.meters
-    }
-
-    /// The rate this tap last rendered at, for the meter caption.
-    pub fn rate(&self) -> u32 {
-        self.rate.load(AtomicOrd::Relaxed)
-    }
-
-    pub fn will_render(&self, sample_rate: u32) {
-        if sample_rate > 0 {
-            self.rate.store(sample_rate, AtomicOrd::Relaxed);
-        }
-    }
-
-    pub fn tap(&self, planar: &[Option<&[f64]>], l: &[f64], r: &[f64], n: usize) {
-        // Block sizes vary along a file (the queue delivers what the decoder
-        // produced), so the release constant is recomputed per block — that is
-        // what keeps `exp(-n / (0.30 * sr))` exact instead of approximated.
-        self.meters.set_format(self.rate() as f32, n);
-        self.meters.observe_block(planar, l, r, n);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn decay_matches_the_vst_formula() {
-        let m = Meters::new();
+        let m = Meters::with_channels(2);
         m.set_format(48000.0, 1024);
         // exp(-1024 / (0.30 * 48000))
         let want = (-(1024.0f64 / (METER_FALL_S * 48000.0))).exp() as f32;
@@ -302,7 +206,7 @@ mod tests {
 
     #[test]
     fn attack_is_instant_release_is_exponential() {
-        let m = Meters::new();
+        let m = Meters::with_channels(2);
         m.set_format(48000.0, 480);
         m.hold(0, 0.5);
         assert_eq!(m.peak(0), 0.5);
@@ -344,40 +248,49 @@ mod tests {
         assert_eq!(param_to_db(1.0), 0.0);
     }
 
+    /// A non-finite sample is not a level: it must neither become the peak nor hide the
+    /// finite samples around it, and an `f64` beyond `f32` range is clamped, not skipped.
     #[test]
-    fn block_observation_uses_the_slot_map() {
-        let m = Meters::new();
-        m.set_format(48000.0, 4);
-        let loud = [-0.25f64, 0.75, 0.0, 0.0];
-        let quiet = [0.05f64, 0.0, 0.0, 0.0];
-        let mut planar: Vec<Option<&[f64]>> = vec![None; 11];
-        planar[0] = Some(&loud); // FL -> In1
-        planar[10] = Some(&quiet); // SR -> In8
-        m.observe_block(&planar, &loud, &quiet, 4);
-        assert_eq!(m.peak(0), 0.75);
-        assert_eq!(m.peak(7), 0.05);
-        assert_eq!(m.peak(8), 0.75);
-        assert_eq!(m.peak(9), 0.05);
-        assert_eq!(m.frames(), 4);
-    }
-
-    /// A non-finite sample is not a level: it must neither become the peak nor hide
-    /// the finite samples around it.
-    #[test]
-    fn non_finite_samples_are_skipped() {
-        let m = Meters::new();
+    fn non_finite_and_out_of_range_samples_are_handled() {
+        let m = Meters::with_channels(2);
         m.set_format(48000.0, 4);
         let l = [f64::NAN, 0.25, 0.0, 0.0];
         let r = [0.5f64, f64::INFINITY, f64::NEG_INFINITY, 0.0];
-        let planar: Vec<Option<&[f64]>> = vec![None; 11];
-        m.observe_block(&planar, &l, &r, 4);
-        assert_eq!(m.peak(IN_CHANNELS), 0.25);
-        assert_eq!(m.peak(IN_CHANNELS + 1), 0.5);
-        // An f64 beyond f32 range is still clamped rather than skipped.
+        m.observe_planar(&[&l, &r], 4);
+        assert_eq!(m.peak(0), 0.25, "a NaN must not become the peak");
+        assert_eq!(
+            m.peak(1),
+            0.5,
+            "an infinity must not hide the finite sample"
+        );
+
         m.reset();
         let big = [1e300f64, 0.0, 0.0, 0.0];
-        m.observe_block(&planar, &big, &big, 4);
-        assert_eq!(m.peak(IN_CHANNELS), f32::MAX);
+        m.observe_planar(&[&big, &big], 4);
+        assert_eq!(m.peak(0), f32::MAX, "beyond f32 range clamps to full scale");
+    }
+
+    #[test]
+    fn a_latched_non_finite_meter_releases_instead_of_sticking() {
+        let m = Meters::with_channels(1);
+        m.set_format(48000.0, 4);
+        // A sample can no longer put a non-finite value into a slot: `peak_of` skips them
+        // and `hold` clamps the request. This state is set directly because it is what a
+        // latched bar used to sit at for the rest of the session — inf × decay is inf, and
+        // only reset() freed it. The guard in `hold` is what lets a silent block clear it.
+        m.values[0].store(f32::INFINITY.to_bits(), AtomicOrd::Relaxed);
+        m.hold(0, 0.0);
+        assert_eq!(m.peak(0), 0.0, "a silent block clears a latched bar");
+
+        // And an infinite peak request lands on full scale, which is finite and decays.
+        m.hold(0, f32::INFINITY);
+        assert_eq!(m.peak(0), f32::MAX, "an infinite request clamps");
+        m.hold(0, 0.0);
+        assert!(
+            m.peak(0) < f32::MAX,
+            "and the bar then falls: {}",
+            m.peak(0)
+        );
     }
 
     #[test]
@@ -391,63 +304,5 @@ mod tests {
         assert_eq!(m.peak(1), 0.125);
         assert_eq!(m.frames(), 4);
         assert_eq!(m.channels(), 2);
-    }
-
-    #[test]
-    fn meter_tap_measures_without_a_device() {
-        let m = std::sync::Arc::new(Meters::new());
-        let tap = MeterTap::new(m.clone());
-        assert_eq!(
-            tap.rate(),
-            48_000,
-            "a tap that has not rendered yet still meters"
-        );
-
-        let loud = [0.5f64, -0.75, 0.0, 0.0];
-        let zero = [0.0f64; 4];
-        let mut planar: Vec<Option<&[f64]>> = vec![None; 11];
-        planar[3] = Some(&loud); // LFE -> In4
-        tap.tap(&planar, &loud, &zero, 4);
-        assert_eq!(m.peak(3), 0.75);
-        assert_eq!(m.peak(8), 0.75, "the pair follows the input it was given");
-        assert_eq!(m.peak(9), 0.0);
-    }
-
-    #[test]
-    fn meter_tap_releases_at_the_rate_it_was_told() {
-        let m = std::sync::Arc::new(Meters::new());
-        let tap = MeterTap::new(m.clone());
-        tap.will_render(44_100);
-        assert_eq!(tap.rate(), 44_100);
-
-        let buf = [0.8f64; 8];
-        let mut planar: Vec<Option<&[f64]>> = vec![None; 11];
-        planar[0] = Some(&buf);
-        tap.tap(&planar, &buf, &buf, 8);
-        assert_eq!(m.peak(0), 0.8);
-
-        // Silence next: the fall must use 44 100, not the 48 000 default.
-        let quiet = [0.0f64; 8];
-        planar[0] = Some(&quiet);
-        tap.tap(&planar, &quiet, &quiet, 8);
-        let at_441 = (0.8 * (-(8.0 / (METER_FALL_S * 44_100.0))).exp()) as f32;
-        let at_480 = (0.8 * (-(8.0 / (METER_FALL_S * 48_000.0))).exp()) as f32;
-        assert_eq!(m.peak(0).to_bits(), at_441.to_bits());
-        assert_ne!(
-            at_441.to_bits(),
-            at_480.to_bits(),
-            "the two are meant to differ"
-        );
-    }
-
-    #[test]
-    fn zero_rate_is_ignored_not_stored() {
-        let tap = MeterTap::new(std::sync::Arc::new(Meters::new()));
-        tap.will_render(0);
-        assert_eq!(
-            tap.rate(),
-            48_000,
-            "a zero rate would divide the decay by zero"
-        );
     }
 }

@@ -15,7 +15,6 @@ use crate::limiter::{
     Cfg, Report, DEFAULT_ATTACK_MS, DEFAULT_CEILING_DB, DEFAULT_LINK_RELEASE,
     DEFAULT_LINK_TRANSIENT, DEFAULT_LOOKAHEAD_MS, DEFAULT_RELEASE_MS, TRANSIENT_RELEASE_MS,
 };
-use crate::limiter::{MAX_CEILING_DB, MIN_CEILING_DB};
 use crate::measure::{sgn, SignalMeasurements};
 use crate::tp::Ratio;
 use crate::wav::comma_sep;
@@ -155,9 +154,6 @@ pub fn print_limiter_report(rep: &Report, post: &SignalMeasurements, cfg: &Cfg, 
         println!("{line}");
     }
 }
-
-/// The `--tp-ceiling` range, exposed so `--help` states it the way the reference does.
-pub const CEILING_RANGE: (f64, f64) = (MIN_CEILING_DB, MAX_CEILING_DB);
 
 #[cfg(test)]
 mod tests {

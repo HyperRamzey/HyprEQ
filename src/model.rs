@@ -17,7 +17,7 @@
 //! shipped models — callout positions, axis limits, panel labels. It is a data table,
 //! not logic: `--upgrade-json` writes it into `measurements.json` so a model can be
 //! edited without touching Rust, and a model with no entry here gets
-//! [`crate::plot::auto_annotations`] instead.
+//! [`crate::plot::build_auto_annotations`] instead.
 
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;

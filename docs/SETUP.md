@@ -98,6 +98,11 @@ cargo build --release
 cargo test                      # unit + integration, default parallelism
 cargo clippy --all-targets      # zero warnings, including tests
 python3 scripts/parity.py       # all scenarios
+
+# documentation links must resolve — this is what catches a doc that still names a
+# function the code no longer has
+env -u RUSTC_WORKSPACE_WRAPPER \
+  RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps
 ```
 
 `cargo test` runs a few deliberately expensive tests (full-length convolutions and
@@ -128,10 +133,11 @@ compares:
   f64-scale tolerance is a harness bug, not a divergence);
 * **audit CSVs** byte-for-byte;
 * **usage errors**: message wording and exit code `2`;
-* the **PNG**: that the Rust side wrote a decodable `1950 × 1725` image with plotted
-  content. matplotlib and `plotters` are different renderers, so pixels are never
-  compared; figure geometry is covered by unit tests that decode the PNG and check per-panel
-  ink.
+* the **PNG**: the Rust side must write a decodable `1950 × 1725` image **with plotted ink
+  inside each of the four panels** — counted strictly inside each panel, inset past the
+  frame and the tick marks, so an image whose panels hold nothing but their own frames
+  fails. matplotlib and `plotters` are different renderers, so pixels are never compared;
+  exact geometry is covered by unit tests that decode the PNG the same way.
 
 The harness exits non-zero if any comparison fails, so it is usable as a CI gate.
 

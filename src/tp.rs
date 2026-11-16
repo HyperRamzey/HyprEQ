@@ -77,7 +77,7 @@
 //! ## Conventions
 //!
 //! Tap arrays are **oldest to newest**, matching the Recommendation's printed row
-//! order. A [`Stage`]'s shift register uses the same order, so a phase's dot product
+//! order. A stage's shift register uses the same order, so a phase's dot product
 //! is a plain elementwise multiply with no index flip — the single place a tap-order
 //! inversion could creep in.
 //! inversion could creep in.

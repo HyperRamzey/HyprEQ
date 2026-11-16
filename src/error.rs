@@ -1,7 +1,11 @@
 //! The crate's error type.
 //!
-//! Deliberately small: a free-form message, a passed-through I/O error, and the
-//! three numeric-domain conditions the limiter and meters can actually refuse on.
+//! Deliberately small: a free-form message and a passed-through I/O error. Every DSP
+//! stage reports through this, so a CLI run has one failure type to print and one place
+//! where message wording is decided. The domain refusals (a limiter value out of range, a
+//! bad notch mode, a model with too few knots) are all *messages* with wording chosen to
+//! match the reference, so they arrive as [`Error::Msg`]; there is no separate variant for
+//! them because nothing in this crate branches on the difference.
 //! Every DSP stage reports through this, so a CLI run has one failure type to print
 //! and one place where message wording is decided.
 
@@ -13,12 +17,6 @@ pub enum Error {
     Msg(String),
     /// Passthrough I/O failure.
     Io(std::io::Error),
-    /// A limiter configuration value was out of its legal range.
-    Cfg(String),
-    /// A dB value could not be mapped into the parameter range.
-    OutOfRange(f64),
-    /// Input contained a denormal or non-finite sample.
-    DenormalInput,
 }
 
 impl Error {
@@ -32,9 +30,6 @@ impl fmt::Display for Error {
         match self {
             Error::Msg(s) => f.write_str(s),
             Error::Io(e) => write!(f, "{e}"),
-            Error::Cfg(s) => write!(f, "limiter config: {s}"),
-            Error::OutOfRange(v) => write!(f, "value {v} is outside the parameter range"),
-            Error::DenormalInput => write!(f, "input contains a denormal or non-finite sample"),
         }
     }
 }

@@ -484,7 +484,7 @@ impl Report {
 ///    `g[j] = min over r in 0..=ramp of (g_a[j + r] + r * slope)`, because the frames that
 ///    constrain `g[j]` are ahead of it and are finalised one frame per input frame — a
 ///    running accumulator inside the scheduler could not see them. See
-///    [`Limiter::schedule_to`] for what that cost when it was tried the other way.
+///    `schedule_to` for what that cost when it was tried the other way.
 ///
 /// A one-pole release follower runs forward at emission, and only ever pulls the gain
 /// *down* toward the schedule, so it cannot break the ceiling.
@@ -1110,7 +1110,7 @@ impl Limiter {
     /// real output — the last `latency` samples of a limited file live here — and
     /// dropping them would shorten every limited render.
     ///
-    /// Runs [`Limiter::step`] on silence for `latency` frames, which pushes the last real
+    /// Runs `step` on silence for `latency` frames, which pushes the last real
     /// frames through the side chain (so their peaks are scheduled for) and emits them
     /// through the same delay line and gain follower as every other frame.
     pub fn flush(&mut self) -> Vec<Vec<f64>> {

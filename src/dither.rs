@@ -2,7 +2,8 @@
 //!
 //! The Python writes 16/24-bit PCM with TPDF dither drawn from
 //! `numpy.random.default_rng(0x66726D65)` — that is PCG64, one
-//! [`numpy.random.Generator.uniform`] call per `u1` and `u2` sample. To land on
+//! [`numpy.random.Generator.uniform`](https://numpy.org/doc/stable/reference/generated/numpy.random.Generator.uniform.html)
+//! call per `u1` and `u2` sample. To land on
 //! the same PCM bytes the Rust side has to reproduce that stream exactly, so
 //! this is the LCG and output function from numpy's own
 //! `numpy/random/src/pcg64/pcg64.h` (Apache-2.0 / MIT, Melissa O'Neill &
@@ -17,12 +18,12 @@
 //! numpy steps the LCG *first* and applies the output function to the **new**
 //! state; the rotation is the top six bits of the 128-bit state (`state >> 122`),
 //! not the top five — the difference is visible in the first sample, which is why
-//! [`tests::matches_numpy_oracle`] pins the whole first window by bit pattern.
+//! the test `matches_numpy_oracle` pins the whole first window by bit pattern.
 //!
 //! The seeded state is not derived here: it is the state numpy's
 //! `default_rng(0x66726D65)` reaches through `SeedSequence`, read out of
 //! `bit_generator.state` once and recorded as a constant.
-//! [`tests::matches_numpy_oracle`] is the guard — if a future numpy changes
+//! the test `matches_numpy_oracle` is the guard — if a future numpy changes
 //! `SeedSequence`, that test fails loudly instead of quietly shifting the dither.
 
 /// numpy's `PCG_DEFAULT_MULTIPLIER_128`.

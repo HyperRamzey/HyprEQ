@@ -153,7 +153,11 @@ pub fn measure_signal_block(
         channels: nch,
         frames,
         fs,
-        duration_s: frames as f64 / fs as f64,
+        // A zero rate has no seconds to report, but it must not report infinity: the field is
+        // printed with `{:.3}`, and this is the same rule the limiter's ms fields use
+        // ([`crate::limiter::Cfg::effective_lookahead_ms`]). The CLI cannot reach it — `--fs` is
+        // validated positive — but `measure_signal` is public and takes any `u32`.
+        duration_s: frames as f64 / f64::from(fs.max(1)),
         ratio,
         sample_peak_lin: sp_lin,
         sample_peak_dbfs: sp_db,

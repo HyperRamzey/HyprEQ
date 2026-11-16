@@ -327,7 +327,7 @@ pub struct Demand {
     /// Spacing of the analysis bins, Hz: `fs` over the transform length. Zero when nothing was
     /// analysed. Below about `8.7 · bin_hz` a third-octave band is narrower than one bin, which is
     /// what limits how far down the grid a level can be attributed to a band; see
-    /// [`low_frequency_limit`].
+    /// See `low_frequency_limit`.
     pub bin_hz: f64,
 }
 

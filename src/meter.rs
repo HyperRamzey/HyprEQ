@@ -145,15 +145,18 @@ impl Meters {
         (0..self.values.len()).map(|i| self.peak(i)).collect()
     }
 
-    /// Host-visible parameter, `-60..0 dB` mapped onto `0..1`.
-    pub fn param(&self, index: usize) -> f32 {
-        level_to_param(self.peak(index))
-    }
-
+    /// Blocks observed so far. Public for the same reason as [`Self::channels`]: a reading is
+    /// only interpretable next to the integration window that produced it, and a test that sets
+    /// up a window has to be able to say how many frames went through it.
     pub fn frames(&self) -> u64 {
         self.frames.load(AtomicOrd::Relaxed)
     }
 
+    /// Drop the latched peaks and the block count, keeping the format.
+    ///
+    /// Public so a caller can reuse one `Meters` across files — and so the tests below can prove
+    /// that a silent block and a reset behave differently, which is the difference between a
+    /// peak-hold meter and a decaying one.
     pub fn reset(&self) {
         for v in &self.values {
             v.store(0, AtomicOrd::Relaxed);

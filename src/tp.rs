@@ -80,7 +80,6 @@
 //! order. A stage's shift register uses the same order, so a phase's dot product
 //! is a plain elementwise multiply with no index flip — the single place a tap-order
 //! inversion could creep in.
-//! inversion could creep in.
 
 use std::str::FromStr;
 
@@ -1000,16 +999,6 @@ mod tests {
         }
     }
 
-    /// A tone whose crest falls between samples is the whole point of true-peak
-    /// metering: at 12 kHz the sample peak is 3.01 dB below the analytic 0 dBFS
-    /// crest, and the detector has to close that gap.
-    ///
-    /// "No worse than the ratio's own bound" is the right assertion, not "at least
-    /// the sample peak": an interpolator's passband droops into the transition band,
-    /// so a reading can legitimately sit slightly under the largest input sample at
-    /// `f_norm` 0.5. Judged against 1.0 this test failed for x2 by 0.28 dB, which is
-    /// inside x2's 3.01 dB budget and is exactly why x2 exists only for sources
-    /// already at a high sample rate.
     /// Where an impulse is read, not merely whether it is read — which is the position
     /// observable a maximum can never show.
     ///
@@ -1044,6 +1033,16 @@ mod tests {
         );
     }
 
+    /// A tone whose crest falls between samples is the whole point of true-peak
+    /// metering: at 12 kHz the sample peak is 3.01 dB below the analytic 0 dBFS
+    /// crest, and the detector has to close that gap.
+    ///
+    /// "No worse than the ratio's own bound" is the right assertion, not "at least
+    /// the sample peak": an interpolator's passband droops into the transition band,
+    /// so a reading can legitimately sit slightly under the largest input sample at
+    /// `f_norm` 0.5. Judged against 1.0 this test failed for x2 by 0.28 dB, which is
+    /// inside x2's 3.01 dB budget and is exactly why x2 exists only for sources
+    /// already at a high sample rate.
     #[test]
     fn crest_between_samples_is_read_by_every_ratio() {
         for &r in Ratio::ALL.iter() {
@@ -1089,6 +1088,9 @@ mod tests {
         sweep_underread(0.01, 24);
     }
 
+    /// What this sweep can resolve, in dB. See the assertion that uses it.
+    const SWEEP_TOLERANCE_DB: f64 = 0.01;
+
     /// Sweep the band and report each ratio's worst steady-state under-read.
     ///
     /// `f_norm` here is **cycles per sample**, which is what the Attachment 1 formula
@@ -1103,9 +1105,6 @@ mod tests {
     /// design of ours: it is the Recommendation's printed coefficients, which read up to
     /// 0.79 dB low at the band edge — past the 0.688 dB the formula allows. Testing our
     /// own tolerance onto them would only make the transcription look wrong.
-    /// What this sweep can resolve, in dB. See the assertion that uses it.
-    const SWEEP_TOLERANCE_DB: f64 = 0.01;
-
     fn sweep_underread(step: f64, offsets: usize) {
         let mut report = Vec::new();
         for &r in Ratio::ALL.iter() {

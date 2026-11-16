@@ -110,12 +110,19 @@ impl Pchip {
         Self { x, y, d, h }
     }
 
-    /// Number of knots.
+    /// Number of knots, after [`Pchip::new`] has folded any repeats.
+    ///
+    /// Public because it is the only way to see that folding from outside: the de-duplication is a
+    /// property of the interpolant rather than of the array handed to it, and the test that a
+    /// repeated frequency leaves three knots and not four needs somewhere to look.
     #[must_use]
     pub fn len(&self) -> usize {
         self.x.len()
     }
 
+    /// Always `false`: a `Pchip` keeps at least one node whatever it is given (see [`Pchip::new`]).
+    /// Present because a type with `len` is expected to answer this, not because the answer is
+    /// interesting.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         false // a Pchip always has at least one node, see `new`

@@ -102,15 +102,15 @@ pub fn header(rate: u32, channels: u16, bits: u32, float: bool, mask: Option<u32
     h
 }
 
-/// The length of the header `header` would produce for these settings.
+/// The length of the header [`header`] would produce for these settings.
 ///
-/// Both RIFF size fields are measured from this number, so it is not allowed to be a
-/// guess: a 68-byte `WAVE_FORMAT_EXTENSIBLE` header measured as 44 writes a RIFF size 24
-/// bytes short, and near 4 GiB the same confusion is what lets a payload slip past the
-/// size check and wrap.
-/// Measured from the header builder itself rather than from arithmetic that could drift
-/// away from it — this runs once per output file, and the number it returns is what both
-/// size fields are measured against.
+/// Both RIFF size fields are measured from this number, so it is not allowed to be a guess: a
+/// 68-byte `WAVE_FORMAT_EXTENSIBLE` header measured as 44 writes a RIFF size 24 bytes short, and
+/// near 4 GiB the same confusion is what lets a payload slip past the size check and wrap.
+///
+/// It is measured from the builder itself — [`header`], run once with a placeholder rate — rather
+/// than from arithmetic that could drift away from it. That costs one allocation per output file,
+/// against a header that is written once per file.
 #[must_use]
 pub fn header_len(channels: u16, bits: u32, float: bool) -> usize {
     header(8000, channels, bits, float, None).len()
@@ -197,6 +197,11 @@ impl WavWriter {
 }
 
 /// Parse a WAV header and report where the samples start.
+///
+/// The whole header walk, in one call, for a caller that only wants to know what it is looking at
+/// without reading samples. The program's own reader is [`crate::wav::read_wav`], which walks the
+/// chunks differently on purpose — see the note at the top of that module — so this is reached by
+/// the tests here and by anyone who needs the header alone.
 pub fn read_info(path: &Path) -> Result<(WavInfo, u64)> {
     read_info_file(&mut std::fs::File::open(path)?)
 }

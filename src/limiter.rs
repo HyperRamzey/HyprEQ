@@ -175,8 +175,12 @@ pub const TRANSIENT_RELEASE_MS: f64 = 25.0;
 /// Settings for the true-peak limiter.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cfg {
-    /// Off by default: a ceiling is something the operator asks for, and silent
-    /// gain manipulation is the failure mode this avoids.
+    /// Whether the limiter runs at all.
+    ///
+    /// On in [`Cfg::default`] — the one stage here that is — because a ceiling below full scale
+    /// cannot make a file louder than it was and the default output is a delivery. The cost is
+    /// in the README: a default render is not bit-transparent and it is `latency_samples`
+    /// longer than the source. With this off, the run is the bit-exact path, hash and all.
     pub enable: bool,
     /// Output ceiling in dBTP.
     pub ceiling_db: f64,
@@ -862,6 +866,14 @@ impl Limiter {
         }
     }
 
+    /// Move one channel's gain toward `target`: instantly down, exponentially back up.
+    ///
+    /// A limiter may never clamp a gain up slowly and let it drop slowly either — the deepening
+    /// has to be there before the peak arrives, so `target < g` is applied in the same frame —
+    /// while the release is the one thing that must be smooth, because a step in the gain is a
+    /// step in the output. `GAIN_DEADBAND` closes the tail: a release that creeps to within
+    /// 2e-11 dB of unity and stops there is a release that never ended, and every counter
+    /// downstream of it reports "still limiting" for the rest of the file.
     fn advance_gain(&mut self, c: usize, target: f64) {
         let g = self.gain[c];
         if target < g {
@@ -879,8 +891,13 @@ impl Limiter {
         };
     }
 
-    /// One frame in, one (delayed) frame out. `frame` holds one input sample per channel
-    /// and is overwritten with the output sample per channel.
+    /// One frame in, one (delayed) frame out, through the side chain and the delay line.
+    ///
+    /// `frame` holds one input sample per channel and is overwritten with the output sample per
+    /// channel. Two stages, as every serious limiter has: a fast one that has to be at depth by
+    /// the time a peak arrives, and a slow one that responds to level over tenths of a second.
+    /// They multiply, and the fast one is handed the *residual* need — what the slow stage has
+    /// not already taken — so a loud passage is managed once instead of twice.
     ///
     /// This is the whole per-frame algorithm. [`Limiter::process`] calls it once per input
     /// frame and [`Limiter::flush`] calls it once per frame of tail with a zero input, so
@@ -888,12 +905,6 @@ impl Limiter {
     /// `flush` re-implemented the delay line by hand and never pushed the last `delta`
     /// input frames through the side chain, so a peak in the final few milliseconds was
     /// never scheduled for and could leave the file above the ceiling.
-    /// One frame through the side chain and the delay line.
-    ///
-    /// Two stages, as every serious limiter has: a fast one that has to be at depth by the
-    /// time a peak arrives, and a slow one that responds to level over tenths of a second.
-    /// They multiply, and the fast one is handed the *residual* need — what the slow stage
-    /// has not already taken — so a loud passage is managed once instead of twice.
     fn step(&mut self, frame: &mut [f64]) {
         let nch = frame.len();
         let latency = self.latency;
@@ -1296,17 +1307,6 @@ mod tests {
         vec![worst_case(4096), step_down, step_up]
     }
 
-    /// The fastest attack and release the interface accepts still hold the ceiling.
-    ///
-    /// A crest is not one sample: the interpolated value at frame `m` is built from the
-    /// samples in `[m-delta, m+delta]`, and each of those samples is multiplied by *its own
-    /// frame's* combined gain. So the slow stage only has to be steady across about 26 frames
-    /// for the ceiling to mean anything — and at the 1 ms attack and 10 ms release this module
-    /// accepts, it travels 3.27 dB in that window, which is more than any guard band worth
-    /// having. The fix is not a wider guard: that taxes every file, including the ones where
-    /// the slow stage barely moves. The demand for a frame is scaled by the slow gain of the
-    /// frames around it, which costs nothing when they are equal and exactly what is needed
-    /// when they are not.
     /// The meter and the limiter start at different ratios on purpose, and nothing may
     /// quietly make them the same again: the difference is 0.58 dB of ceiling.
     #[test]
@@ -1328,6 +1328,18 @@ mod tests {
         assert_eq!(lat, 96 + Ratio::X8.report_delay());
         assert!(lat > 96, "the interpolator's own delay went missing");
     }
+
+    /// The fastest attack and release the interface accepts still hold the ceiling.
+    ///
+    /// A crest is not one sample: the interpolated value at frame `m` is built from the
+    /// samples in `[m-delta, m+delta]`, and each of those samples is multiplied by *its own
+    /// frame's* combined gain. So the slow stage only has to be steady across about 26 frames
+    /// for the ceiling to mean anything — and at the 1 ms attack and 10 ms release this module
+    /// accepts, it travels 3.27 dB in that window, which is more than any guard band worth
+    /// having. The fix is not a wider guard: that taxes every file, including the ones where
+    /// the slow stage barely moves. The demand for a frame is scaled by the slow gain of the
+    /// frames around it, which costs nothing when they are equal and exactly what is needed
+    /// when they are not.
 
     #[test]
     fn the_fastest_envelope_the_interface_allows_still_holds_the_ceiling() {

@@ -292,7 +292,6 @@ mod tests {
         .to_cfg()
         .expect("a disabled config skips range checks");
         assert!(!cfg.enable);
-        assert!(!cfg.enable);
     }
 
     /// The expected block is this program's output pasted, not retyped.

@@ -173,17 +173,24 @@ def selftest() -> int:
     expect(True, len({norm_error(t) for t in bits}) == 1, "the three --out-bits renderings must agree")
     expect(True, len({norm_error(t) for t in notch}) == 1, "the two --notch-mode renderings must agree")
 
-    # Collapsing quoting must not collapse content. Each of these is one real mistake the CLI
-    # could make, and each has to stay distinguishable.
-    base = norm_error(bits[-1])
-    for other, why in [
-        (base.replace("--out-bits", "--tp-window"), "a different flag must stay different"),
-        (base.replace("choice: 20", "choice: 21"), "a different value must stay different"),
-        (base.replace(", 64", ""), "a shortened choice list must stay different"),
-        (base.replace("invalid choice", "invalid Choice"), "the wording must stay compared"),
-        (norm_error(notch[0]), "a different message must stay different"),
-    ]:
-        expect(True, base != other, why)
+    # Collapsing quoting must not collapse content. Each mutant below is written as a RAW message
+    # that some other CLI mistake would really print, and it is normalised on the way into the
+    # comparison, so what is asserted is that `norm_error` preserves the difference. Deriving the
+    # mutants from the already-normalised text instead asserts only that `str.replace` can change
+    # a string: a normaliser that deleted the whole choice list would have passed that version.
+    reference = norm_error(bits[-1])
+    mutants = [
+        (bits[-1].replace("--out-bits", "--tp-window"), "a different flag must stay different"),
+        (bits[-1].replace("choice: '20'", "choice: '21'"), "a different value must stay different"),
+        (bits[-1].replace(", '64'", ""), "a shortened choice list must stay different"),
+        (
+            bits[-1].replace("invalid choice", "invalid Choice"),
+            "the wording itself must stay compared",
+        ),
+        (notch[0], "a different message must stay different"),
+    ]
+    for raw, why in mutants:
+        expect(True, norm_error(raw) != reference, why)
 
     # Every other message is compared byte for byte, quotes and all: these carry meaning that is
     # not argparse's to change.
@@ -318,14 +325,22 @@ def cmp_json(py: Path, rs: Path) -> Check:
     return Check(py.name, False, f"keys differ: {bad}")
 
 
-# Mirrors `panel_rects()` in src/plot.rs. If the Rust layout moves, the size check below
-# fails first, which is the signal to update these numbers rather than a mystery.
+# Mirrors `panel_rects()` in src/plot.rs panel by panel, in draw order: entries 3 and 4 are the
+# row-3 pair, and the third is the LEFT panel (phase), the fourth the RIGHT one (impulse). Rust
+# test `the_panel_rects_are_the_ones_the_harness_mirrors` pins these four literals, so a layout
+# change fails a named test instead of quietly turning the ink counts below into a survey of
+# whatever rectangle happens to be written here.
 PANELS = [
     ("level", 127, 129, 1878, 569),
     ("error/target", 127, 736, 1878, 1176),
-    ("impulse", 127, 1343, 909, 1673),
-    ("phase", 941, 1343, 1723, 1673),
+    ("phase", 127, 1343, 909, 1673),
+    ("impulse", 1096, 1343, 1878, 1673),
 ]
+# The panel background in src/plot.rs is `Rgb(0x1B, 0x1F, 0x22)` and the figure behind it is
+# `Rgb(0x15, 0x16, 0x18)`, so a box that has drifted off its panel is detectable rather than
+# merely smaller. Both are asserted in `png_check`.
+PANEL_BG = (0x1B, 0x1F, 0x22)
+FIG_BG = (0x15, 0x16, 0x18)
 # Inset past the frame line and the tick marks, so what is counted is data.
 INK_INSET = 8
 # A flat 0 dB line already covers the panel width; anything under this is an empty panel.
@@ -362,6 +377,39 @@ def png_check(path: Path, want_wh: tuple[int, int] | None) -> Check:
         if x1 <= x0 or y1 <= y0:
             return Check(path.name, False, f"panel {name} is outside the {w}x{h} figure")
         block = img[y0:y1, x0:x1]
+        # Ink is counted against `block[0, 0]`, whatever that pixel happens to be, so a box that
+        # has slid off its panel still reports plenty of "ink" - it is counting the neighbouring
+        # panel's frame and the axis labels in the gutter - and passes while covering no data.
+        # Two things have to be true of the box, measured on the whole interior and on each edge:
+        # it must not be dominated by the figure background (the gutter between the two bottom
+        # panels is exactly that), and its majority colour must be the panel's own. Panels 1 and 2
+        # legitimately end in the shaded HF-bypass span, which is why the second test allows any
+        # non-figure colour and the first one is the strict test.
+        edge = 12
+        for where, strip in [
+            ("interior", block),
+            ("left edge", block[:, :edge]),
+            ("right edge", block[:, -edge:]),
+            ("top edge", block[:edge, :]),
+            ("bottom edge", block[-edge:, :]),
+        ]:
+            flat = strip.reshape(-1, 3)
+            colours, seen = np.unique(flat, axis=0, return_counts=True)
+            dom = colours[seen.argmax()].astype(int).tolist()
+            if max(abs(a - b) for a, b in zip(dom, FIG_BG, strict=True)) <= 2:
+                return Check(
+                    path.name,
+                    False,
+                    f"panel {name} box is not on its panel: its {where} is the figure "
+                    f"background {tuple(dom)}, not the panel background {PANEL_BG}",
+                )
+            if where == "interior" and max(abs(a - b) for a, b in zip(dom, PANEL_BG, strict=True)) > 2:
+                return Check(
+                    path.name,
+                    False,
+                    f"panel {name} box is not on a panel: its background is {tuple(dom)}, "
+                    f"not {PANEL_BG}",
+                )
         # The interior's own top-left pixel is background; ink is anything that differs
         # from it by more than the encoder's rounding on a single channel.
         bg = block[0, 0]
@@ -628,7 +676,11 @@ def main() -> int:
         Scenario(
             "audio-limiter-off",
             ["--bypass-eq", "--no-tp-limiter", "--input", "input_audio.wav", "--out-bits", "24"],
-            artifacts=["input_audio.wav"],
+            # With no --output, and both the EQ tag and the limiter tag empty, both programs
+            # append `_out` rather than overwrite the file they just read, so the artefact this
+            # scenario can check is the `_out` file. Naming the input here would compare a seed
+            # against itself — the rewritten-artefact guard below now refuses that.
+            artifacts=["input_audio_out.wav"],
         ),
         Scenario(
             "audio-lookahead-raised",
@@ -687,6 +739,9 @@ def main() -> int:
     # otherwise passes every check and proves nothing about the code you just changed.
     print(f"rust: {args.rust}")
     print(f"python: {args.python}\nreference: {args.ref}\n")
+
+    # The files copied into both scratch directories before a scenario runs.
+    seeds = {"measurements.json": data, "input_audio.wav": inp}
 
     rows: list[tuple[str, list[Check]]] = []
     failures = 0
@@ -788,6 +843,21 @@ def main() -> int:
 
         for name in sc.artifacts:
             p, r = py_dir / name, rs_dir / name
+            if name in seeds and p.exists() and r.exists():
+                # Every scenario is handed a copy of these files before it runs, so comparing one
+                # after the run only means something if the run actually rewrote it. Naming the
+                # input as the artefact is how `audio-limiter-off` ended up byte-comparing a seed
+                # against itself once both programs started appending `_out` to the default name.
+                pristine = seeds[name].read_bytes()
+                if p.read_bytes() == pristine and r.read_bytes() == pristine:
+                    checks.append(
+                        Check(
+                            f"{name} rewritten",
+                            False,
+                            "neither side changed the file this scenario claims to check, so the "
+                            "comparison is a copy of the input against its own copy",
+                        )
+                    )
             if not p.exists() and not r.exists():
                 checks.append(Check(name, False, "neither side wrote it"))
                 continue

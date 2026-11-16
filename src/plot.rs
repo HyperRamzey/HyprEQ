@@ -2898,6 +2898,31 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_rects_are_the_ones_the_harness_mirrors() {
+        // `scripts/parity.py` keeps a copy of these four rectangles to find plotted ink, and a
+        // copy drifts silently: the harness just counts ink somewhere else. The defect this pins
+        // was exactly that — the fourth box sat 155 px left of the impulse panel, inside the
+        // inter-column gap, so its "ink" was two panel frames and some axis labels, and the two
+        // row-3 panels were named the wrong way round. If a layout constant moves, this test
+        // fails by name and the harness list is updated with it.
+        assert_eq!(
+            PlotData::panel_rects(),
+            [
+                (127, 129, 1878, 569),    // 1: level
+                (127, 736, 1878, 1176),   // 2: error / target
+                (127, 1343, 909, 1673),   // 3: phase, the left panel of the bottom row
+                (1096, 1343, 1878, 1673)  // 4: impulse, the right one
+            ]
+        );
+        // The bottom row is two panels, not one wide one: the right band starts past the first
+        // plot, the column gutter and this panel's own y-label area.
+        let [_, _, phase, impulse] = PlotData::panel_rects();
+        assert_eq!(phase.0, impulse.0 - (Y_LABEL_W + COL_W + COL_GAP) as i32);
+        assert_eq!(phase.1, impulse.1);
+        assert_eq!(impulse.2 - phase.2, (Y_LABEL_W + COL_W + COL_GAP) as i32);
+    }
+
+    #[test]
     fn rendered_panels_tick_their_axis_limits() {
         // The reported defect dropped the tick *and* its label wherever a fixed tick sat
         // exactly on a limit, so the panels lost 20 Hz, 20 kHz, -1/4 ms and (with the

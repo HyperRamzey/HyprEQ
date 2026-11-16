@@ -853,7 +853,7 @@ fn apodize_flag(args: &Args) -> Option<bool> {
 
 /// `--notch-mode`, with argparse's invalid-choice message.
 fn notch_mode(args: &Args) -> NotchMode {
-    match NotchMode::from_str(&args.notch_mode) {
+    match NotchMode::parse(&args.notch_mode) {
         Ok(m) => m,
         Err(_) => usage_error(format!(
             "argument --notch-mode: invalid choice: '{}' (choose from 'safe', 'original', 'zero')",

@@ -222,7 +222,9 @@ mod tests {
         };
         // A: 4000 samples x 999 taps, single block, full and trimmed.
         let (x, h) = (f64s("fixtures/A_in"), f64s("fixtures/A_ir"));
-        let y = convolve_planar_fft(&[x.clone()], &h, false).pop().unwrap();
+        let y = convolve_planar_fft(std::slice::from_ref(&x), &h, false)
+            .pop()
+            .unwrap();
         let want = f64s("fixtures/A_out");
         assert_eq!(y.len(), want.len());
         let w = (0..y.len())

@@ -346,9 +346,10 @@ pub fn write_wav_ieee_float(path: &Path, planar: &[Vec<f64>], fs: u32, bits: u32
     for f0 in (0..frames).step_by(1024) {
         let hi = (f0 + 1024).min(frames);
         buf.clear();
-        for fr in f0..hi {
-            for c in 0..channels {
-                let v = planar[c][fr];
+        // One frame at a time, walking the channels' windows in step.
+        let windows: Vec<&[f64]> = planar.iter().take(channels).map(|c| &c[f0..hi]).collect();
+        for fr in 0..hi - f0 {
+            for &v in windows.iter().map(|w| &w[fr]) {
                 match bits {
                     32 => buf.extend_from_slice(&(v as f32).to_le_bytes()),
                     _ => buf.extend_from_slice(&v.to_le_bytes()),
@@ -773,16 +774,14 @@ mod tests {
                 32 => 1e-6,
                 _ => 0.0,
             };
-            for i in 0..64 {
+            for (i, &v) in a.planar[0].iter().enumerate().take(64) {
                 assert!(
-                    a.planar[0][i].abs() < 1.0,
-                    "bits {bits} sample {i} decoded outside the unit range: {}",
-                    a.planar[0][i]
+                    v.abs() < 1.0,
+                    "bits {bits} sample {i} decoded outside the unit range: {v}"
                 );
                 assert!(
-                    (a.planar[0][i] - sig[i]).abs() <= tol + f64::EPSILON,
-                    "bits {bits} sample {i}: {} vs {}",
-                    a.planar[0][i],
+                    (v - sig[i]).abs() <= tol + f64::EPSILON,
+                    "bits {bits} sample {i}: {v} vs {}",
                     sig[i]
                 );
                 // The float containers are a plain cast, so the mirrored channel

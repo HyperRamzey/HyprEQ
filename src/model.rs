@@ -1260,7 +1260,7 @@ mod tests {
 
         let dir = scratch("inffreq");
         fs::write(
-            &dir.join("raw.csv"),
+            dir.join("raw.csv"),
             "20,6.0\ninf,6.0\nNaN,6.0\n-5,6.0\n1000,6.0\n10000,6.0\n",
         )
         .unwrap();
@@ -1279,7 +1279,7 @@ mod tests {
         // A control CSV can carry the same poison in the gain column; a knot that cannot
         // be represented cannot stay in the curve.
         fs::write(
-            &dir.join("ctrl.csv"),
+            dir.join("ctrl.csv"),
             "20,0.0\n1000,inf\n10000,NaN\n20000,1.0\n",
         )
         .unwrap();
@@ -1371,7 +1371,7 @@ mod tests {
             assert!(
                 pm.get("annotations")
                     .and_then(Value::as_array)
-                    .map_or(false, |a| !a.is_empty()),
+                    .is_some_and(|a| !a.is_empty()),
                 "{k} annotations"
             );
         }

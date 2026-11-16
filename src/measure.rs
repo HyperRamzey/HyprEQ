@@ -398,7 +398,7 @@ mod tests {
         // 1 kHz stays deep inside both banks' pass-bands, so the two ratios must
         // read the same inter-sample peak to within a few hundredths of a dB.
         let s = sig(48000, 0.25, 1000.0, 0.5);
-        let m = measure_signal(&[s.clone()], 48000, Ratio::X16);
+        let m = measure_signal(std::slice::from_ref(&s), 48000, Ratio::X16);
         assert!(
             (m.true_peak_dbtp - m.itu_x4_dbtp).abs() < 0.05,
             "x16 {} vs x4 {}",
@@ -431,7 +431,7 @@ mod tests {
             let a = build_convolver_probe(fs, 0.5);
             let b = build_convolver_probe(fs, 0.5);
             assert_eq!(a, b, "probe must be reproducible at {fs}");
-            let m = measure_signal(&[a.clone()], fs, Ratio::X16);
+            let m = measure_signal(std::slice::from_ref(&a), fs, Ratio::X16);
             assert!(
                 (m.true_peak_dbtp - 0.0).abs() < 1e-9,
                 "fs {fs}: {} dBTP",
@@ -490,9 +490,7 @@ mod tests {
         // `measure_signal` feeds them in blocks, so the column reports where the hold
         // has fallen to by the end of the file — not the maximum of the file.
         let mut early = vec![0.0f64; 48000];
-        for i in 20_000..20_100 {
-            early[i] = 0.999;
-        }
+        early[20_000..20_100].fill(0.999);
         let m = measure_signal(&[early.clone()], 48000, Ratio::X16);
         assert!(
             m.true_peak_dbtp > -0.05,
@@ -508,9 +506,7 @@ mod tests {
         // The same burst at the very end is still held at full scale.
         let mut late = vec![0.0f64; 48000];
         let n = late.len();
-        for i in n - 100..n {
-            late[i] = 0.999;
-        }
+        late[n - 100..].fill(0.999);
         let m2 = measure_signal(&[late], 48000, Ratio::X16);
         assert!(
             m2.meter_peak_hold_dbfs > -0.02,

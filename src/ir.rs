@@ -60,7 +60,7 @@ impl NotchMode {
     }
 
     /// Parse, with the same vocabulary as `--notch-mode`.
-    pub fn from_str(s: &str) -> Result<Self, IrError> {
+    pub fn parse(s: &str) -> Result<Self, IrError> {
         match s.trim().to_ascii_lowercase().as_str() {
             "safe" => Ok(Self::Safe),
             "original" => Ok(Self::Original),
@@ -70,6 +70,14 @@ impl NotchMode {
                 Self::CHOICES.join(", ")
             ))),
         }
+    }
+}
+
+impl std::str::FromStr for NotchMode {
+    type Err = IrError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
     }
 }
 
@@ -128,6 +136,10 @@ pub fn l1_gain_db(ir: &[f64]) -> f64 {
 ///   length, so the transition band is whatever `n_taps` gives.
 /// * `n_tail` — half-Kaiser fade length (`0` disables the fade).
 /// * `kaiser_beta` — shape of that fade (`18.0` offline, `16.0` for the real-time IRs).
+// The signature mirrors the reference's `synthesize_minimum_phase_ir` one parameter at a
+// time, which is what makes the two auditable against each other line by line; bundling the
+// numbers into a struct would trade that for a second naming of the same values.
+#[allow(clippy::too_many_arguments)]
 pub fn synthesize_minimum_phase_ir(
     ctrl_pts: &[(f64, f64)],
     fs: u32,
@@ -216,17 +228,22 @@ pub fn synthesize_minimum_phase_ir(
 
     // Cepstral lifter: keep n=0 and n=n/2 once, the causal half twice.
     let half = n_fft / 2;
-    let mut lifted = Vec::with_capacity(n_fft);
-    for n in 0..n_fft {
-        let w = if n == 0 || n == half {
-            1.0
-        } else if n < half {
-            2.0
-        } else {
-            0.0
-        };
-        lifted.push(Complex64::new(cepstrum[n] * w, 0.0));
-    }
+    // The one-sided lift: DC and Nyquist keep their weight, the lower half doubles so the
+    // inverse transform comes out real, and the upper half is dropped.
+    let lifted: Vec<Complex64> = cepstrum
+        .iter()
+        .enumerate()
+        .map(|(n, &c)| {
+            let w = if n == 0 || n == half {
+                1.0
+            } else if n < half {
+                2.0
+            } else {
+                0.0
+            };
+            Complex64::new(c * w, 0.0)
+        })
+        .collect();
 
     // Minimum-phase spectrum = exp(FFT(lifted cepstrum)), then an inverse transform.
     // The order is the algorithm: `exp` of the cepstrum is not a spectrum at all, and
@@ -546,12 +563,12 @@ mod tests {
         let yes = synthesize_minimum_phase_ir(&c, 48000, 4096, 512, 0, 0.0, true, 18.0).unwrap();
         let freqs = rfftfreq(4096, 48000.0);
         let below = freqs.iter().position(|&f| f > 20200.0).unwrap();
-        for i in 1..below {
-            assert!(
-                (no.mag_lin[i] - yes.mag_lin[i]).abs() < 1e-15,
-                "bin {} changed",
-                freqs[i]
-            );
+        for (i, (&a, &b)) in no.mag_lin[1..below]
+            .iter()
+            .zip(&yes.mag_lin[1..below])
+            .enumerate()
+        {
+            assert!((a - b).abs() < 1e-15, "bin {} changed", freqs[i + 1]);
         }
         assert!(
             yes.mag_lin[yes.mag_lin.len() - 1] < no.mag_lin[no.mag_lin.len() - 1],
@@ -600,12 +617,24 @@ mod tests {
 
     #[test]
     fn notch_mode_round_trips_names() {
+        use std::str::FromStr;
         for name in NotchMode::CHOICES {
-            let m = NotchMode::from_str(name).unwrap();
+            let m = NotchMode::parse(name).unwrap();
             assert_eq!(m.as_str(), name);
             assert_eq!(m.to_string(), name);
+            // The trait form is what `"safe".parse()` uses; both must agree.
+            assert_eq!(NotchMode::from_str(name).unwrap(), m);
+            assert_eq!(name.parse::<NotchMode>().unwrap(), m);
         }
-        assert!(NotchMode::from_str("aggressive").is_err());
+        assert!(
+            NotchMode::parse("  safe ").is_ok(),
+            "surrounding space is trimmed"
+        );
+        assert!(
+            NotchMode::parse("SAFE").is_ok(),
+            "case-folded like argparse"
+        );
+        assert!(NotchMode::parse("aggressive").is_err());
     }
 
     #[test]

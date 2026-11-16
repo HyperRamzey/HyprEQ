@@ -373,13 +373,13 @@ fn y_from_pix(py: f64, min: f64, max: f64, rect: (i32, i32, i32, i32)) -> f64 {
 pub fn arrow_head_points(
     tail: (f64, f64),
     tip: (f64, f64),
-    log_x: bool,
-    x_range: (f64, f64),
-    y_range: (f64, f64),
+    w: Window,
     rect: (i32, i32, i32, i32),
-    len_px: f64,
-    half_width_px: f64,
+    head_px: (f64, f64),
 ) -> [(f64, f64); 3] {
+    let (len_px, half_width_px) = head_px;
+    let (x_range, y_range) = (w.xr, w.yr);
+    let log_x = w.log_x;
     // Unrounded pixel positions: snapping to whole pixels here would change the head's
     // length by up to a pixel depending on where it lands.
     let tip_px = (
@@ -825,10 +825,10 @@ fn draw_title(band: &BitmapArea<'_>, text: &str, size: u32) -> PlotResult {
 /// `ChartContext::draw_series` is not: an unclipped trace runs across the margin and off
 /// the canvas.
 #[derive(Clone, Copy)]
-struct Window {
-    xr: (f64, f64),
-    yr: (f64, f64),
-    log_x: bool,
+pub struct Window {
+    pub xr: (f64, f64),
+    pub yr: (f64, f64),
+    pub log_x: bool,
 }
 
 /// Clip the segment `a -> b` against the axis-aligned box `[lo, hi]` (Liang–Barsky),
@@ -1041,12 +1041,13 @@ macro_rules! annotations {
             let head = $crate::plot::arrow_head_points(
                 (a.xytext.0, tail_y),
                 (a.xy_x, a.xy_y),
-                true,
-                ($crate::plot::F_MIN, $crate::plot::F_MAX),
-                (y_lo, y_hi),
+                $crate::plot::Window {
+                    xr: ($crate::plot::F_MIN, $crate::plot::F_MAX),
+                    yr: (y_lo, y_hi),
+                    log_x: true,
+                },
                 $rect,
-                12.0,
-                5.0,
+                (12.0, 5.0),
             );
             $chart
                 .draw_series(vec![plotters::element::Polygon::new(
@@ -2606,12 +2607,13 @@ mod tests {
             let pts = arrow_head_points(
                 (tip_hz * 3.0, 5.0),
                 (tip_hz, 0.0),
-                true,
-                xr,
-                yr,
+                Window {
+                    xr,
+                    yr,
+                    log_x: true,
+                },
                 rect,
-                len_px,
-                half_px,
+                (len_px, half_px),
             );
             let px = |p: (f64, f64)| {
                 (
@@ -2729,7 +2731,7 @@ mod tests {
         let names: Vec<&str> = mono.level_legend().iter().map(|i| i.text).collect();
         assert_eq!(names.len(), 5, "{names:?}");
         assert!(
-            !names.iter().any(|t| *t == mono.lr_label.as_str()),
+            !names.contains(&mono.lr_label.as_str()),
             "phantom legend entry for a trace that was never drawn: {names:?}"
         );
     }

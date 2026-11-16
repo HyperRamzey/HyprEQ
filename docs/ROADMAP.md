@@ -180,6 +180,85 @@ this tool). That is a much better use of a remeasurement than the tool currently
 
 ---
 
+### 3.6 Regularize toward unity, not toward zero
+
+The textbook form of this problem is: design `g` so that `h * g ≈ d`, where `h` is the
+measured response and `d` a pure delay (flat magnitude, linear phase). Tikhonov gives
+`minimise ‖Hg − d‖² + λ‖g‖²`, solved by `g = (HᴴH + λI)⁻¹ Hᴴd`.
+
+The trap is the second term. What it penalises is `‖g‖²`, the filter's own energy. In a
+band where the inversion is hopeless — a deep coupling null, or simply far past anywhere
+anyone is listening — the least-squares answer is not "leave this band alone", it is
+"stop trying", and those two differ completely in dB: *leave it alone* is 0 dB, *stop
+trying* is −∞ dB. A penalty on the filter's magnitude therefore cuts hardest exactly where
+a bypass was wanted, and it does it more visibly the larger λ gets. Any regularized path
+added here has to be looked at for this: an HF region that droops as λ rises is showing
+the penalty, not the headphone.
+
+The published routines regularize the *deviation from the all-pass reference* instead, or
+equivalently load the diagonal with a frequency-dependent weight so that a band is only
+flattened where it has earned it:
+
+```text
+g = (HᴴH + diag(β))⁻¹ Hᴴ d ,     β(f) ≥ 0
+```
+
+with `β` derived from the response itself — §3.1's residual between the raw curve and its
+octave-smoothed version is exactly such a source — so a smooth band gets a small `β`
+(correction proceeds) and a wild band gets a large one (correction falls back to `d`,
+which is unity). Two properties follow, and both are testable rather than aspirational:
+
+* **the weight is referred to the unity level, not to `max|H|`.** A `λ` scaled by the peak
+  of the response means one thing on a set with a 6 dB null and another thing on a set with
+  a 2 dB null; scaled by the unity reference it means the same thing on both. This is
+  `λ_unity` in PR 1.
+* **`β(f) → ∞` gives `|G(f)| → 1`, not `0`.** One assertion, and it is what stops the naive
+  form from coming back in a later refactor.
+
+Prior art worth reading before writing it: the same construction ships as
+`AKregulatedInversion` in **AKtools** (TU Berlin Audio Techniques; MATLAB), and the
+3GPP VR characterisation in **TR 26.818 §8.3.8** used it to build 16 384-tap compensation
+filters as regularized least-squares inversions with **1/6-octave-smoothed inverted copies
+of the measured responses as the regularization curves** — an industry document choosing the
+smoothed-inverse formulation over the raw one, which is the same argument §3.1 makes from
+perception. In Python it exists as `pyfar.dsp.regularized_spectrum_inversion` (pyfar 0.8.1,
+MIT). Neither is a dependency here: AKtools ships its licence as a PDF bundled with the
+toolbox, so it is maths to re-derive rather than code to link, and pyfar is a numerics
+package this crate has no reason to pull in for one equation. §5 states the rule; PR 1
+implements the maths in `f64` against this document.
+
+### 3.7 Robust statistics, and a smoothing loop that costs `O(N)`
+
+Working with repeated measurements — several seats of one head, several placements of one
+fixture — needs two things the arithmetic mean is bad at.
+
+* **Location and spread that survive one bad seat.** Use the median, and `1.4826 × MAD` as
+  the scale estimate; the constant is what makes the median absolute deviation a consistent
+  estimator of σ for a Gaussian sample, so it stays comparable with the σ-based thresholds
+  this project already prints. One headband clamped hard moves the mean by several dB and
+  barely moves the median.
+* **A combined curve that keeps real resonances.** Averaging repeated seats in the dB domain
+  *smears* a resonance that has shifted a few hertz between placements: the mean shows a
+  feature shallower and wider than any single measurement had. The perceptual line of work
+  (§3.2) reaches for an **upper envelope** instead — per frequency bin, the maximum across
+  the repeats. It keeps every seat's resonance at full depth, and it is the conservative
+  choice for anything that will gate a boost, because it never under-reads a peak.
+
+Both of the above feed on a fractional-octave smoother, and that smoother should cost
+`O(N)`. On a 1/12-octave grid from 20 Hz to 20 kHz the window is roughly 120 samples wide,
+so the obvious "average the window at every bin" form is `O(N·W)` and needs an edge
+correction that nobody implements identically twice. The prefix-sum form — cumulative sums
+of the dB array and of the count array, then a difference per bin, divided by the **actual**
+number of samples inside the window rather than by `W` — is two walks and a division, and it
+is exact at the boundaries instead of pulling edge bins toward zero. Keep the accumulation
+order fixed and compensated (`accum.rs`'s Neumaier sum) and the difference from the naive
+form is below the last bit rather than an unexplained drift.
+
+**Implication here:** PR 1 needs the raw-vs-smoothed residual, PR 2 needs the robust
+location/spread and the envelope, and both want the cheap smoother — so the smoother and the
+two statistics land as one small module with its own tests *before* either PR depends on
+them.
+
 ## 4. Roadmap
 
 Every PR below keeps one invariant: **with no new flags, output is byte-identical to
@@ -192,9 +271,16 @@ proved by its own tests.
 **Problem:** one smoothing/regularization policy for every curve (§3.1, §3.2).
 
 **Method:** estimate λ per model from the raw curve's own deviation from its
-half-octave-smoothed version (Gómez-Bolaños 2016), and use it to (a) cap notch depth in
+half-octave-smoothed version (Gómez-Bolaños 2016), referred to the **unity** level rather
+than to the response's peak (§3.6's `λ_unity`), and use it to (a) cap notch depth in
 `apply_notch_mode`, and (b) weight the control-point derivation in
-`model::normalize_model_entry` where the raw curve is being reduced to knots.
+`model::normalize_model_entry` where the raw curve is being reduced to knots. Where the
+correction is computed as an inversion rather than a knot edit, the diagonal load is
+`diag(β(f))`, not `λI`.
+
+**The test that keeps it honest:** in a band whose `β` is driven large, the resulting
+magnitude goes to **0 dB**, not toward silence (§3.6). That single assertion is what
+distinguishes a regularizer from a shrinker.
 
 **Implementation shape:** a new `fit.rs` — `smooth_octave(f, g, fraction)`,
 `regularization_lambda(g)`, `notch_cap(lambda)`-style pure f64 functions — called from
@@ -219,6 +305,12 @@ Harman family on GRAS 45CA/711 and the newer GRAS KB5000 and B&K 5128 translatio
 refuse — or require `--force` — when model fixture and target fixture disagree. Where no
 equivalent is available, say so in the report instead of silently EQ-ing to a foreign
 target.
+
+**Statistics:** where a fixture has repeated measurements available, the reference curve is
+the **upper envelope** across repeats and the disagreement between seats is reported as
+`1.4826 × MAD` beside the fixture name (§3.7) — a fixture whose seats disagree by 4 dB
+around 200 Hz is telling you the target there means something different per head, and the
+report should say so rather than average it away.
 
 **Acceptance:** the three shipped models gain the fixture their `rig_info` already
 describes and keep producing byte-identical filters; a model with `fixture: bk5128` and
@@ -264,6 +356,11 @@ the skew curve; mono models are byte-identical.
 magnitude above a crossover plus a linear-phase (or selectively all-pass-equalized) low
 end, which is the shape CamillaFIR and the group-delay literature converge on.
 
+**Envelope first:** a mixed-phase stage that chases a raw magnitude will invent steep
+skirts that no headphone has. Constrain the target log-magnitude's continuity *before* the
+minimum-phase conversion — the order DRC-FIR made its name on — so the all-pass section
+handles departure from minimum phase rather than fighting an over-detailed target.
+
 **Acceptance:** the flag must produce a filter whose magnitude matches the minimum-phase
 one within a stated tolerance (so phase is the only thing that moved); the figure's phase
 and IR panels must show the difference; the README states that audibility is contested.
@@ -284,22 +381,30 @@ measured margin after the filter, which is the number a listener actually cares 
 
 ---
 
-## 5. Library notes for the Rust side
+## 5. What this crate links
 
-What the crate uses today (`rustfft` behind the NumPy-compatible wrappers in `fft.rs`,
-`serde`/`serde_json` with `preserve_order`, `clap`, `plotters` for the figure) and what is
-worth knowing about for the roadmap. All versions below were checked against crates.io
-when this was written.
+Six crates, no build-script code generation, and no C library except the ones `plotters`
+pulls through `font-kit`. Every one of them is MIT or Apache-2.0, so the whole tree stays
+inside the MIT licence this project ships under. Versions are the ones `Cargo.lock` pins.
 
-| Crate | Version | What it would be for here |
-| --- | --- | --- |
-| [`realfft`](https://crates.io/crates/realfft) | 3.5.1 | Real-to-complex / complex-to-real transforms directly; would shorten `fft.rs`'s rfft/irfft wrappers, at the cost of re-deriving the NumPy-exact semantics those wrappers exist to guarantee |
-| [`microfft`](https://crates.io/crates/microfft) | 0.6.0 | Small fixed-size transforms with a compile-time plan — a candidate for the true-peak interpolation filters if the detector ever moves to a fixed 4×/32× path |
-| [`neco-minphase`](https://crates.io/crates/neco-minphase) | 0.1.2 | Minimum-phase spectrum and overlap-add convolution kernels — the closest existing crate to `ir::synthesize_minimum_phase_ir` + `convolve.rs`; worth reading before writing PR 5's mixed-phase variant |
-| [`fft-convolver`](https://crates.io/crates/fft-convolver) / [`convolution-dsp`](https://crates.io/crates/convolution-dsp) / [`rconvolve`](https://crates.io/crates/rconvolve) | 0.4.0 / 0.3.0 / 0.1.2 | Real-time-capable partitioned convolution. Only relevant if a streaming mode is ever wanted; `convolve_planar_fft` is offline and deliberately matches the reference's block structure |
-| [`ebur128`](https://crates.io/crates/ebur128) | 0.1.11 | EBU R128 loudness. The reports already carry peak/RMS/ITU-x4 true-peak; integrated loudness and LRA are the obvious additions to a mastering-oriented report (the meter in `meter.rs` is a console peak-hold meter, not a loudness meter, and is not a substitute) |
-| [`hound`](https://crates.io/crates/hound) / [`symphonia`](https://crates.io/crates/symphonia) | 3.5.1 / 0.6.1 | WAV I/O and general container/codec decoding. `riff.rs`/`wav.rs` exist for Python-`wave`-compatible semantics (chunk layout, ragged frames, extensible GUID, TPDF PCM); symphonia is the answer only if non-WAV input is ever accepted |
-| [`plotters`](https://crates.io/crates/plotters) | (in use) | The figure's bitmap/text backend. Axes, ticks, clipping and callouts are hand-drawn on purpose, to match the reference's matplotlib geometry |
+| Crate | Locked version | Licence | What it does here |
+| --- | --- | --- | --- |
+| [`rustfft`](https://crates.io/crates/rustfft) | 6.4.1 | MIT OR Apache-2.0 | The transforms behind the NumPy-convention wrappers in `src/fft.rs` (`ifft` scaling, `n/2+1` bins, positive Nyquist). It is reached only through those wrappers, so rustfft never gets to decide a convention |
+| [`serde`](https://crates.io/crates/serde) | 1.0.229 | MIT OR Apache-2.0 | Two `derive` implementations: the measurement database and a model entry |
+| [`serde_json`](https://crates.io/crates/serde_json) | 1.0.154 | MIT OR Apache-2.0 | Loads `measurements.json` with `preserve_order` on. Model order is load-bearing — it is the order `--list-models`, `--headphone all` and the default model come out in — and the default map would sort it alphabetically |
+| [`clap`](https://crates.io/crates/clap) | 4.6.7 | MIT OR Apache-2.0 | Argument parsing. The argparse-shaped domain validation, exit code `2` and message wording are layered on top of it, not delegated to it |
+| [`plotters`](https://crates.io/crates/plotters) | 0.3.7 | MIT | The verification figure's bitmap and TrueType text backend, with `default-features = false`. Axes, ticks, clipping, legends and callouts are hand-drawn on purpose, to match the reference's matplotlib geometry |
+| [`png`](https://crates.io/crates/png) | 0.17.16 (dev) | MIT OR Apache-2.0 | Reads the rendered figure back in tests, so "the panel has ink in it" is an assertion rather than a hope |
+
+**Licensing rule.** Only MIT/Apache-2.0-compatible Rust crates get linked, and only for
+plumbing — decoding, encoding, transforms, text. The numerics this project is graded
+against stay in-tree. Where an algorithm in this roadmap has a published reference
+implementation, it is cited for its equations and not for its code: the regularized
+inversion work in AKtools is MATLAB under GPL, so it could not be linked or translated
+into a tree that ships under MIT even if a translation were worth the effort, and the
+MIT-licensed equivalent in pyfar is not a dependency here either. Anything the roadmap
+adopts is re-implemented in `f64` from the published maths, with the paper cited in the
+commit that adds it.
 
 **What stays hand-rolled, and why.** PCHIP in log-frequency, the PCG64 dither stream, the
 true-peak interpolation filter, the two-stage limiter envelope, the half-Kaiser tail, and
@@ -307,8 +412,13 @@ the ties-to-even rounding are all pinned to reference behaviour that a generic c
 entitled to implement differently (a spline library may use natural cubic splines; a
 random library may use a different stream; a limiter library will not share this
 lookahead bookkeeping). Those are the parts where "equivalent" is not the requirement, so
-they stay here with tests. Anything that is only *plumbing* — decoding, encoding,
-transforms — is fair game to delegate.
+they stay here with tests.
+
+**Nothing else is linked, deliberately.** PR 1–6 are expected to need no new dependency:
+regularization is a change to the least-squares target, smoothing statistics are a few
+prefix sums, and loudness or new containers would only matter if the CLI's inputs changed.
+If a dependency is ever added, it joins this table with its licence and the one sentence
+explaining why it could not stay hand-rolled.
 
 ---
 

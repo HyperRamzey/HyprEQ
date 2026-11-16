@@ -300,7 +300,7 @@ fn run(args: Args) -> Result<(), Error> {
             choice_list(&models, &aliases)
         ));
     }
-    validate_choice(&args.notch_mode, &NOTCH_MODES, "--notch-mode");
+    validate_choice(&args.notch_mode, &NotchMode::CHOICES, "--notch-mode");
     validate_out_bits(args.out_bits);
     // `--regularize` takes a word or a number, so clap cannot check it; a value that is neither
     // of the documented forms is a usage error like any other bad choice.
@@ -387,9 +387,6 @@ fn run(args: Args) -> Result<(), Error> {
     }
     Ok(())
 }
-
-/// `-H`/`--notch-mode` choice lists, in the order argparse prints them.
-const NOTCH_MODES: [&str; 3] = ["safe", "original", "zero"];
 
 /// `--out-bits` accepts exactly these depths.
 const OUT_BITS: [i64; 4] = [16, 24, 32, 64];
@@ -518,17 +515,7 @@ fn run_model(
         title = format!("{title} | Notch: {}", notch_mode.as_str());
     }
 
-    let (base_ctrl, reg_lines) = regularized_ctrl(model, args);
-    for line in reg_lines {
-        println!("{line}");
-    }
-    let active_ctrl = apply_notch_mode(
-        &base_ctrl,
-        notch_mode,
-        model.safe_cap_db,
-        model.notch_range_hz,
-    )
-    .map_err(|e| Error::msg(e.0))?;
+    let (active_ctrl, reg_lines) = corrected_curve(model, args)?;
 
     let f64_wav = format!("{prefix}_f64_{rate_tag}.wav");
     let mono_rt = format!("{prefix}_mastering_mono_{rate_tag}.wav");
@@ -536,7 +523,10 @@ fn run_model(
 
     let n_fft_mpv = mpv_n_fft(taps);
     let kaiser_beta = 18.0;
-    let kaiser_form_db = kaiser_beta / 0.1102 + 8.7;
+    // The same inversion of the Kaiser rule the window module uses to go the other way, so the
+    // figure in the report and the figure that chose the taper cannot drift apart by someone
+    // editing one of the two copies of `0.1102`.
+    let kaiser_form_db = hypreq::window::kaiser_atten_db_from_beta(kaiser_beta);
     let mpv = synthesize_minimum_phase_ir(
         &active_ctrl,
         fs,
@@ -567,6 +557,13 @@ fn run_model(
     println!("{}", "=".repeat(80));
     println!("MODEL: {title}");
     println!("{}", "=".repeat(80));
+    // What `--regularize` did belongs under the model's own heading, not in front of it: the
+    // block names knots and a knee, which mean nothing before the reader knows which headphone
+    // and which notch policy they are looking at. Empty on the default path, so the report the
+    // parity harness compares is untouched.
+    for line in reg_lines {
+        println!("{line}");
+    }
     println!("=== [1] Offline / mpv 64-Bit Double Convolver ({f64_wav}) ===");
     println!(
         "  Format            : 64-bit IEEE Float (pcm_f64le) | {} Hz | Mono",
@@ -772,6 +769,14 @@ fn run_audio_wav_mode(
         }
     }
 
+    // Computed before the banner so the regularization block can be printed under it, where the
+    // reader already knows which model and which notch policy the knots belong to. Some for
+    // exactly the path that needs it: a model, and the EQ not bypassed.
+    let regularized = match model_cfg {
+        Some(m) if !args.bypass_eq => Some(corrected_curve(m, args)?),
+        _ => None,
+    };
+
     println!();
     println!("{}", "=".repeat(80));
     if args.measure_only && args.bypass_eq {
@@ -793,6 +798,11 @@ fn run_audio_wav_mode(
         );
     }
     println!("{}", "=".repeat(80));
+    if let Some((_, lines)) = regularized.as_ref() {
+        for line in lines {
+            println!("{line}");
+        }
+    }
 
     let m_in = measure_signal(&wav_in.planar, fs, lim_cfg.ratio);
     print_signal_measurements("Input Audio", &m_in);
@@ -801,24 +811,17 @@ fn run_audio_wav_mode(
     let orig_n = wav_in.planar.first().map_or(0, |c| c.len());
     let mut ir_tag = "bypass".to_string();
 
-    if let Some(model) = model_cfg {
-        if !args.bypass_eq {
+    let eq_inputs = match (model_cfg, regularized) {
+        (Some(model), Some((active_ctrl, _))) => Some((model, active_ctrl)),
+        _ => None,
+    };
+
+    if let Some((model, active_ctrl)) = eq_inputs {
+        {
             let use_apodize = match apodize_flag(args) {
                 Some(b) => b,
                 None => model.gauss_apodize,
             };
-            let notch_mode = notch_mode(args);
-            let (base_ctrl, reg_lines) = regularized_ctrl(model, args);
-            for line in reg_lines {
-                println!("{line}");
-            }
-            let active_ctrl = apply_notch_mode(
-                &base_ctrl,
-                notch_mode,
-                model.safe_cap_db,
-                model.notch_range_hz,
-            )
-            .map_err(|e| Error::msg(e.0))?;
             let taps = taps_count(args);
             let n_fft_mpv = mpv_n_fft(taps);
             let mpv = synthesize_minimum_phase_ir(
@@ -924,7 +927,6 @@ fn run_audio_wav_mode(
     Ok(())
 }
 
-/// `--apodize` / `--no-apodize` as a tri-state over the model's own default.
 /// What `--regularize` asked for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RegularizeArg {
@@ -955,6 +957,10 @@ fn regularize_arg(raw: &str) -> Result<RegularizeArg, String> {
     }
 }
 
+/// A curve to synthesize, and the report lines that say how it was arrived at. Empty lines mean
+/// nothing was done and nothing was said, which is the default path.
+type CurveAndReport = (Vec<(f64, f64)>, Vec<String>);
+
 /// The control curve to build the filter from, and the lines describing what regularization did
 /// to it.
 ///
@@ -962,7 +968,7 @@ fn regularize_arg(raw: &str) -> Result<RegularizeArg, String> {
 /// reference program derives, which is why parity is unaffected by the flag existing. Anything
 /// else goes through [`Model::regularize`], and the report says which path it took and how far
 /// the knots moved, because "it regularized something" is not a reviewable claim.
-fn regularized_ctrl(model: &Model, args: &Args) -> (Vec<(f64, f64)>, Vec<String>) {
+fn regularized_ctrl(model: &Model, args: &Args) -> CurveAndReport {
     // Validated in the argument phase, where a bad value becomes a usage error. `Off` is the
     // fallback rather than a panic so this function stays total.
     let arg = regularize_arg(&args.regularize).unwrap_or(RegularizeArg::Off);
@@ -987,18 +993,20 @@ fn regularized_ctrl(model: &Model, args: &Args) -> (Vec<(f64, f64)>, Vec<String>
         return (model.ctrl_pts.clone(), lines);
     }
     let curve = done.curve().to_vec();
+    // The plain curve read at the regularized knot's frequency: the two share frequencies on both
+    // paths (the knots themselves, or the measurement grid the knots were derived on), and a PCHIP
+    // passes through its own nodes, so this reads the exact old value. One interpolant for the
+    // whole curve — building it inside the loop made the report quadratic in the knot count.
     let plain_f: Vec<f64> = model.ctrl_pts.iter().map(|&(x, _)| x).collect();
     let plain_g: Vec<f64> = model.ctrl_pts.iter().map(|&(_, y)| y).collect();
+    let plain_curve = hypreq::pchip::Pchip::new(&plain_f, &plain_g);
 
     let mut worst_db = 0.0f64;
     let mut worst_hz = 0.0f64;
     let mut moved = 0usize;
     let (mut was_at_worst, mut now_at_worst) = (0.0f64, 0.0f64);
     for &(hz, gain) in &curve {
-        // Evaluating the plain curve at the regularized knot's frequency: the two curves share
-        // frequencies on both paths (knots, or the measurement grid the knots were derived on),
-        // and a PCHIP passes through its own nodes, so this reads the exact old value.
-        let plain = hypreq::pchip::pchip_eval1(&plain_f, &plain_g, hz);
+        let plain = plain_curve.eval(hz);
         let delta = gain - plain;
         if delta.abs() > worst_db.abs() {
             worst_db = delta;
@@ -1010,6 +1018,15 @@ fn regularized_ctrl(model: &Model, args: &Args) -> (Vec<(f64, f64)>, Vec<String>
             moved += 1;
         }
     }
+    if moved == 0 {
+        // Say so, rather than reporting a largest move of +0.00 dB at a frequency the curve never
+        // had. `worst_hz` starts at 0 Hz, and 0 Hz is not a knot of anything.
+        lines.push(format!(
+            "  Knots moved     : 0 of {} (every band sits under the knee)",
+            curve.len()
+        ));
+        return (curve, lines);
+    }
     lines.push(format!(
         "  Knots moved     : {moved} of {} (largest {worst_db:+.2} dB @ {worst_hz:.0} Hz)",
         curve.len()
@@ -1018,6 +1035,27 @@ fn regularized_ctrl(model: &Model, args: &Args) -> (Vec<(f64, f64)>, Vec<String>
         "  Extreme shifted : {was_at_worst:+.2} dB -> {now_at_worst:+.2} dB at that knot"
     ));
     (curve, lines)
+}
+
+/// The curve to synthesize, and the lines saying what `--regularize` did to get there.
+///
+/// Regularize first, cap second, always in that order. The cap is a ceiling on what reaches the
+/// filter — the notch range is where a coupler's own resonance lives, so a boost there is a boost
+/// the ear will not hear consistently — and `--regularize` is a soft opinion about which bands are
+/// worth chasing at all. Inverting the two, or skipping the cap when `--regularize` is on because
+/// "the regularizer already softens things", would let a boost through that the model's own
+/// metadata forbids: the regularizer shrinks toward a bypass by the *measurement's* deviation, and
+/// has no idea what `safe_cap_db` says about this model's notch.
+fn corrected_curve(model: &Model, args: &Args) -> Result<CurveAndReport, Error> {
+    let (base_ctrl, reg_lines) = regularized_ctrl(model, args);
+    let active_ctrl = apply_notch_mode(
+        &base_ctrl,
+        notch_mode(args),
+        model.safe_cap_db,
+        model.notch_range_hz,
+    )
+    .map_err(|e| Error::msg(e.0))?;
+    Ok((active_ctrl, reg_lines))
 }
 
 /// Print what a correction demands of some content. Reached only behind `--assess`.
@@ -1047,6 +1085,10 @@ fn print_assessment(
     }
 }
 
+/// `--apodize` / `--no-apodize` as a tri-state over the model's own default.
+///
+/// Neither flag is `None`, which is what lets a model in the database keep saying `gauss_apodize:
+/// false` while an operator overrides it in one invocation.
 fn apodize_flag(args: &Args) -> Option<bool> {
     if args.apodize {
         Some(true)
@@ -1057,15 +1099,14 @@ fn apodize_flag(args: &Args) -> Option<bool> {
     }
 }
 
-/// `--notch-mode`, with argparse's invalid-choice message.
+/// `--notch-mode` as a mode.
+///
+/// No error path here, and no second wording of the rejection: the argument phase ran
+/// [`validate_choice`] over [`NotchMode::CHOICES`], which exits with argparse's message and code 2
+/// for anything else, and the test `the_choice_list_and_the_variants_cover_each_other` pins that
+/// every member of that list names a mode. What is left is a lookup.
 fn notch_mode(args: &Args) -> NotchMode {
-    match NotchMode::parse(&args.notch_mode) {
-        Ok(m) => m,
-        Err(_) => usage_error(format!(
-            "argument --notch-mode: invalid choice: '{}' (choose from 'safe', 'original', 'zero')",
-            args.notch_mode
-        )),
-    }
+    NotchMode::parse(&args.notch_mode).unwrap_or(NotchMode::Safe)
 }
 
 /// The path as mpv.conf wants it: absolute, forward slashes, escaped drive colon.
@@ -1198,8 +1239,7 @@ pub fn format_rate_tag(fs: u32) -> String {
     let tag = if (khz - khz.round()).abs() < 1e-9 {
         format!("{}", khz.round() as i64)
     } else {
-        let s = format!("{khz}");
-        s
+        format!("{khz}")
     };
     format!("{tag}k")
 }
@@ -1403,6 +1443,121 @@ mod tests {
 
     /// With the flag off, the curve handed to the filter builder is the model's own — the same
     /// bytes the reference program derives. Nothing else in this PR is allowed to move that.
+    /// A hand-tuned model with a +12 dB knot in its notch band, on a measurement smooth enough
+    /// that a high knee leaves the curve exactly as written.
+    fn notch_cap_fixture() -> Model {
+        let raw_pts: Vec<hypreq::model::Point> = (0..24)
+            .map(|i| {
+                // Flat, and therefore reading as no deviation anywhere: the knee alone decides how
+                // much of the boost survives, and `|S|²` is exactly 1 at every knot.
+                let hz = 20.0 * 10f64.powf(f64::from(i) / 23.0 * 3.0);
+                vec![hz, 0.0]
+            })
+            .collect();
+        let ctrl_pts: Vec<(f64, f64)> = raw_pts
+            .iter()
+            .map(|p| {
+                let hz = p[0];
+                // Two octaves wide: broad enough that the half-octave smoothing the load is
+                // measured with sees almost no deviation, so the knee — not the shape — decides how
+                // much of the +12 dB survives.
+                let peak = 12.0 * (-2.0 * ((hz / 4000.0).log2() / 2.0).powi(2)).exp();
+                (hz, peak)
+            })
+            .collect();
+        Model {
+            derivation: None,
+            key: "capfixture".to_string(),
+            name: "Cap Fixture".to_string(),
+            short_title: "Cap".to_string(),
+            file_prefix: "cap_fixture".to_string(),
+            rig_info: String::new(),
+            target_name: "flat".to_string(),
+            target_pts: vec![(20.0, 0.0), (20000.0, 0.0)],
+            harm_offset: 0.0,
+            gauss_apodize: false,
+            hf_bypass_hz: 20000.0,
+            notch_range_hz: Some((3000.0, 6000.0)),
+            notch_ref_hz: Some(4000.0),
+            safe_cap_db: 1.5,
+            autoeq_geq_str: None,
+            autoeq_offset_db: None,
+            plot_meta: serde_json::Map::new(),
+            raw_pts,
+            ctrl_pts,
+        }
+    }
+
+    /// Regularize first, cap second — in that order, every time.
+    ///
+    /// `--regularize` decides which bands are worth chasing from how well the measurement supports
+    /// them. It has no opinion about `safe_cap_db`, which is this model's own ceiling on the band
+    /// where a coupler resonance lives. So a knee that trusts everything must still not put a
+    /// +12 dB boost through the notch, and the ceiling has to be what stops it: the same fixture
+    /// under `--notch-mode original` keeps the boost, which is the only thing that proves the cap
+    /// was the one acting here.
+    #[test]
+    fn the_notch_cap_still_binds_on_a_regularized_curve() {
+        let model = notch_cap_fixture();
+        let (lo, hi) = model.notch_range_hz.expect("the fixture has a notch band");
+        let peak_in_range = |curve: &[(f64, f64)]| -> f64 {
+            curve
+                .iter()
+                .filter(|(hz, _)| *hz >= lo && *hz <= hi)
+                .map(|&(_, g)| g)
+                .fold(f64::MIN, f64::max)
+        };
+
+        let mut args = Args::try_parse_from(["hypreq", "-H", "capfixture", "--regularize", "1000"])
+            .expect("parses");
+        let (curve, lines) = corrected_curve(&model, &args).expect("a curve");
+        assert!(
+            lines.iter().any(|l| l.contains("0 of")),
+            "a trusting knee should leave the curve alone: {lines:?}"
+        );
+        let capped = peak_in_range(&curve);
+        assert!(
+            capped <= model.safe_cap_db + 1e-9,
+            "a +12 dB knot in the notch band went through at {capped:.2} dB; the cap is {}",
+            model.safe_cap_db
+        );
+        assert!(
+            capped > 0.5,
+            "the safe mode should hold the boost at its cap, not zero it: {capped:.2}"
+        );
+
+        // With the cap off, the same curve keeps the demand the knots asked for.
+        args.notch_mode = "original".to_string();
+        let (uncapped, _) = corrected_curve(&model, &args).expect("a curve");
+        assert!(
+            peak_in_range(&uncapped) > 6.0,
+            "`original` should leave the notch alone: {:.2}",
+            peak_in_range(&uncapped)
+        );
+
+        args.notch_mode = "safe".to_string();
+        // Now the part that says which of the two acts last. A distrustful knee shrinks the +12 dB
+        // to roughly +6 dB — still well over the ceiling — and the curve comes back *at* the
+        // ceiling. Cap first and regularize second, and the same fixture lands near +0.5 dB: the
+        // load would be chewing on a knot the cap had already flattened, softening a boost that
+        // was no longer there. Two mechanisms, one order, and the number says which.
+        args.regularize = "-0.5".to_string();
+        let (shrunk_then_capped, lines) = corrected_curve(&model, &args).expect("a curve");
+        let peak = peak_in_range(&shrunk_then_capped);
+        assert!(
+            (peak - model.safe_cap_db).abs() < 0.1,
+            "the ceiling should be the last word, at {peak:.3} dB (cap-first would be ~0.54): \
+             {lines:?}"
+        );
+        args.notch_mode = "original".to_string();
+        let (shrunk_only, _) = corrected_curve(&model, &args).expect("a curve");
+        let uncapped = peak_in_range(&shrunk_only);
+        assert!(
+            uncapped > 3.0 && uncapped < 11.0,
+            "the knee should have softened the demand without the ceiling erasing it: {uncapped:.2}"
+        );
+    }
+
     #[test]
     fn regularize_off_hands_back_the_models_own_curve() {
         let db = hypreq::model::load_measurement_database(
@@ -1427,7 +1582,20 @@ mod tests {
             curve, model.ctrl_pts,
             "lambda far above every deviation must be a no-op"
         );
-        assert!(lines.iter().any(|l| l.contains("0 of")), "{lines:?}");
+        // And it has to say "nothing moved" rather than report a largest move of +0.00 dB at
+        // 0 Hz — a frequency that is not a knot of this or any curve, and the value the running
+        // "worst knot" tracker starts at.
+        let text = lines.join("\n");
+        assert!(text.contains("0 of"), "{text}");
+        assert!(
+            !text.contains("@ 0 Hz"),
+            "a curve that did not move was given a worst knot it does not have: {text}"
+        );
+        assert!(
+            !text.contains("largest"),
+            "nothing moved, so nothing is largest: {text}"
+        );
+        assert!(text.contains("under the knee"), "{text}");
 
         // A knee low enough to distrust everything walks the curve to 0 dB, and says so.
         args.regularize = "-40".to_string();

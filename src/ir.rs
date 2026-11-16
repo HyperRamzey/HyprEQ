@@ -59,25 +59,26 @@ impl NotchMode {
         }
     }
 
-    /// Parse, with the same vocabulary as `--notch-mode`.
-    pub fn parse(s: &str) -> Result<Self, IrError> {
+    /// The mode a choice string names, or `None` for anything else.
+    ///
+    /// It answers a yes/no question and carries no wording, because the only caller that can fail
+    /// is the CLI, and there the message has to be argparse's: `--notch-mode` is rejected by
+    /// the CLI's own choice check with `invalid choice: 'x' (choose from 'safe', 'original',
+    /// 'zero')` and exit code 2. A second, library-worded rejection next to it could only ever be
+    /// dead — and it was: the one production caller threw its `Err` away and rebuilt argparse's
+    /// sentence by hand.
+    ///
+    /// Space and case are folded here, which is a courtesy to library callers. It is *not* what
+    /// the CLI does: argparse compares choices exactly, so `--notch-mode SAFE` is a usage error,
+    /// and `validate_choice` is what enforces that.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "safe" => Ok(Self::Safe),
-            "original" => Ok(Self::Original),
-            "zero" => Ok(Self::Zero),
-            other => Err(IrError(format!(
-                "Unknown notch mode: {other} (choose {})",
-                Self::CHOICES.join(", ")
-            ))),
+            "safe" => Some(Self::Safe),
+            "original" => Some(Self::Original),
+            "zero" => Some(Self::Zero),
+            _ => None,
         }
-    }
-}
-
-impl std::str::FromStr for NotchMode {
-    type Err = IrError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse(s)
     }
 }
 
@@ -615,24 +616,48 @@ mod tests {
 
     #[test]
     fn notch_mode_round_trips_names() {
-        use std::str::FromStr;
         for name in NotchMode::CHOICES {
-            let m = NotchMode::parse(name).unwrap();
+            let m = NotchMode::parse(name).expect("a choice names a mode");
             assert_eq!(m.as_str(), name);
             assert_eq!(m.to_string(), name);
-            // The trait form is what `"safe".parse()` uses; both must agree.
-            assert_eq!(NotchMode::from_str(name).unwrap(), m);
-            assert_eq!(name.parse::<NotchMode>().unwrap(), m);
         }
         assert!(
-            NotchMode::parse("  safe ").is_ok(),
+            NotchMode::parse("  safe ").is_some(),
             "surrounding space is trimmed"
         );
         assert!(
-            NotchMode::parse("SAFE").is_ok(),
-            "case-folded like argparse"
+            NotchMode::parse("SAFE").is_some(),
+            "case is folded for library callers; the CLI validates exactly"
         );
-        assert!(NotchMode::parse("aggressive").is_err());
+        assert!(NotchMode::parse("aggressive").is_none());
+    }
+
+    /// `--notch-mode` trusts `CHOICES` to be the whole vocabulary: the argument phase rejects
+    /// anything outside it, and the mode is then read with an infallible fallback instead of a
+    /// second error message. That is only honest if the list and the variants cover each other, so
+    /// it is checked rather than asserted in a comment.
+    #[test]
+    fn the_choice_list_and_the_variants_cover_each_other() {
+        let parsed: Vec<NotchMode> = NotchMode::CHOICES
+            .iter()
+            .map(|c| NotchMode::parse(c).unwrap_or_else(|| panic!("'{c}' names nothing")))
+            .collect();
+        let all = [NotchMode::Safe, NotchMode::Original, NotchMode::Zero];
+        assert_eq!(parsed.len(), all.len());
+        for m in all {
+            assert!(
+                parsed.contains(&m),
+                "{} is not reachable from CHOICES {:?}",
+                m.as_str(),
+                NotchMode::CHOICES
+            );
+        }
+        // And nothing in the list folds onto another entry, or two names would mean one mode.
+        let names: Vec<&str> = parsed.iter().map(|m| m.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "two choices name one mode");
     }
 
     #[test]

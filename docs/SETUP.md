@@ -203,9 +203,23 @@ numbers defensible on their own:
   and bands named by the standard's nominal value (20, 25, 31.5 … 16 k, 20 k). The nominal
   mantissa index is `k - 10·⌊k/10⌋`, not a truncated remainder: at `k = -17` the truncated
   version reports 50 Hz where the standard says 20 Hz.
-- Levels are windowed RMS with a Hann window, divided by `n · Σw²`. That divisor is Parseval
-  for an unnormalized transform with the window's energy taken out, and it is what makes a
-  full-scale sine read `-3.01 dBFS` instead of a number that moves with the window length.
+- The grid's ends are **indices** (`k = -17 … 13`), trimmed at Nyquist. They cannot be frequency
+  tests: band `-17`'s exact centre is `19.9526 Hz`, so `centre > 20.0` drops the nominal 20 Hz
+  band and quietly starts the grid at 25.12 Hz.
+- Levels are windowed RMS with a Hann window **sized to the record**, zero-padded out to the
+  transform length, divided by `n · Σw²` with `Σw²` summed over the record only. Sizing the taper
+  to the transform instead ends the record at the peak of the taper — a rectangular edge into the
+  padding — and integrates the window's energy over silence: a full-scale 1 kHz sine read `-6.05
+  dBFS` at 8193 samples where it reads `-3.01` at 8192, and leakage two bands away went from
+  `-124` to `-45 dBFS`. `n · Σw²` is Parseval for an unnormalized transform with the window's
+  energy taken out; it is what makes the level independent of the record length.
+- Below about **8.7 bins** a third-octave band is narrower than one FFT bin (band width is
+  `10^(1/20) − 10^(−1/20) ≈ 0.2308` of its centre), so the bottom of the grid is attributed to the
+  nearest band rather than measured: at 48 kHz with an 8192-sample record (bin 5.86 Hz, limit
+  51 Hz) a 26.5 Hz tone splits between the 25 Hz and 31.5 Hz bands, each reading about 3 dB under
+  the tone. The report prints its bin spacing and that limit whenever it is above the grid's
+  lowest centre, which is the honest scope note; with the full 262144-sample window (bin 0.18 Hz)
+  the line is not printed and the tone lands in its own band.
 - Every FFT bin is assigned to the band whose centre is nearest in log frequency. Testing each
   bin against a band's edges instead rounds one edge down and the other up, so a bin on a
   boundary is counted in two bands: measured on a 60 Hz tone, the neighbouring band read 13 dB
@@ -213,6 +227,14 @@ numbers defensible on their own:
 - Channels are analysed separately and combined by **maximum**, never averaged: a narrow spike
   in one ear is the demanding one.
 - A `NaN` in the input reads as *no content* in that band, never as a demand.
+- "After the filter" is the level the convolver **delivers**: content + curve + the FIR's own
+  preamp (`headroom_db − max_boost_db`, the number `synthesize_minimum_phase_ir` reports). Leaving
+  the preamp out read a `-3.01 dBFS` tone through the shipped `dt770_80` curve as `-4.20 dBFS`
+  where the filter actually delivers `-9.80 dBFS`, and the ceiling test then added the headroom a
+  second time. So the ceiling comparison is against `--tp-ceiling` alone, and the budget comparison
+  is against the curve alone — the demand is what the filter asks for, the ceiling is what arrives.
+- The ceiling line names the limiter only when one is running: under `--no-tp-limiter` it says the
+  bands will be written as they are.
 
 **Regularization (`--regularize`, `src/fit.rs`).** Also unreferenced by the oracle, and off by
 default for the same reason the assessment section is: the default report and curve are compared

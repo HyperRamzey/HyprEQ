@@ -725,7 +725,15 @@ fn run_model(
 
     if args.assess {
         // No audio on this path: the section describes the filter, and says so.
-        print_assessment(&active_ctrl, &[], fs, args, headroom_db);
+        print_assessment(
+            &active_ctrl,
+            &[],
+            fs,
+            args,
+            headroom_db,
+            mpv.preamp_db,
+            lim_cfg.enable,
+        );
     }
 
     // mpv wants an absolute path with escaped separators. `absolute` is the lexical
@@ -837,7 +845,15 @@ fn run_audio_wav_mode(
             if args.assess {
                 // Asked of the input, before the filter: the question is what the correction
                 // is about to demand of the content that is already there.
-                print_assessment(&active_ctrl, &wav_in.planar, fs, args, args.headroom_db);
+                print_assessment(
+                    &active_ctrl,
+                    &wav_in.planar,
+                    fs,
+                    args,
+                    args.headroom_db,
+                    mpv.preamp_db,
+                    lim_cfg.enable,
+                );
             }
             work = convolve_planar_fft(&work, &mpv.ir, args.trim_tail);
             let m_eq = measure_signal(&work, fs, lim_cfg.ratio);
@@ -1006,26 +1022,27 @@ fn regularized_ctrl(model: &Model, args: &Args) -> (Vec<(f64, f64)>, Vec<String>
 
 /// Print what a correction demands of some content. Reached only behind `--assess`.
 ///
-/// The ceiling quoted is the limiter's, because that is the order the audio is processed
-/// in: filter, then the convolver's headroom, then the limiter. `--no-tp-limiter` does not
-/// change the number, only whether anything is there to enforce it — which the section's own
-/// wording leaves to the reader.
+/// `preamp_db` is the number the FIR synthesis actually applied, not `--headroom-db`: the
+/// convolver bakes `headroom_db - max_boost` into every tap, so that preamp *is* the gain
+/// staging between the filter and the limiter, and quoting the requested headroom instead
+/// overstated the level after the filter by the whole max boost.
 fn print_assessment(
     ctrl: &[(f64, f64)],
     planar: &[Vec<f64>],
     fs: u32,
     args: &Args,
     headroom_db: f64,
+    preamp_db: f64,
+    limiter_on: bool,
 ) {
-    let d = hypreq::assess::assess(
-        ctrl,
-        planar,
-        fs,
-        args.assess_budget,
+    let run = hypreq::assess::Staging {
         headroom_db,
-        args.tp_ceiling,
-    );
-    for line in hypreq::assess::report_lines(&d, args.assess_budget, headroom_db, args.tp_ceiling) {
+        preamp_db,
+        ceiling_db: args.tp_ceiling,
+        limiter_on,
+    };
+    let d = hypreq::assess::assess(ctrl, planar, fs, args.assess_budget, &run);
+    for line in hypreq::assess::report_lines(&d, args.assess_budget, &run) {
         println!("{line}");
     }
 }

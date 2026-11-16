@@ -247,10 +247,10 @@ fn run(args: Args) -> Result<(), Error> {
     // database is reported before an unknown flag is. A pure measurement run needs no
     // database at all, and must not fail when there is none.
     let needs_models = args.measure_wav.is_none() && !(args.input.is_some() && args.bypass_eq);
+    let (data_file, models_dir) = database_paths(&args);
     let mut models = Database::default();
-    if args.data_file.exists() || needs_models {
-        models = load_measurement_database(&args.data_file, &args.models_dir)
-            .map_err(|e| Error::msg(e.0))?;
+    if data_file.exists() || needs_models {
+        models = load_measurement_database(&data_file, &models_dir).map_err(|e| Error::msg(e.0))?;
     }
 
     // argparse validates each `choices` option as it consumes the command line, so every
@@ -894,6 +894,54 @@ pub fn default_out_path(input: &str, ir_tag: &str, limiter: Option<&str>) -> Str
         .to_string()
 }
 
+/// Where the database and the extra-model directory are actually looked for.
+///
+/// Both defaults are relative, so they resolve against the working directory. That is right
+/// inside a checkout and wrong for an installed binary run from elsewhere, so an untouched
+/// default that is not there is retried beside the executable — which is where the loader's
+/// own "place measurements.json next to the binary" advice points.
+fn database_paths(args: &Args) -> (PathBuf, PathBuf) {
+    let default_data = PathBuf::from(hypreq::model::DEFAULT_DATA_FILE);
+    let default_models = PathBuf::from(hypreq::model::DEFAULT_MODELS_DIR);
+    if args.data_file != default_data || args.data_file.exists() {
+        return (args.data_file.clone(), args.models_dir.clone());
+    }
+    let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| {
+        p.parent()
+            .map(|d| d.to_path_buf())
+            .filter(|d| !d.as_os_str().is_empty())
+    }) else {
+        return (args.data_file.clone(), args.models_dir.clone());
+    };
+    let (data, models) = pick_next_to_exe(&exe_dir, &default_models, |p| p.exists());
+    if args.models_dir == default_models {
+        (data, models)
+    } else {
+        (data, args.models_dir.clone())
+    }
+}
+
+/// The exe-directory candidate for a missing default database, split out so the rule can be
+/// tested without moving the real files around.
+fn pick_next_to_exe(
+    exe_dir: &Path,
+    default_models: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> (PathBuf, PathBuf) {
+    let data = exe_dir.join(hypreq::model::DEFAULT_DATA_FILE);
+    let models = exe_dir.join(default_models);
+    if exists(&data) {
+        (data, models)
+    } else {
+        // Nothing beside the executable either: report the original relative path, because
+        // that is the one the user can actually act on.
+        (
+            PathBuf::from(hypreq::model::DEFAULT_DATA_FILE),
+            PathBuf::from(default_models),
+        )
+    }
+}
+
 /// The value behind a `#[arg(default_value_t = …)]` in a parsed command line.
 #[cfg(test)]
 fn argv(args: &[&str]) -> Args {
@@ -1009,6 +1057,29 @@ mod tests {
         );
         // The other aliases keep working, and the shadowing key itself stays selectable.
         assert!(shadowed.iter().any(|(a, _)| *a == "dt770_80ohm"));
+    }
+
+    #[test]
+    fn an_untouched_default_database_is_retried_beside_the_executable() {
+        let exe = Path::new("/opt/hypreq/bin");
+        let models_default = Path::new("models");
+        // Installed layout: the database sits next to the binary.
+        let (data, models) = pick_next_to_exe(exe, models_default, |p| {
+            p == Path::new("/opt/hypreq/bin/measurements.json") || p == Path::new("models")
+        });
+        assert_eq!(data, Path::new("/opt/hypreq/bin/measurements.json"));
+        assert_eq!(models, Path::new("/opt/hypreq/bin/models"));
+
+        // Neither place has one: the message has to name the path the user typed,
+        // not a directory they never mentioned.
+        let (data, models) = pick_next_to_exe(exe, models_default, |_| false);
+        assert_eq!(data, Path::new("measurements.json"));
+        assert_eq!(models, models_default);
+
+        // An explicit --data-file is never second-guessed.
+        let a = argv(&["--data-file", "custom/db.json"]);
+        let (data, _) = database_paths(&a);
+        assert_eq!(data, Path::new("custom/db.json"));
     }
 
     #[test]

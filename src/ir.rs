@@ -344,6 +344,28 @@ pub fn export_audit_csv(
     harm_offset: f64,
     ctrl_pts: &[(f64, f64)],
 ) -> Result<PathBuf, std::io::Error> {
+    export_audit_csv_in(
+        Path::new(""),
+        model_key,
+        raw_pts,
+        harm_pts,
+        harm_offset,
+        ctrl_pts,
+    )
+}
+
+/// [`export_audit_csv`] with the table written inside `dir` instead of the process's
+/// working directory. `cargo test` runs tests in parallel in one process, and the working
+/// directory is process-global state: a test that changes it can move every other test's
+/// relative paths out from under it.
+pub fn export_audit_csv_in(
+    dir: &Path,
+    model_key: &str,
+    raw_pts: &[Point],
+    harm_pts: &[(f64, f64)],
+    harm_offset: f64,
+    ctrl_pts: &[(f64, f64)],
+) -> Result<PathBuf, std::io::Error> {
     let file_name = format!("{model_key}_audit_data.csv");
     let f_ctrl: Vec<f64> = ctrl_pts.iter().map(|p| p.0).collect();
     let g_ctrl: Vec<f64> = ctrl_pts.iter().map(|p| p.1).collect();
@@ -373,8 +395,9 @@ pub fn export_audit_csv(
             eq_val
         ));
     }
-    std::fs::write(&file_name, s)?;
-    Ok(PathBuf::from(file_name))
+    let path = dir.join(file_name);
+    std::fs::write(&path, s)?;
+    Ok(path)
 }
 
 /// `max(65536, 1 << (taps*4 - 1).bit_length())` — the offline/mpv synthesis FFT size.
@@ -632,14 +655,15 @@ mod tests {
     fn audit_csv_is_crlf_and_fixed_width() {
         let dir = std::env::temp_dir().join(format!("hypreq_audit_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_current_dir(&dir).unwrap();
         let raw = vec![
             Point::from(vec![20.0, -1.26]),
             Point::from(vec![1000.0, 0.0]),
         ];
         let target = vec![(20.0, 1.41), (1000.0, 0.0)];
         let ctrl = vec![(20.0, 0.12), (1000.0, -0.34)];
-        let p = export_audit_csv("unitmodel", &raw, &target, 0.0, &ctrl).unwrap();
+        // Written by path, never by moving the process's working directory: that is
+        // process-global state and `cargo test` runs this test beside every other one.
+        let p = export_audit_csv_in(&dir, "unitmodel", &raw, &target, 0.0, &ctrl).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text
             .starts_with("frequency_hz,raw_dBr,harman_target_dBr,raw_error_dB,applied_eq_dB\r\n"));
@@ -648,6 +672,16 @@ mod tests {
         assert!(row1.starts_with("20.0,"), "{row1}");
         assert_eq!(row1.split(',').count(), 5);
         assert_eq!(p.file_name().unwrap(), "unitmodel_audit_data.csv");
+        assert_eq!(
+            p.parent().unwrap(),
+            dir,
+            "the table lands where it was asked to"
+        );
+        // The relative-path form still writes beside the caller, which is what the command
+        // line relies on to keep filenames next to the convolvers.
+        let rel = export_audit_csv("unitmodel_rel", &raw, &target, 0.0, &ctrl).unwrap();
+        assert_eq!(rel, PathBuf::from("unitmodel_rel_audit_data.csv"));
+        std::fs::remove_file(&rel).ok();
         std::fs::remove_dir_all(&dir).ok();
     }
 }

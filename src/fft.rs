@@ -401,7 +401,11 @@ mod tests {
         assert_eq!(rfft(&[3.0], 1), vec![Complex64::new(3.0, 0.0)]);
         assert_eq!(rfft(&[], 1), vec![Complex64::new(0.0, 0.0)]);
         assert_eq!(irfft(&[Complex64::new(2.0, 0.0)], 1), vec![2.0]);
-        assert_eq!(irfft(&[Complex64::new(2.0, 7.0)], 1), vec![2.0], "imag part is unused");
+        assert_eq!(
+            irfft(&[Complex64::new(2.0, 7.0)], 1),
+            vec![2.0],
+            "imag part is unused"
+        );
         // Zero-padding is the same rule at the other end of the size range.
         assert_eq!(rfft(&[1.0], 4).len(), 3);
     }

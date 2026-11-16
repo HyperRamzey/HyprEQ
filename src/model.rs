@@ -1402,4 +1402,55 @@ mod tests {
         assert_eq!(round2(-0.125), -0.12);
         assert_eq!(round4(0.0625), 0.0625);
     }
+
+    #[test]
+    fn the_shipped_database_keeps_its_insertion_order() {
+        // serde_json's default map is a BTreeMap, which would sort the models
+        // alphabetically. `preserve_order` is what keeps `--list-models`, the default
+        // `-H all` sweep and the built-in metadata telling the same story as the file.
+        let db =
+            load_measurement_database(Path::new(DEFAULT_DATA_FILE), Path::new(DEFAULT_MODELS_DIR))
+                .expect("the shipped measurements.json must load from the crate root");
+        assert_eq!(
+            db.keys(),
+            vec!["jbl770nc", "dt770_80", "ft1pro"],
+            "model order must be the file's key order, not alphabetical"
+        );
+        assert_eq!(db.resolve("all"), Some("all"));
+        // The first key is what `--input` with `-H all` selects.
+        assert_eq!(db.keys().first().copied(), Some("jbl770nc"));
+    }
+
+    #[test]
+    fn a_json_object_keeps_the_order_it_was_written_in() {
+        let text = r#"{"zebra": 1, "mango": 2, "apple": 3}"#;
+        let v: Value = serde_json::from_str(text).unwrap();
+        let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        assert_eq!(keys, vec!["zebra", "mango", "apple"]);
+
+        // And a round trip through the upgrader must not reorder the file either.
+        let dir = scratch("order");
+        let f = dir.join("measurements.json");
+        fs::write(
+            &f,
+            r#"{"targets": {"harman_2018": [[20.0, 1.0], [1000.0, 0.0]]},
+                "models": {"zz_last": {"raw_pts": [[20.0, 0.0], [1000.0, 0.0]]},
+                            "aa_first": {"raw_pts": [[20.0, 0.0], [1000.0, 0.0]]}}}"#,
+        )
+        .unwrap();
+        upgrade_measurements_json(&f).unwrap();
+        let after: Value = serde_json::from_str(&fs::read_to_string(&f).unwrap()).unwrap();
+        let keys: Vec<String> = after["models"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["zz_last", "aa_first"],
+            "upgrade reordered the file"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
 }

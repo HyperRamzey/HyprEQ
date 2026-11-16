@@ -117,9 +117,9 @@ pub fn limiter_report_lines(
             "  Lookahead / Latency : {:.2} ms eff ({:.2} ms req){raised} | {} samples ({:.2} ms), ramp {} frames",
             rep.effective_lookahead_ms,
             rep.requested_lookahead_ms,
-            comma_sep(rep.latency_samples as u64),
+            rep.latency_samples,
             rep.latency_ms,
-            comma_sep(rep.ramp_frames as u64),
+            rep.ramp_frames,
         ),
         format!(
             "  Two-Stage Envelope  : Slow {:.1}/{:.1} ms (link {:.0}%) | Transient {TRANSIENT_RELEASE_MS:.1} ms rel (link {:.0}%)",
@@ -156,24 +156,7 @@ pub fn print_limiter_report(rep: &Report, post: &SignalMeasurements, cfg: &Cfg, 
     }
 }
 
-/// The one-line summary printed when no audio file was given.
-#[must_use]
-pub fn summary_line(cfg: &Cfg, fs: u32) -> String {
-    if !cfg.enable {
-        return "true-peak limiter disabled".to_string();
-    }
-    format!(
-        "{} limiter, ceiling {:+.2} dBTP (guard {:.2} dB), lookahead {:.2} ms -> {} samples at {} Hz",
-        cfg.ratio.label(),
-        cfg.ceiling_db,
-        cfg.guard_db(),
-        cfg.effective_lookahead_ms(fs),
-        comma_sep(cfg.latency_samples(fs) as u64),
-        comma_sep(u64::from(fs)),
-    )
-}
-
-/// The `--tp-ceiling` range, for `--help`.
+/// The `--tp-ceiling` range, exposed so `--help` states it the way the reference does.
 pub const CEILING_RANGE: (f64, f64) = (MIN_CEILING_DB, MAX_CEILING_DB);
 
 #[cfg(test)]
@@ -308,7 +291,7 @@ mod tests {
         .to_cfg()
         .expect("a disabled config skips range checks");
         assert!(!cfg.enable);
-        assert_eq!(summary_line(&cfg, 48000), "true-peak limiter disabled");
+        assert!(!cfg.enable);
     }
 
     /// The expected block is this program's output pasted, not retyped.
@@ -378,12 +361,18 @@ mod tests {
     }
 
     #[test]
-    fn summary_line_quotes_the_effective_lookahead() {
-        let s = summary_line(&TpArgs::default().to_cfg().unwrap(), 48000);
-        assert!(
-            s.starts_with("x16 limiter, ceiling -3.00 dBTP (guard 0.04 dB), lookahead 2.00 ms -> "),
-            "got {s}"
-        );
-        assert!(s.contains("samples at 48,000 Hz"), "got {s}");
+    fn latency_and_ramp_are_printed_bare_like_the_reference() {
+        // hypreq.py:2599 interpolates latency_samples and ramp_frames directly, while the
+        // frame counters on the last line use `:,`. Grouping the sample counts produced
+        // "1,040" where the reference prints "1040".
+        let mut rep = report();
+        rep.latency_samples = 1040;
+        rep.ramp_frames = 1234;
+        let lines =
+            limiter_report_lines(&rep, &post(), &TpArgs::default().to_cfg().unwrap(), 48000);
+        assert!(lines[2].contains("| 1040 samples"), "{}", lines[2]);
+        assert!(lines[2].contains("ramp 1234 frames"), "{}", lines[2]);
+        assert!(!lines[2].contains("1,040"), "{}", lines[2]);
+        assert!(lines[5].contains("5,678 frames"), "{}", lines[5]);
     }
 }

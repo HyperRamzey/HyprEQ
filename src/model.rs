@@ -127,7 +127,7 @@ pub fn built_in_metadata(key: &str) -> Option<Value> {
           "ax2_ylim": [-10.8, 10.5],
           "ax2_yticks": [-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0],
           "annotations": [
-            {"text": "1. 1μ Planar Excursion & 35Hz fs Fix\n(+2.37dB @ 20Hz, +1.77dB @ 35Hz vs AutoEq +3.7dB)", "xy": [35.0, 1.77], "xytext": [21.5, 7.3], "color": "cyan"},
+            {"text": "1. 1μm Planar Excursion & 35Hz fs Fix\n(+2.37dB @ 20Hz, +1.77dB @ 35Hz vs AutoEq +3.7dB)", "xy": [35.0, 1.77], "xytext": [21.5, 7.3], "color": "cyan"},
             {"text": "", "xy": [20.5, 2.37], "xytext": [24.5, 7.1], "color": "cyan"},
             {"text": "2. Planar Bass-to-Mid Transition\n(+2.70dB @ 55Hz shelf; -1.31dB @ 292Hz trim)", "xy": [55.2, 2.70], "xytext": [75.0, 4.6], "color": "cyan"},
             {"text": "", "xy": [292.0, -1.31], "xytext": [175.0, 4.4], "color": "cyan"},
@@ -208,9 +208,12 @@ pub fn sort_and_dedup_points(pts: &[Point]) -> Vec<Point> {
     // `Ord` is not even implemented for `f64`; sorting keeps NumPy's behaviour,
     // where the sort is stable and the dict overwrite leaves the last write at a
     // repeated frequency standing.
+    // A frequency must be a positive *finite* number. The reference's `f > 0.0` test lets
+    // `inf` through, and one infinite knot turns every interpolated gain into NaN; a JSON
+    // `1e400` or a hand-edited `inf` row is exactly the input that must not reach PCHIP.
     let mut kept: Vec<Point> = pts
         .iter()
-        .filter(|pt| pt.first().is_some_and(|f| *f > 0.0))
+        .filter(|pt| pt.first().is_some_and(|f| f.is_finite() && *f > 0.0))
         .cloned()
         .collect();
     kept.sort_by(|a, b| a[0].total_cmp(&b[0]));
@@ -322,37 +325,94 @@ pub fn round4(x: f64) -> f64 {
     (x * 1e4).round() / 1e4
 }
 
-/// `hypreq.py::load_csv_points` — 2- or 4-column CSV, `#` comments and blank lines
+/// `hypreq.py::load_csv_points` — 2- or 4-column CSV, `#` comments and blank rows
 /// skipped, unparseable rows dropped.
+///
+/// Rows come from [`csv_records`], which follows the same quoting rules as Python's
+/// `csv.reader`: a quoted field may contain commas, and `""` is a literal quote.
+/// Splitting on `,` instead would drop every row of a quoted table, and a quoted
+/// `"1,2"` cell would be read as two columns.
 pub fn load_csv_points(csv_path: &Path) -> Result<Vec<Point>, ModelError> {
     let text = fs::read_to_string(csv_path)
         .map_err(|e| ModelError(format!("cannot read '{}': {e}", csv_path.display())))?;
     let mut pts = Vec::new();
-    for line in text.lines() {
-        let first = line.split(',').next().unwrap_or("").trim();
+    for row in csv_records(&text) {
+        let Some(first) = row.first().map(|c| c.trim()) else {
+            continue;
+        };
         if first.is_empty() || first.starts_with('#') {
             continue;
         }
-        let mut vals = Vec::new();
-        let mut ok = true;
-        for cell in line.split(',') {
-            let c = cell.trim();
-            if c.is_empty() {
-                continue;
-            }
-            match c.parse::<f64>() {
-                Ok(v) => vals.push(v),
-                Err(_) => {
-                    ok = false;
-                    break;
-                }
-            }
-        }
-        if ok && vals.len() >= 2 {
-            pts.push(vals);
+        // Only non-empty cells are converted, and a single non-numeric cell drops the
+        // whole row — the reference's `try: tuple(float(x) ...) except ValueError: continue`.
+        let vals: Option<Vec<f64>> = row
+            .iter()
+            .map(|c| c.trim())
+            .filter(|c| !c.is_empty())
+            .map(|c| c.parse::<f64>().ok())
+            .collect();
+        if vals.as_ref().is_some_and(|v| v.len() >= 2) {
+            pts.push(vals.unwrap());
         }
     }
     Ok(pts)
+}
+
+/// Split CSV text into records with Python's `csv.reader` quoting rules: a field may be
+/// wrapped in `"…"`, `""` inside a quoted field is a literal quote, and a quoted field may
+/// contain the delimiter and line breaks.
+#[must_use]
+pub fn csv_records(text: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut chars = text.chars().peekable();
+    // End a record only at a line break outside quotes; a record with no fields at all is
+    // what a blank line looks like to `csv.reader`, and it is not a row.
+    let end_row = |row: &mut Vec<String>, field: String| {
+        row.push(field);
+        row.len() > 1 || !row[0].is_empty()
+    };
+    while let Some(c) = chars.next() {
+        if quoted {
+            match c {
+                '"' => {
+                    if chars.peek() == Some(&'"') {
+                        chars.next();
+                        field.push('"');
+                    } else {
+                        quoted = false;
+                    }
+                }
+                other => field.push(other),
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            ',' => row.push(std::mem::take(&mut field)),
+            '\n' | '\r' => {
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                if end_row(&mut row, std::mem::take(&mut field)) {
+                    rows.push(std::mem::take(&mut row));
+                }
+                // A blank line is not a record, but its empty field still has to go: keeping
+                // it would prepend a blank cell to the next row and make `load_csv_points`
+                // drop that row for starting with an empty field.
+                row.clear();
+            }
+            other => field.push(other),
+        }
+    }
+    // The final record counts even when the file has no trailing newline.
+    if quoted || !field.is_empty() || row.len() > 1 {
+        end_row(&mut row, field);
+        rows.push(row);
+    }
+    rows
 }
 
 /// Validate and normalise one model entry. `cfg` is the raw JSON object; `base_dir`
@@ -378,6 +438,13 @@ pub fn normalize_model_entry(
         ));
     };
     let target_pts = sort_and_dedup_pairs(target_pts);
+    // PCHIP needs a segment, so a target with one knot (or none) is not a curve.
+    if target_pts.len() < 2 {
+        return err(format!(
+            "Model '{key}': target '{target_name}' needs at least two points, got {}.",
+            target_pts.len()
+        ));
+    }
 
     // raw_pts: an inline array, or a CSV named by `raw_csv` when no inline array is present.
     let raw_inline = cfg.get("raw_pts").and_then(Value::as_array);
@@ -409,8 +476,15 @@ pub fn normalize_model_entry(
         .get("ctrl_pts")
         .and_then(Value::as_array)
         .filter(|a| !a.is_empty());
-    let has_manual_ctrl =
-        (cfg.contains_key("ctrl_csv") && ctrl_inline.is_none()) || ctrl_inline.is_some();
+    // `ctrl_csv` only counts when it names a file: the reference's `"ctrl_csv" in cfg`
+    // test treated `"ctrl_csv": null` and `"ctrl_csv": ""` as a manual control curve, which
+    // then switched off 1 kHz normalisation and pointed at a path that does not exist.
+    let ctrl_csv = cfg
+        .get("ctrl_csv")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string);
+    let has_manual_ctrl = (ctrl_csv.is_some() && ctrl_inline.is_none()) || ctrl_inline.is_some();
     let should_norm_1k = cfg
         .get("normalize_1khz")
         .and_then(Value::as_bool)
@@ -446,7 +520,7 @@ pub fn normalize_model_entry(
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
         sort_and_dedup_pairs(&pairs)
-    } else if let Some(rel) = cfg.get("ctrl_csv").and_then(Value::as_str) {
+    } else if let Some(rel) = ctrl_csv {
         sort_and_dedup_points(&load_csv_points(&base_dir.join(rel))?)
             .into_iter()
             .map(|p| (p[0], *p.last().unwrap()))
@@ -461,6 +535,20 @@ pub fn normalize_model_entry(
             f64_or(cfg, "subbass_leak_discount_db", 0.0),
         )
     };
+
+    // Every control knot must be a finite pair, and PCHIP needs at least two of them;
+    // without this check a malformed curve survives until it panics deep in the
+    // interpolation or silently paints NaN across the whole filter.
+    let ctrl_pts: Vec<(f64, f64)> = ctrl_pts
+        .into_iter()
+        .filter(|(f, g)| f.is_finite() && g.is_finite() && *f > 0.0)
+        .collect();
+    if ctrl_pts.len() < 2 {
+        return err(format!(
+            "Model '{key}': control curve needs at least two finite points above 0 Hz, got {}.",
+            ctrl_pts.len()
+        ));
+    }
 
     let notch_range_hz = cfg
         .get("notch_range_hz")
@@ -492,13 +580,27 @@ pub fn normalize_model_entry(
         for (k, v) in pm {
             plot_meta.insert(k.clone(), v.clone());
         }
-        // A model may hang `annotations` off the top level instead; only promote it
-        // when `plot_meta` did not already carry its own.
-        if cfg.contains_key("annotations") && !pm.contains_key("annotations") {
-            plot_meta.insert(
-                "annotations".to_string(),
-                cfg.get("annotations").cloned().unwrap_or(Value::Null),
-            );
+    }
+    // A model may hang `annotations` off the top level instead of inside `plot_meta`, and
+    // that promotion is independent of whether `plot_meta` exists at all. The reference
+    // tests truthiness, so `null` and `[]` leave the built-in callouts in place, and an
+    // `annotations` key already inside the model's own `plot_meta` always wins.
+    if let Some(ann) = cfg.get("annotations") {
+        // Python truthiness, which is what the reference's `if cfg.get("annotations")` is.
+        let truthy = match ann {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Number(n) => n.as_f64().is_some_and(|v| v != 0.0),
+            Value::String(s) => !s.is_empty(),
+            Value::Array(a) => !a.is_empty(),
+            Value::Object(o) => !o.is_empty(),
+        };
+        let owned_by_plot_meta = cfg
+            .get("plot_meta")
+            .and_then(Value::as_object)
+            .is_some_and(|pm| pm.contains_key("annotations"));
+        if truthy && !owned_by_plot_meta {
+            plot_meta.insert("annotations".to_string(), ann.clone());
         }
     }
 
@@ -955,6 +1057,266 @@ mod tests {
         assert_eq!(pts[1], vec![1000.0, 2.0, 0.5, 1.25]);
         assert_eq!(pts[2], vec![20000.0, 3.0, 1.0, 2.0]);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A scratch directory unique to this test: `cargo test` runs tests in parallel in one
+    /// process, so a name keyed only on the pid would collide across tests.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hypreq_{}_{:?}",
+            name,
+            std::thread::current().name().unwrap_or("t")
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn targets(one: Vec<(f64, f64)>) -> BTreeMap<String, Vec<(f64, f64)>> {
+        let mut t = BTreeMap::new();
+        t.insert("harman_2018".to_string(), one);
+        t
+    }
+
+    fn cfg(v: Value) -> Map<String, Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    /// A raw curve that sits +6 dB above the target at 1 kHz, so a run with
+    /// normalisation on is distinguishable from one with it off.
+    fn offset_raw() -> Value {
+        json!([[20.0, 6.0], [1000.0, 6.0], [10000.0, 6.0]])
+    }
+
+    fn flat_target() -> Vec<(f64, f64)> {
+        vec![(20.0, 0.0), (1000.0, 0.0), (10000.0, 0.0)]
+    }
+
+    fn level_at_1k(m: &Model) -> f64 {
+        m.raw_pts
+            .iter()
+            .find(|p| p[0] == 1000.0)
+            .map(|p| *p.last().unwrap())
+            .unwrap_or(f64::NAN)
+    }
+
+    #[test]
+    fn a_quoted_csv_cell_stays_one_cell() {
+        // The reference reads these files with csv.reader. Splitting on `,` instead tears
+        // every quoted field at its commas, so a table written by Excel or a spreadsheet
+        // export loses rows.
+        let dir = scratch("quoted");
+        let f = dir.join("q.csv");
+        fs::write(
+            &f,
+            "# header\n20,\"-1.5\"\n1000,2.0,0.5,1.25\n20000,\"3.0\",\"1.0\",2.0\n",
+        )
+        .unwrap();
+        let pts = load_csv_points(&f).unwrap();
+        assert_eq!(pts.len(), 3, "every quoted row must survive: {pts:?}");
+        assert_eq!(pts[0], vec![20.0, -1.5]);
+        assert_eq!(pts[2], vec![20000.0, 3.0, 1.0, 2.0]);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn csv_records_follow_csv_reader_through_quotes_and_blank_lines() {
+        // Every expectation here was taken from python's csv.reader on the same input.
+        let rows = csv_records("a,\"b,2\",\"c\"\"x\"\nd,2\n");
+        assert_eq!(rows[0], vec!["a", "b,2", "c\"x"]);
+        assert_eq!(rows[1], vec!["d", "2"]);
+
+        // A line break inside a quoted field belongs to the field, not to the record.
+        let rows = csv_records("a,\"multi\nline\",3\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], vec!["a", "multi\nline", "3"]);
+
+        // An unterminated quote swallows the remainder, just as the reader does.
+        let rows = csv_records("a,\"b,2\",\"c\"\"\"\"\nd,2\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][2], "c\"\"\nd,2\n");
+
+        // No trailing newline: the last record still counts. CRLF ends a record too.
+        assert_eq!(csv_records("1,2\n3,4").len(), 2);
+        assert_eq!(
+            csv_records("1,1\r\n2,2\r\n"),
+            vec![vec!["1", "1"], vec!["2", "2"]]
+        );
+        // A blank line is no record at all - and must not prepend an empty cell to the
+        // row that follows it, which is what makes load_csv_points drop that row.
+        assert_eq!(
+            csv_records("1,1\n\n2,2\n"),
+            vec![vec!["1", "1"], vec!["2", "2"]]
+        );
+    }
+
+    #[test]
+    fn null_or_blank_ctrl_csv_is_not_a_manual_curve() {
+        // `"ctrl_csv": null` / `""` names no file, so it must not switch 1 kHz
+        // normalisation off the way the reference's `"ctrl_csv" in cfg` test did.
+        for blank in [Value::Null, json!(""), json!("   ")] {
+            let mut c = cfg(json!({ "raw_pts": offset_raw(), "ctrl_csv": blank }));
+            c.remove("ctrl_pts");
+            let m =
+                normalize_model_entry("t", &c, &targets(flat_target()), Path::new(".")).unwrap();
+            assert!(
+                level_at_1k(&m).abs() < 1e-9,
+                "{blank} must not disable normalisation: {:?}",
+                m.raw_pts
+            );
+        }
+        // A real control CSV is a manual curve, and then normalisation stays off.
+        let dir = scratch("ctrlcsv");
+        fs::write(dir.join("ctrl.csv"), "20,1.0\n1000,1.0\n10000,1.0\n").unwrap();
+        let c = cfg(json!({ "raw_pts": offset_raw(), "ctrl_csv": "ctrl.csv" }));
+        let m = normalize_model_entry("t", &c, &targets(flat_target()), &dir).unwrap();
+        assert!(
+            (level_at_1k(&m) - 6.0).abs() < 1e-9,
+            "a manual control curve keeps the raw measurement as measured"
+        );
+        assert_eq!(m.ctrl_pts[1], (1000.0, 1.0));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn top_level_annotations_promote_without_plot_meta() {
+        let ann = json!([{"text": "note", "xy": [100.0, 1.0], "xytext": [120.0, 2.0]}]);
+        let c = cfg(json!({ "raw_pts": offset_raw(), "annotations": ann }));
+        let m = normalize_model_entry("t", &c, &targets(flat_target()), Path::new(".")).unwrap();
+        assert_eq!(
+            m.plot_meta.get("annotations"),
+            Some(&ann),
+            "a model with no plot_meta still gets its own callouts"
+        );
+
+        // plot_meta's own copy wins, and an empty or null list leaves the built-ins alone.
+        let c = cfg(json!({
+            "raw_pts": offset_raw(),
+            "annotations": ann,
+            "plot_meta": { "annotations": [] }
+        }));
+        let m = normalize_model_entry("t", &c, &targets(flat_target()), Path::new(".")).unwrap();
+        assert_eq!(m.plot_meta.get("annotations"), Some(&json!([])));
+
+        for empty in [json!([]), Value::Null] {
+            let c = cfg(json!({ "raw_pts": offset_raw(), "annotations": empty }));
+            let m =
+                normalize_model_entry("t", &c, &targets(flat_target()), Path::new(".")).unwrap();
+            assert!(
+                !m.plot_meta.contains_key("annotations"),
+                "{empty} is falsy in Python, so nothing is promoted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_model_that_cannot_make_a_curve_is_rejected_not_panicking() {
+        let t1 = targets(vec![(1000.0, 0.0)]);
+        let e = normalize_model_entry(
+            "t",
+            &cfg(json!({ "raw_pts": offset_raw() })),
+            &t1,
+            Path::new("."),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("at least two points"), "{e}");
+
+        // One usable control knot cannot span the band.
+        let e = normalize_model_entry(
+            "t",
+            &cfg(json!({ "raw_pts": offset_raw(), "ctrl_pts": [[1000.0, 1.0]] })),
+            &targets(flat_target()),
+            Path::new("."),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("control curve"), "{e}");
+
+        // A control row that is not a number is refused, not skipped.
+        let e = normalize_model_entry(
+            "t",
+            &cfg(json!({ "raw_pts": offset_raw(), "ctrl_pts": [[1000.0, "loud"]] })),
+            &targets(flat_target()),
+            Path::new("."),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("numeric gain"), "{e}");
+    }
+
+    #[test]
+    fn an_infinite_frequency_never_reaches_the_interpolator() {
+        // JSON cannot carry an infinity: an out-of-range literal is refused before it can
+        // become a knot. A CSV can, because "inf" and "NaN" parse as floats in both the
+        // reference and here — and one such knot turns every interpolated gain, and so the
+        // whole filter, into NaN.
+        let text = r#"{"raw_pts": [[20.0, 6.0], [1e999, 6.0]]}"#;
+        assert!(serde_json::from_str::<Value>(text).is_err());
+
+        let dir = scratch("inffreq");
+        fs::write(
+            &dir.join("raw.csv"),
+            "20,6.0\ninf,6.0\nNaN,6.0\n-5,6.0\n1000,6.0\n10000,6.0\n",
+        )
+        .unwrap();
+        let c = cfg(json!({
+            "raw_csv": "raw.csv",
+            "ctrl_pts": [[20.0, 0.0], [1000.0, 0.0], [10000.0, 0.0]],
+        }));
+        let m = normalize_model_entry("t", &c, &targets(flat_target()), &dir).unwrap();
+        assert_eq!(m.raw_pts.len(), 3, "only the three usable rows remain");
+        assert!(
+            m.raw_pts.iter().all(|p| p.iter().all(|&v| v.is_finite())),
+            "{:?}",
+            m.raw_pts
+        );
+
+        // A control CSV can carry the same poison in the gain column; a knot that cannot
+        // be represented cannot stay in the curve.
+        fs::write(
+            &dir.join("ctrl.csv"),
+            "20,0.0\n1000,inf\n10000,NaN\n20000,1.0\n",
+        )
+        .unwrap();
+        let c = cfg(json!({ "raw_csv": "raw.csv", "ctrl_csv": "ctrl.csv" }));
+        let m = normalize_model_entry("t", &c, &targets(flat_target()), &dir).unwrap();
+        assert!(
+            m.ctrl_pts
+                .iter()
+                .all(|&(f, g)| f.is_finite() && g.is_finite()),
+            "{:?}",
+            m.ctrl_pts
+        );
+        assert_eq!(
+            m.ctrl_pts.len(),
+            2,
+            "the two finite knots survive: {:?}",
+            m.ctrl_pts
+        );
+        fs::remove_dir_all(&dir).ok();
+
+        // Directly too: neither NaN nor +/-inf survives the sort.
+        let junk = vec![
+            pt(&[1000.0, 1.0]),
+            vec![f64::INFINITY, 0.0],
+            vec![f64::NAN, 0.0],
+            vec![-1.0, 0.0],
+            pt(&[20.0, 0.0]),
+        ];
+        let kept = sort_and_dedup_points(&junk);
+        assert_eq!(kept.len(), 2, "only the two usable knots remain");
+        assert!(kept.iter().all(|p| p[0].is_finite()));
+    }
+
+    #[test]
+    fn the_ft1pro_callout_says_micrometre() {
+        // "1μ Planar Excursion" is a truncated unit; the reference says 1μm.
+        let meta = built_in_metadata("ft1pro").unwrap().to_string();
+        assert!(meta.contains("1\u{3bc}m Planar Excursion"), "unit is wrong");
+        assert!(
+            !meta.contains("1\u{3bc} Planar"),
+            "truncated unit came back"
+        );
     }
 
     #[test]

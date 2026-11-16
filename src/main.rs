@@ -24,8 +24,12 @@ use hypreq::ir::{
     apply_notch_mode, export_audit_csv, l1_gain_db, mpv_n_fft, synthesize_minimum_phase_ir,
     NotchMode,
 };
-use hypreq::limiter::Limiter;
-use hypreq::limiter_cfg::{print_limiter_report, summary_line, TpArgs};
+use hypreq::limiter::{
+    Limiter, DEFAULT_ATTACK_MS, DEFAULT_CEILING_DB, DEFAULT_LINK_RELEASE, DEFAULT_LINK_TRANSIENT,
+    DEFAULT_LOOKAHEAD_MS, DEFAULT_RELEASE_MS, MAX_ATTACK_MS, MAX_CEILING_DB, MAX_LOOKAHEAD_MS,
+    MAX_RELEASE_MS, MIN_ATTACK_MS, MIN_CEILING_DB, MIN_LOOKAHEAD_MS, MIN_RELEASE_MS,
+};
+use hypreq::limiter_cfg::{print_limiter_report, TpArgs};
 use hypreq::measure::{build_convolver_probe, measure_signal, print_signal_measurements};
 use hypreq::model::{
     load_measurement_database, upgrade_measurements_json, Database, Model, MODEL_ALIASES,
@@ -45,14 +49,17 @@ struct Args {
     #[arg(short = 'H', long, default_value = "all")]
     headphone: String,
     /// Sample rate in Hz (default: 48000 for IR gen, or input WAV rate)
-    #[arg(long)]
-    fs: Option<u32>,
+    ///
+    /// `allow_negative_numbers` keeps a value like `-1` a *value* rather than an unknown
+    /// flag, so it reaches the same domain check argparse sends it to.
+    #[arg(long, allow_negative_numbers = true)]
+    fs: Option<i64>,
     /// Tap count for 64-bit float WAV (default: 65536; 16384 already reaches
     /// <-134 dBFS unwindowed)
-    #[arg(long, default_value_t = 65536)]
-    taps: usize,
+    #[arg(long, default_value_t = 65536, allow_negative_numbers = true)]
+    taps: i64,
     /// Steady-state convolver preamp headroom in dB (default: -1.50)
-    #[arg(long, default_value_t = -1.50)]
+    #[arg(long, default_value_t = -1.50, allow_negative_numbers = true)]
     headroom_db: f64,
     /// Non-minimum-phase concha notch handling: 'safe' (default, caps narrow fill to
     /// +1.50 dB), 'original', or 'zero' (0.0 dB)
@@ -90,42 +97,68 @@ struct Args {
         help_heading = "True-Peak Limiter & Measurements"
     )]
     tp_ratio: String,
-    /// True-peak limiter ceiling in dBTP (default: -3.0)
-    #[arg(long, default_value_t = -3.0, help_heading = "True-Peak Limiter & Measurements")]
-    tp_ceiling: f64,
-    /// Transient lookahead in ms (default: 2.0)
+    /// True-peak limiter ceiling in dBTP
     #[arg(
         long,
-        default_value_t = 2.0,
-        help_heading = "True-Peak Limiter & Measurements"
+        default_value_t = DEFAULT_CEILING_DB,
+        allow_negative_numbers = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = format!(
+            "True-peak limiter ceiling in dBTP, [{MIN_CEILING_DB}, {MAX_CEILING_DB}] (default: {DEFAULT_CEILING_DB})"
+        )
+    )]
+    tp_ceiling: f64,
+    /// Transient lookahead in ms
+    #[arg(
+        long,
+        default_value_t = DEFAULT_LOOKAHEAD_MS,
+        allow_negative_numbers = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = format!(
+            "Transient lookahead in ms, [{MIN_LOOKAHEAD_MS}, {MAX_LOOKAHEAD_MS}] (default: {DEFAULT_LOOKAHEAD_MS})"
+        )
     )]
     tp_lookahead: f64,
-    /// Slow-stage attack in ms (default: 60.0)
+    /// Slow-stage attack in ms
     #[arg(
         long,
-        default_value_t = 60.0,
-        help_heading = "True-Peak Limiter & Measurements"
+        default_value_t = DEFAULT_ATTACK_MS,
+        allow_negative_numbers = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = format!(
+            "Slow-stage attack in ms, [{MIN_ATTACK_MS}, {MAX_ATTACK_MS}] (default: {DEFAULT_ATTACK_MS})"
+        )
     )]
     tp_attack: f64,
-    /// Slow-stage release in ms (default: 900.0)
+    /// Slow-stage release in ms
     #[arg(
         long,
-        default_value_t = 900.0,
-        help_heading = "True-Peak Limiter & Measurements"
+        default_value_t = DEFAULT_RELEASE_MS,
+        allow_negative_numbers = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = format!(
+            "Slow-stage release in ms, [{MIN_RELEASE_MS}, {MAX_RELEASE_MS}] (default: {DEFAULT_RELEASE_MS})"
+        )
     )]
     tp_release: f64,
-    /// Transient stage channel linking [0..1] (default: 1.0)
+    /// Transient stage channel linking
     #[arg(
         long,
-        default_value_t = 1.0,
-        help_heading = "True-Peak Limiter & Measurements"
+        default_value_t = DEFAULT_LINK_TRANSIENT,
+        allow_negative_numbers = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = format!(
+            "Transient stage channel linking [0..1] (default: {DEFAULT_LINK_TRANSIENT})"
+        )
     )]
     tp_link_transient: f64,
-    /// Slow stage channel linking [0..1] (default: 0.75)
+    /// Slow stage channel linking
     #[arg(
         long,
-        default_value_t = 0.75,
-        help_heading = "True-Peak Limiter & Measurements"
+        default_value_t = DEFAULT_LINK_RELEASE,
+        allow_negative_numbers = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = format!("Slow stage channel linking [0..1] (default: {DEFAULT_LINK_RELEASE})")
     )]
     tp_link_release: f64,
     /// Disable the true-peak ceiling limiter (measurements still run)
@@ -139,12 +172,17 @@ struct Args {
     output: Option<String>,
     /// Output WAV bit depth for --input mode: 16/24 TPDF PCM or 32/64 float
     /// (default: 32)
+    ///
+    /// Parsed as a plain integer and matched against the choice list by hand, so `20` and
+    /// `-16` produce argparse's `invalid choice` message instead of a parse failure.
     #[arg(
         long,
         default_value_t = 32,
-        help_heading = "True-Peak Limiter & Measurements"
+        allow_negative_numbers = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = "Output WAV bit depth for --input mode: 16/24 TPDF PCM or 32/64 float (default: 32)"
     )]
-    out_bits: u32,
+    out_bits: i64,
     /// Skip EQ convolution in --input mode (run true-peak limiter + measurements only)
     #[arg(long, help_heading = "True-Peak Limiter & Measurements")]
     bypass_eq: bool,
@@ -215,6 +253,22 @@ fn run(args: Args) -> Result<(), Error> {
             .map_err(|e| Error::msg(e.0))?;
     }
 
+    // argparse validates each `choices` option as it consumes the command line, so every
+    // one of them is reported before the manual `--taps` check and before any output. -H
+    // only carries a choice list when the database actually loaded models (hypreq.py:2882
+    // passes `choices=None` otherwise), so a missing database never rejects a valid name.
+    let aliases = active_aliases(&models);
+    if !models.models.is_empty() && resolve_headphone(&models, &aliases, &args.headphone).is_none()
+    {
+        usage_error(format!(
+            "argument -H/--headphone: invalid choice: '{}' (choose from {})",
+            args.headphone,
+            choice_list(&models, &aliases)
+        ));
+    }
+    validate_choice(&args.notch_mode, &NOTCH_MODES, "--notch-mode");
+    validate_out_bits(args.out_bits);
+
     if args.taps < 256 {
         usage_error("--taps must be >= 256");
     }
@@ -229,19 +283,13 @@ fn run(args: Args) -> Result<(), Error> {
         link_release: args.tp_link_release,
         disable: args.no_tp_limiter,
     };
+    // hypreq.py wraps build_limiter_cfg() in `except ValueError: parser.error(str(exc))`,
+    // so an out-of-range limiter option is a usage error too.
     let lim_cfg = match tp_args.to_cfg() {
         Ok(cfg) => cfg,
         Err(msg) => usage_error(msg),
     };
 
-    if ![16u32, 24, 32, 64].contains(&args.out_bits) {
-        usage_error(format!(
-            "argument --out-bits: invalid choice: '{}' (choose from 16, 24, 32, 64)",
-            args.out_bits
-        ));
-    }
-
-    let aliases = active_aliases(&models);
     if args.list_models {
         for m in models.models.iter() {
             println!(
@@ -256,12 +304,10 @@ fn run(args: Args) -> Result<(), Error> {
     }
 
     let selected = match resolve_headphone(&models, &aliases, &args.headphone) {
-        Some(k) => k,
-        None => usage_error(format!(
-            "argument -H/--headphone: invalid choice: '{}' (choose from {})",
-            args.headphone,
-            choice_list(&models, &aliases)
-        )),
+        Some(k) => k.to_string(),
+        // With an empty database `-H` is unvalidated, so the raw name falls through to the
+        // lookup below and fails there, the way Python's `models[selected]` KeyError does.
+        None => args.headphone.clone(),
     };
 
     if let Some(input) = args.input.clone() {
@@ -279,7 +325,7 @@ fn run(args: Args) -> Result<(), Error> {
                 );
                 first
             } else {
-                selected.to_string()
+                selected.clone()
             };
             Some(
                 models
@@ -296,18 +342,75 @@ fn run(args: Args) -> Result<(), Error> {
         }
     } else {
         let m = models
-            .get(selected)
+            .get(selected.as_str())
             .ok_or_else(|| Error::msg(format!("unknown model '{selected}'")))?;
         run_model(m, &args, true, &lim_cfg)?;
     }
     Ok(())
 }
 
+/// `-H`/`--notch-mode` choice lists, in the order argparse prints them.
+const NOTCH_MODES: [&str; 3] = ["safe", "original", "zero"];
+
+/// `--out-bits` accepts exactly these depths.
+const OUT_BITS: [i64; 4] = [16, 24, 32, 64];
+
+/// Reject a value outside a choice list with argparse's wording and exit code.
+fn validate_choice(value: &str, choices: &[&str], flag: &str) {
+    if !choices.contains(&value) {
+        let list = choices
+            .iter()
+            .map(|c| format!("'{c}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        usage_error(format!(
+            "argument {flag}: invalid choice: '{value}' (choose from {list})"
+        ));
+    }
+}
+
+/// `--out-bits`: the choices are integers, so argparse lists them unquoted.
+fn validate_out_bits(bits: i64) {
+    if !OUT_BITS.contains(&bits) {
+        usage_error(format!(
+            "argument --out-bits: invalid choice: '{bits}' (choose from 16, 24, 32, 64)"
+        ));
+    }
+}
+
+/// `--fs` as a positive rate. argparse takes any int, and the reference only notices a
+/// non-positive one when it divides by it, so the message is the reference's own
+/// `sample rate must be positive (got N)` and it is a plain error, not a usage error.
+fn fs_hz(args: &Args, default: u32) -> Result<u32, Error> {
+    match args.fs {
+        None => Ok(default),
+        Some(v) if v <= 0 => Err(Error::msg(format!(
+            "sample rate must be positive (got {v})"
+        ))),
+        Some(v) => u32::try_from(v)
+            .map_err(|_| Error::msg(format!("sample rate must be positive (got {v})"))),
+    }
+}
+
+/// `--taps` as a count. `run()` has already rejected anything below 256.
+fn taps_count(args: &Args) -> usize {
+    args.taps as usize
+}
+
 /// Model aliases whose target actually loaded, mirroring the Python's filtering.
+///
+/// An alias that names a loaded model is dropped: keeping it would make that model
+/// unreachable by its own name, since `-H` resolves aliases before plain keys.
 fn active_aliases(models: &Database) -> Vec<(&'static str, &'static str)> {
+    filter_aliases(|name| models.get(name).is_some())
+}
+
+/// The alias table reduced against a database predicate: keep an alias when its target
+/// loaded and its own name is free.
+fn filter_aliases(loaded: impl Fn(&str) -> bool) -> Vec<(&'static str, &'static str)> {
     MODEL_ALIASES
         .iter()
-        .filter(|(_, target)| models.get(target).is_some())
+        .filter(|(alias, target)| loaded(target) && !loaded(alias))
         .map(|(a, t)| (*a, *t))
         .collect()
 }
@@ -342,7 +445,8 @@ fn run_model(
     copy_default_ir: bool,
     lim_cfg: &hypreq::limiter::Cfg,
 ) -> Result<(), Error> {
-    let fs: u32 = args.fs.unwrap_or(48000);
+    let fs = fs_hz(args, 48000)?;
+    let taps = taps_count(args);
     let rate_tag = format_rate_tag(fs);
     let prefix = &model.file_prefix;
     let headroom_db = args.headroom_db;
@@ -369,15 +473,15 @@ fn run_model(
     let mono_rt = format!("{prefix}_mastering_mono_{rate_tag}.wav");
     let stereo_rt = format!("{prefix}_mastering_stereo_{rate_tag}.wav");
 
-    let n_fft_mpv = mpv_n_fft(args.taps);
+    let n_fft_mpv = mpv_n_fft(taps);
     let kaiser_beta = 18.0;
     let kaiser_form_db = kaiser_beta / 0.1102 + 8.7;
     let mpv = synthesize_minimum_phase_ir(
         &active_ctrl,
         fs,
         n_fft_mpv,
-        args.taps,
-        args.taps / 8,
+        taps,
+        taps / 8,
         headroom_db,
         use_apodize,
         kaiser_beta,
@@ -408,13 +512,11 @@ fn run_model(
         comma_sep(u64::from(fs))
     );
     println!(
-        "  FFT / Taps        : {},{} FFT ({:.4} Hz bin) -> {},{} taps ({:.1} ms)",
-        comma_sep(n_fft_mpv as u64 / 1000),
-        n_fft_mpv % 1000,
+        "  FFT / Taps        : {} FFT ({:.4} Hz bin) -> {} taps ({:.1} ms)",
+        comma_sep(n_fft_mpv as u64),
         fs as f64 / n_fft_mpv as f64,
-        comma_sep(args.taps as u64 / 1000),
-        args.taps % 1000,
-        args.taps as f64 / fs as f64 * 1000.0
+        comma_sep(taps as u64),
+        taps as f64 / f64::from(fs) * 1000.0
     );
     println!(
         "  HF Mode / Taper   : {apod_desc} + Half-Kaiser Fade (beta={:.1}, {:.1} dB Kaiser formula)",
@@ -560,7 +662,10 @@ fn run_model(
         println!("  [Note] True-peak limiter disabled (--no-tp-limiter).");
     }
 
-    let mut abs_ir_path = std::fs::canonicalize(Path::new(&f64_wav))
+    // mpv wants an absolute path with escaped separators. `absolute` is the lexical
+    // equivalent of Python's `os.path.abspath`: unlike `canonicalize` it neither touches
+    // the disk nor hands back a Windows `\\?\` prefix that mpv cannot open.
+    let mut abs_ir_path = std::path::absolute(Path::new(&f64_wav))
         .unwrap_or_else(|_| PathBuf::from(&f64_wav))
         .display()
         .to_string()
@@ -587,15 +692,16 @@ fn run_audio_wav_mode(
     lim_cfg: &hypreq::limiter::Cfg,
 ) -> Result<(), Error> {
     let wav_in = read_wav(Path::new(input))?;
-    let mut fs = args.fs.unwrap_or(wav_in.fs);
+    // The file's own rate always wins: the EQ is synthesised to match the signal, not the
+    // other way round. The reference prints the bare rate here, not a grouped one.
+    let file_fs = wav_in.fs;
+    let mut fs = fs_hz(args, file_fs)?;
     if let Some(want) = args.fs {
-        if want != wav_in.fs {
+        if want != i64::from(file_fs) {
             println!(
-                "  [Warning] --fs={want} differs from input WAV sample rate {}; synthesizing EQ IR at {} Hz.",
-                comma_sep(u64::from(wav_in.fs)),
-                comma_sep(u64::from(wav_in.fs))
+                "  [Warning] --fs={want} differs from input WAV sample rate {file_fs}; synthesizing EQ IR at {file_fs} Hz."
             );
-            fs = wav_in.fs;
+            fs = file_fs;
         }
     }
 
@@ -642,13 +748,14 @@ fn run_audio_wav_mode(
                 model.notch_range_hz,
             )
             .map_err(|e| Error::msg(e.0))?;
-            let n_fft_mpv = mpv_n_fft(args.taps);
+            let taps = taps_count(args);
+            let n_fft_mpv = mpv_n_fft(taps);
             let mpv = synthesize_minimum_phase_ir(
                 &active_ctrl,
                 fs,
                 n_fft_mpv,
-                args.taps,
-                args.taps / 8,
+                taps,
+                taps / 8,
                 args.headroom_db,
                 use_apodize,
                 18.0,
@@ -656,10 +763,9 @@ fn run_audio_wav_mode(
             .map_err(|e| Error::msg(e.0))?;
             let l1_gain = l1_gain_db(&mpv.ir);
             println!(
-                "  EQ FIR ({})   : {},{} taps @ {} Hz | Preamp {:+.2} dB (Max boost +{:.2} dB, ||h||_1 {:+.2} dB)",
+                "  EQ FIR ({})   : {} taps @ {} Hz | Preamp {:+.2} dB (Max boost +{:.2} dB, ||h||_1 {:+.2} dB)",
                 model.file_prefix,
-                comma_sep(args.taps as u64 / 1000),
-                args.taps % 1000,
+                comma_sep(taps as u64),
                 comma_sep(u64::from(fs)),
                 mpv.preamp_db,
                 mpv.max_boost_db,
@@ -676,7 +782,6 @@ fn run_audio_wav_mode(
         return Ok(());
     }
 
-    let m_out;
     if lim_cfg.enable {
         let mut lim = Limiter::enabled(*lim_cfg, fs, work.len());
         {
@@ -703,7 +808,7 @@ fn run_audio_wav_mode(
             }
         }
         let rep = lim.report();
-        m_out = measure_signal(&work, fs, lim_cfg.ratio);
+        let m_out = measure_signal(&work, fs, lim_cfg.ratio);
         println!();
         println!("=== True-Peak Limiter Report ===");
         print_limiter_report(&rep, &m_out, lim_cfg, fs);
@@ -711,48 +816,27 @@ fn run_audio_wav_mode(
     } else {
         println!();
         println!("  [Note] True-peak limiter disabled (--no-tp-limiter).");
-        m_out = measure_signal(&work, fs, lim_cfg.ratio);
+        let m_out = measure_signal(&work, fs, lim_cfg.ratio);
         print_signal_measurements("Output Audio", &m_out);
     }
 
-    let in_path = PathBuf::from(input);
     let out_path = match &args.output {
         Some(p) => p.clone(),
-        None => {
-            let suffix = if ir_tag != "bypass" {
-                format!("_{ir_tag}")
-            } else {
-                String::new()
-            };
-            let lim_tag = if lim_cfg.enable {
-                format!("_tp_{}", lim_cfg.ratio.label())
-            } else {
-                String::new()
-            };
-            let stem = in_path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "output".to_string());
-            in_path
-                .parent()
-                .unwrap_or(Path::new("."))
-                .join(format!("{stem}{suffix}{lim_tag}.wav"))
-                .to_string_lossy()
-                .to_string()
-        }
+        None => default_out_path(
+            input,
+            &ir_tag,
+            lim_cfg.enable.then(|| lim_cfg.ratio.label()),
+        ),
     };
 
-    let frames = write_wav_pcm_or_float(Path::new(&out_path), &work, fs, args.out_bits)?;
+    let bits = u32::try_from(args.out_bits).unwrap_or(32);
+    let frames = write_wav_pcm_or_float(Path::new(&out_path), &work, fs, bits)?;
     println!(
-        "  Written Output WAV  : {out_path} ({}-bit @ {} Hz, {}ch, {} frames)",
-        args.out_bits,
+        "  Written Output WAV  : {out_path} ({bits}-bit @ {} Hz, {}ch, {} frames)",
         comma_sep(u64::from(fs)),
         work.len(),
         comma_sep(frames as u64)
     );
-    // Silence the unused-variable warning when a build has no use for the measurements
-    // (e.g. `--measure-only` above returns before this point).
-    let _ = &m_out;
     Ok(())
 }
 
@@ -778,6 +862,44 @@ fn notch_mode(args: &Args) -> NotchMode {
     }
 }
 
+/// The name `--input` writes to when no `--output` was given: `<dir>/<stem>[_<model>][_
+/// tp_<ratio>].wav`, where `ir_tag` is the model prefix or `"bypass"`.
+///
+/// `--bypass-eq --no-tp-limiter` leaves both tags empty, and the naive name is then the
+/// input's own path — the run would overwrite the file it just read. `_out` keeps the
+/// default meaningful and the source intact.
+#[must_use]
+pub fn default_out_path(input: &str, ir_tag: &str, limiter: Option<&str>) -> String {
+    let in_path = PathBuf::from(input);
+    let suffix = if ir_tag != "bypass" {
+        format!("_{ir_tag}")
+    } else {
+        String::new()
+    };
+    let lim_tag = limiter.map_or_else(String::new, |r| format!("_tp_{r}"));
+    let tag = if suffix.is_empty() && lim_tag.is_empty() {
+        "_out".to_string()
+    } else {
+        format!("{suffix}{lim_tag}")
+    };
+    let stem = in_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "output".to_string());
+    in_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(format!("{stem}{tag}.wav"))
+        .to_string_lossy()
+        .to_string()
+}
+
+/// The value behind a `#[arg(default_value_t = …)]` in a parsed command line.
+#[cfg(test)]
+fn argv(args: &[&str]) -> Args {
+    Args::parse_from(std::iter::once("hypreq").chain(args.iter().copied()))
+}
+
 /// `{fs / 1000.0:g}k`: `48k`, `44.1k`, `96k`.
 #[must_use]
 pub fn format_rate_tag(fs: u32) -> String {
@@ -791,9 +913,109 @@ pub fn format_rate_tag(fs: u32) -> String {
     format!("{tag}k")
 }
 
-/// The one-line summary used by `--measure-only` style callers that want a single
-/// line instead of the whole report block.
-#[must_use]
-pub fn summary(cfg: &hypreq::limiter::Cfg, fs: u32) -> String {
-    summary_line(cfg, fs)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_leading_dash_is_a_value_not_an_unknown_flag() {
+        // Without `allow_negative_numbers` clap reads `--headroom-db -4.25` as an option
+        // named "-4.25" and dies before argparse-style validation can run.
+        let a = argv(&[
+            "--headroom-db",
+            "-4.25",
+            "--tp-ceiling",
+            "-1.0",
+            "--tp-lookahead",
+            "-0.5",
+            "--tp-attack",
+            "-1",
+            "--tp-release",
+            "-2",
+            "--tp-link-transient",
+            "-0.25",
+            "--tp-link-release",
+            "-0.75",
+            "--out-bits",
+            "-16",
+            "--taps",
+            "-5",
+            "--fs",
+            "-1",
+        ]);
+        assert_eq!(a.headroom_db, -4.25);
+        assert_eq!(a.tp_ceiling, -1.0);
+        assert_eq!(a.tp_lookahead, -0.5);
+        assert_eq!(a.tp_attack, -1.0);
+        assert_eq!(a.tp_release, -2.0);
+        assert_eq!(a.tp_link_transient, -0.25);
+        assert_eq!(a.tp_link_release, -0.75);
+        // They arrive as values, so the domain checks are what reject them — `run()`
+        // turns each of these into the same exit-2 message argparse produces.
+        assert!(!OUT_BITS.contains(&a.out_bits));
+        assert!(a.taps < 256);
+        assert!(fs_hz(&a, 48000).is_err());
+    }
+
+    #[test]
+    fn a_non_positive_sample_rate_reads_like_the_reference_guard() {
+        // hypreq.py has one rate guard: `sample rate must be positive (got {rate})`.
+        for bad in ["0", "-1", "-48000"] {
+            let a = argv(&["--fs", bad]);
+            let err = fs_hz(&a, 48000).unwrap_err().to_string();
+            assert_eq!(err, format!("sample rate must be positive (got {bad})"));
+        }
+        assert_eq!(fs_hz(&argv(&[]), 48000).unwrap(), 48000);
+        assert_eq!(fs_hz(&argv(&["--fs", "44100"]), 48000).unwrap(), 44100);
+    }
+
+    #[test]
+    fn the_default_output_name_never_points_at_the_input() {
+        // `--bypass-eq --no-tp-limiter` used to derive the input's own path and overwrite
+        // the file it had just read.
+        let p = default_out_path("in/jingle.wav", "bypass", None);
+        assert_eq!(p, "in/jingle_out.wav");
+        assert_ne!(PathBuf::from(&p), PathBuf::from("in/jingle.wav"));
+        assert_eq!(
+            default_out_path("in/jingle.wav", "bypass", Some("x16")),
+            "in/jingle_tp_x16.wav"
+        );
+        assert_eq!(
+            default_out_path("in/jingle.wav", "dt770_80ohm", Some("x16")),
+            "in/jingle_dt770_80ohm_tp_x16.wav"
+        );
+        assert_eq!(
+            default_out_path("in/jingle.wav", "dt770_80ohm", None),
+            "in/jingle_dt770_80ohm.wav"
+        );
+        // A bare file name still gets a directory: `Path::parent()` is None there.
+        assert_eq!(
+            default_out_path("jingle.wav", "bypass", None),
+            "jingle_out.wav"
+        );
+    }
+
+    #[test]
+    fn aliases_never_shadow_a_loaded_model() {
+        // `-H` resolves aliases before plain keys, so an alias that collides with a model
+        // key would make that model unreachable under its own name.
+        let shipped = filter_aliases(|n| ["jbl770nc", "dt770_80", "ft1pro"].contains(&n));
+        assert_eq!(shipped.len(), MODEL_ALIASES.len());
+
+        let shadowed = filter_aliases(|n| ["dt770", "jbl770nc", "dt770_80", "ft1pro"].contains(&n));
+        assert!(
+            !shadowed.iter().any(|(a, _)| *a == "dt770"),
+            "a model named 'dt770' is unreachable while its alias is active: {shadowed:?}"
+        );
+        // The other aliases keep working, and the shadowing key itself stays selectable.
+        assert!(shadowed.iter().any(|(a, _)| *a == "dt770_80ohm"));
+    }
+
+    #[test]
+    fn the_rate_tag_follows_numpys_g_format() {
+        assert_eq!(format_rate_tag(48000), "48k");
+        assert_eq!(format_rate_tag(44100), "44.1k");
+        assert_eq!(format_rate_tag(96000), "96k");
+        assert_eq!(format_rate_tag(8000), "8k");
+    }
 }

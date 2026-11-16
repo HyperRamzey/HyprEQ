@@ -33,6 +33,7 @@ Usage Examples:
 
 import argparse
 import csv
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 import json
@@ -225,8 +226,8 @@ def normalize_raw_near_1khz(
 
 
 def derive_ctrl_pts_from_raw(
-    raw_pts: List[Tuple[float, ...]],
-    target_pts: List[Tuple[float, float]],
+    raw_pts: Sequence[tuple[float, ...]],
+    target_pts: Sequence[tuple[float, ...]],
     harm_offset: float = 0.0,
     hf_taper_start_hz: float = 8500.0,
     hf_bypass_hz: float = 9500.0,
@@ -699,7 +700,7 @@ def synthesize_minimum_phase_ir(
     mag_lin = 10.0 ** (gain_db_norm / 20.0)
     log_mag = np.log(np.maximum(mag_lin, 1e-18))
     log_spec_full = np.concatenate([log_mag, log_mag[-2:0:-1]])
-    cepstrum = np.fft.ifft(log_spec_full).real
+    cepstrum = np.real(np.fft.ifft(log_spec_full))
 
     win_cep = np.zeros(n_fft, dtype=np.float64)
     win_cep[0] = 1.0
@@ -707,7 +708,7 @@ def synthesize_minimum_phase_ir(
     win_cep[n_fft // 2] = 1.0
 
     min_phase_spec = np.exp(np.fft.fft(cepstrum * win_cep))
-    ir_full_f64 = np.fft.ifft(min_phase_spec).real
+    ir_full_f64 = np.real(np.fft.ifft(min_phase_spec))
 
     ir_f64 = ir_full_f64[:n_taps].copy()
     unwindowed_floor_dbfs = float(20.0 * np.log10(np.max(np.abs(ir_f64[-min(128, n_taps):])) + 1e-25))
@@ -2700,7 +2701,10 @@ def run_audio_wav_mode(args, model_cfg: Optional[dict], lim_cfg: LimiterCfg) -> 
     else:
         suffix = f"_{ir_tag}" if ir_tag != "bypass" else ""
         lim_tag = f"_tp_{lim_cfg.ratio.label}" if lim_cfg.enable else ""
-        out_path = str(in_path.with_name(f"{in_path.stem}{suffix}{lim_tag}.wav"))
+        # --bypass-eq --no-tp-limiter leaves both tags empty, and the naive name is then the
+        # input's own path: the run would overwrite the file it just read.
+        tag = "_out" if not suffix and not lim_tag else f"{suffix}{lim_tag}"
+        out_path = str(in_path.with_name(f"{in_path.stem}{tag}.wav"))
 
     write_wav_pcm_or_float(out_path, work, fs=fs, bits=int(args.out_bits))
     print(f"  Written Output WAV  : {out_path} ({args.out_bits}-bit @ {fs:,} Hz, {len(work)}ch, {len(work[0]):,} frames)")
@@ -2872,7 +2876,9 @@ def main() -> None:
     if pre_args.data_file.exists() or (not help_requested and needs_models):
         _, models = load_measurement_database(data_file=pre_args.data_file, models_dir=pre_args.models_dir)
 
-    active_aliases = {a: t for a, t in MODEL_ALIASES.items() if t in models}
+    # An alias that names a loaded model is dropped: -H resolves aliases before plain keys,
+    # so keeping it would make that model unreachable under its own name.
+    active_aliases = {a: t for a, t in MODEL_ALIASES.items() if t in models and a not in models}
     valid_choices = ["all"] + list(models.keys()) + list(active_aliases.keys())
 
     parser = argparse.ArgumentParser(
@@ -3011,8 +3017,11 @@ def main() -> None:
             print(f"{k:12s} | {m['name']} | target={m['target_name']} | gauss_apodize={m['gauss_apodize']}")
         return
 
+    # argparse guarantees a str for -H (its default is "all"), and the alias table only
+    # maps to loaded keys, so `selected` is always a plain string here.
+    selected: str = active_aliases.get(str(args.headphone), str(args.headphone))
+
     if args.input:
-        selected = active_aliases.get(args.headphone, args.headphone)
         model_cfg = None
         if not args.bypass_eq:
             if selected == "all":
@@ -3024,7 +3033,6 @@ def main() -> None:
         run_audio_wav_mode(args, model_cfg, lim_cfg)
         return
 
-    selected = active_aliases.get(args.headphone, args.headphone)
     if selected == "all":
         for m_cfg in models.values():
             run_model(m_cfg, args, copy_default_ir=False, lim_cfg=lim_cfg)

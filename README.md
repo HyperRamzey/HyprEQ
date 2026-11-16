@@ -2,7 +2,22 @@
 
 Rig-compensated minimum-phase FIR impulse response generator (`pcm_f64le` for `mpv` / `FFmpeg` and `pcm_f32le` for PipeWire / DAW convolvers) targeting the **Harman Over-Ear 2018** curve.
 
-All target curves and headphone measurement datasets are decoupled from the DSP script into an external `measurements.json` database (with automatic discovery of standalone `.json` and `.csv` model files in `models/`), allowing users to add new headphone models without modifying `hypreq.py`.
+All target curves and headphone measurement datasets are decoupled from the DSP into an external `measurements.json` database (with automatic discovery of standalone `.json` and `.csv` model files in `models/`), allowing users to add new headphone models without touching the code.
+
+## Implementation
+
+The DSP is a single self-contained Rust crate — a library plus a `hypreq` binary — with no
+external service, plugin host, or path dependency. `hypreq.py` is the same pipeline kept as
+a **parity oracle**: `scripts/parity.py` runs both sides scenario by scenario and diffs
+stdout, WAV containers and payloads, audit CSVs, and usage errors. See
+[`docs/SETUP.md`](docs/SETUP.md) for prerequisites (the verification figure needs
+fontconfig/freetype), the build and verification gates, the numerical rules (f64 internals,
+no FMA/fast-math), and the artefact naming.
+
+```bash
+cargo build --release
+./target/release/hypreq --headphone all --export-csv
+```
 
 ## Supported Headphones & Data Sources
 
@@ -34,24 +49,32 @@ To avoid over-correcting rig-specific artifacts while still fixing audible drive
 
 ## Generating the Impulse Responses & Verification Plots
 
-Requires Python 3 and `numpy` (plus `matplotlib` for the 4-panel verification PNGs):
+Built with `cargo build --release` (see [`docs/SETUP.md`](docs/SETUP.md) for the fontconfig
+requirement the verification figure has):
 
 ```bash
 # Generate all headphones (64-bit float WAVs, 32-bit float DAW WAVs, audit CSVs, and 4-panel PNG plots):
-python3 hypreq.py --headphone all --export-csv
+./target/release/hypreq --headphone all --export-csv
 
 # Generate only JBL Live 770NC, Beyerdynamic DT 770 Pro (80 Ohm), or FiiO FT1 Pro:
-python3 hypreq.py --headphone jbl770nc
-python3 hypreq.py --headphone dt770_80 --notch-mode safe
-python3 hypreq.py --headphone ft1pro --notch-mode safe
+./target/release/hypreq --headphone jbl770nc
+./target/release/hypreq --headphone dt770_80 --notch-mode safe
+./target/release/hypreq --headphone ft1pro --notch-mode safe
 
 # Lighter 16,384-tap IR (already reaches <-147 dBFS unwindowed floor) or custom sample rate (e.g. 44.1 kHz):
-python3 hypreq.py --headphone dt770_80 --taps 16384 --fs 44100
-python3 hypreq.py --headphone ft1pro --taps 16384 --fs 44100
+./target/release/hypreq --headphone dt770_80 --taps 16384 --fs 44100
+./target/release/hypreq --headphone ft1pro --taps 16384 --fs 44100
 
 # Specify a custom measurement database JSON or external models directory:
-python3 hypreq.py --data-file measurements.json --models-dir models --headphone all
+./target/release/hypreq --data-file measurements.json --models-dir models --headphone all
+
+# Measure / EQ / true-peak-limit an existing recording:
+./target/release/hypreq -H jbl770nc --input song.wav --out-bits 24
+./target/release/hypreq --measure-wav song.wav
 ```
+
+`hypreq.py` accepts the same options and is kept only as the parity oracle for
+`scripts/parity.py`.
 
 ### Generated Files
 - `jbl770nc_f64_48k.wav` / `dt770_80ohm_f64_48k.wav` / `ft1pro_f64_48k.wav`: 64-bit IEEE float (`pcm_f64le`) mono impulse responses for `mpv` / `FFmpeg` (`afir=precision=double`). When a single headphone is selected, it is also copied to `ir.wav`.
@@ -63,15 +86,15 @@ python3 hypreq.py --data-file measurements.json --models-dir models --headphone 
 
 ## Adding More Headphone Models (Modular Architecture)
 
-All target curves (`targets`) and headphone definitions (`models`) are stored outside `hypreq.py` in `measurements.json`, and `hypreq.py` also scans the `models/` directory at startup. You can add new headphone models in three ways without editing the Python script:
+All target curves (`targets`) and headphone definitions (`models`) are stored outside the code in `measurements.json`, and the loader also scans the `models/` directory at startup. You can add new headphone models in three ways without editing any source:
 
 ### 1. Drop a Raw Measurement CSV into `models/` (Simplest)
-Create a `models/` directory next to `hypreq.py` and drop in any 2-column (`freq_hz,raw_dBr`) or 4-column (`freq_hz,left_dBr,right_dBr,avg_dBr`) CSV file, e.g. `models/hd600.csv`:
-- `hypreq.py` automatically registers the filename stem as a `--headphone` key (e.g. `python3 hypreq.py --headphone hd600`).
-- When no manual `ctrl_pts` curve is specified, `hypreq.py` automatically normalizes the raw measurement near `1 kHz`, computes the inverse error against `harman_2018`, applies sub-bass leak discounting (`<65 Hz`), and cosine-tapers the filter to `0.00 dB` at `9.5 kHz` (`hf_bypass_hz`) so 711 coupler half-wave nulls are never boosted.
+Create a `models/` directory next to the binary's working directory and drop in any 2-column (`freq_hz,raw_dBr`) or 4-column (`freq_hz,left_dBr,right_dBr,avg_dBr`) CSV file, e.g. `models/hd600.csv`:
+- HyprEQ automatically registers the filename stem as a `--headphone` key (e.g. `hypreq --headphone hd600`).
+- When no manual `ctrl_pts` curve is specified, HyprEQ automatically normalizes the raw measurement near `1 kHz`, computes the inverse error against `harman_2018`, applies sub-bass leak discounting (`<65 Hz`), and cosine-tapers the filter to `0.00 dB` at `9.5 kHz` (`hf_bypass_hz`) so 711 coupler half-wave nulls are never boosted.
 
 ### 2. Drop a Standalone JSON File into `models/`
-Create `models/<model_key>.json` (e.g. `models/hd600.json`). You can either supply explicit `ctrl_pts` alongside `raw_pts` (or `raw_csv` / `ctrl_csv` paths), or omit `ctrl_pts` to let `hypreq.py` derive the control curve automatically:
+Create `models/<model_key>.json` (e.g. `models/hd600.json`). You can either supply explicit `ctrl_pts` alongside `raw_pts` (or `raw_csv` / `ctrl_csv` paths), or omit `ctrl_pts` to let HyprEQ derive the control curve automatically:
 
 ```json
 {
@@ -104,7 +127,7 @@ Add a new object under `"models"` in `measurements.json` using the same schema a
 
 ## `mpv` Configuration (`FFmpeg >= 8.0` Required)
 
-`hypreq.py` prints the exact `mpv.conf` block matching your chosen `--fs` and file path at the end of every run.
+HyprEQ prints the exact `mpv.conf` block matching your chosen `--fs` and file path at the end of every run.
 
 For a `48,000 Hz` setup, add the following to `~/.config/mpv/mpv.conf` (Linux/macOS) or `%APPDATA%\mpv\mpv.conf` (Windows) (replace `jbl770nc_f64_48k.wav` with `dt770_80ohm_f64_48k.wav`, `ft1pro_f64_48k.wav`, or `ir.wav` as needed):
 
@@ -125,5 +148,5 @@ af=lavfi=[aformat=sample_fmts=dblp,aresample=48000:filter_size=256:phase_shift=1
 ---
 
 ## Credits & License
-- Generator code is licensed under the **MIT License**.
+- Generator code (Rust crate and `hypreq.py`) is licensed under the **MIT License**.
 - Raw frequency response measurements courtesy of **Filk** (`JBL Live 770NC`), **Crinacle** (`Beyerdynamic DT 770 Pro 80 Ω`), and **oratory1990 / Kuulokenurkka** (`FiiO FT1 Pro`) via **Jaakko Pasanen's [AutoEq](https://github.com/jaakkopasanen/AutoEq)** database (used under their respective measurement terms). Target curve derived from **Harman International** (2018 Over-Ear target).

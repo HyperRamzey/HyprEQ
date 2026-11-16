@@ -977,10 +977,10 @@ pub fn load_measurement_database(
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or(stem);
-            if !cfg.contains_key("name") {
-                cfg.entry("name".to_string())
-                    .or_insert_with(|| Value::String(key.clone()));
-            }
+            // `or_insert_with` is already the "only if absent" path; the `contains_key` guard in
+            // front of it asked the map the same question twice.
+            cfg.entry("name".to_string())
+                .or_insert_with(|| Value::String(key.clone()));
             let parent = path.parent().unwrap_or(Path::new(".")).to_path_buf();
             let m = normalize_model_entry(&key, &cfg, &targets, &parent)?;
             db.set_model(m);

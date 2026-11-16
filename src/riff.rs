@@ -176,11 +176,6 @@ impl WavWriter {
         Ok(())
     }
 
-    /// Payload length written so far.
-    pub fn written(&self) -> u64 {
-        self.data_len
-    }
-
     pub fn finish(mut self) -> Result<u64> {
         let total = self.data_len;
         // RIFF chunk size = file size - 8; data chunk size = payload. Both measured from

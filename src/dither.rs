@@ -46,12 +46,11 @@ pub const HYPREQ_DITHER_INC: u128 =
     ((HYPREQ_DITHER_INC_HI as u128) << 64) | HYPREQ_DITHER_INC_LO as u128;
 
 fn rotr64(v: u64, rot: u32) -> u64 {
-    let rot = rot & 63;
-    if rot == 0 {
-        v
-    } else {
-        v.rotate_right(rot)
-    }
+    // `rotate_right(0)` is the identity, so the zero rotation needs no special case; the
+    // mask is what the generator does (`state >> 122` yields 0..63 already, and masking keeps
+    // the two definitions of `rot` agreeing). The pinned TPDF stream in this file's tests is
+    // the proof: a wrong rotation moves every draw after it.
+    v.rotate_right(rot & 63)
 }
 
 /// `pcg_output_xsl_rr_128_64`.

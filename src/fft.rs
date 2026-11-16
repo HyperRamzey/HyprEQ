@@ -203,12 +203,6 @@ pub fn interp_grid(x: &[f64], xp: &[f64], fp: &[f64]) -> Vec<f64> {
     x.iter().map(|&v| interp(v, xp, fp)).collect()
 }
 
-/// Smallest power of two `>= n`.
-#[must_use]
-pub fn next_pow2(n: usize) -> usize {
-    n.max(1).next_power_of_two()
-}
-
 /// `int.bit_length()` — the number of bits needed to represent `v`, `0` for zero.
 ///
 /// The convolver's FFT size in `hypreq.py` is written as
@@ -382,8 +376,7 @@ mod tests {
         }
         assert_eq!(bit_length(0), 0);
         assert_eq!(bit_length(262143), 18);
-        // And the difference from next_power_of_two that the convolver depends on:
-        assert_eq!(next_pow2(65536), 65536);
+        // The convolver's size is the strictly-greater value, never `next_power_of_two`:
         assert_eq!(shl_bit_length(65536), 131072);
     }
 

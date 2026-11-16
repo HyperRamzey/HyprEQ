@@ -6,8 +6,6 @@
 //! bad notch mode, a model with too few knots) are all *messages* with wording chosen to
 //! match the reference, so they arrive as [`Error::Msg`]; there is no separate variant for
 //! them because nothing in this crate branches on the difference.
-//! Every DSP stage reports through this, so a CLI run has one failure type to print
-//! and one place where message wording is decided.
 
 use std::fmt;
 

@@ -390,7 +390,11 @@ impl Cfg {
     /// floor took over) so the difference is never hidden.
     #[must_use]
     pub fn effective_lookahead_ms(&self, rate: u32) -> f64 {
-        self.lookahead_samples(rate) as f64 / rate as f64 * 1e3
+        // Same clamped rate as the frame counts and as [`Cfg::latency_samples`]'s report field:
+        // the samples this divides were counted at 1 Hz when `rate` is 0, so dividing by a real
+        // 0 would report `inf` where the count it converts is finite. The command line rejects a
+        // zero rate with the reference's message before any of this is reachable from a run.
+        self.lookahead_samples(rate) as f64 / f64::from(rate.max(1)) * 1e3
     }
 
     /// True when the requested lookahead had to be raised.
@@ -561,14 +565,8 @@ pub struct Limiter {
     /// Amplitude the gain aims at — the ceiling less [`Cfg::guard_db`].
     ceiling_lin: f64,
     report: Report,
-    engaged: bool,
 }
 
-/// Mix two gains in the dB domain: `w` of `b`, the remainder of `a`.
-///
-/// Mixed in the log domain so that 0.5 means half the *reduction* rather than half the
-/// amplitude, and so that 1.0 is exactly `b` with no residue of `a` left in it. Both
-/// inputs are at most 1.0, so the result never asks for a boost.
 /// Milliseconds to whole frames at `rate`, rounded the way the reference rounds.
 ///
 /// `int(round(ms * 1e-3 * rate))` is NumPy's round-half-to-even, so the 44.1 kHz release
@@ -579,6 +577,11 @@ fn frames(ms: f64, rate: u32) -> usize {
     (ms * 1e-3 * f64::from(rate.max(1))).round_ties_even() as usize
 }
 
+/// Mix two gains in the dB domain: `w` of `b`, the remainder of `a`.
+///
+/// Mixed in the log domain so that 0.5 means half the *reduction* rather than half the
+/// amplitude, and so that 1.0 is exactly `b` with no residue of `a` left in it. Both
+/// inputs are at most 1.0, so the result never asks for a boost.
 fn blend(a: f64, b: f64, w: f64) -> f64 {
     let la = a.max(f64::MIN_POSITIVE).ln();
     let lb = b.max(f64::MIN_POSITIVE).ln();
@@ -630,7 +633,6 @@ impl Limiter {
             slope: 1.0,
             ceiling_lin: 1.0,
             report: Report::default(),
-            engaged: false,
         }
     }
 
@@ -692,7 +694,12 @@ impl Limiter {
                 guard_db: cfg.guard_db(),
                 effective_lookahead_ms: cfg.effective_lookahead_ms(rate),
                 requested_lookahead_ms: cfg.lookahead_ms,
-                latency_ms: latency as f64 / rate as f64 * 1e3,
+                // Divided by the same clamped rate `frames()` used to count the frames, so a
+                // caller that skips the CLI's `--fs` check gets the number that matches the
+                // frame counts rather than an infinity: `latency / 0 * 1e3` is `+inf`, and
+                // `report()` prints `latency_ms` with `{:.2}`, which renders "+inf" into a
+                // report line that looks like a measurement.
+                latency_ms: latency as f64 / f64::from(rate.max(1)) * 1e3,
                 latency_samples: latency,
                 ramp_frames: ramp,
                 attack_ms: cfg.attack_ms,
@@ -709,7 +716,6 @@ impl Limiter {
                 engaged_frames: 0,
                 band_caveat_db: cfg.band_caveat_db(),
             },
-            engaged: false,
         }
     }
 
@@ -1064,9 +1070,10 @@ impl Limiter {
             }
         }
         if deepest < 1.0 - ENGAGED_EPS {
-            if !self.engaged {
-                self.engaged = true;
-            }
+            // `engaged_frames` is the latch: the report says how many frames were changed, and a
+            // reader who wants "did it engage at all" asks `engaged_frames > 0`. A second bool
+            // set-once here could only ever agree with `engaged_frames > 0`, so it was a place to
+            // be wrong rather than a fact. The count is what the harness asserts on.
             self.report.engaged_frames += 1;
             let db = -20.0 * deepest.max(f64::MIN_POSITIVE).log10();
             if db > self.report.max_gain_reduction_db {
@@ -1985,10 +1992,33 @@ mod diag {
             "{}",
             lim.latency_samples()
         );
+        // The report line, not just the counts. `latency_ms` was `latency / rate * 1e3`, which at
+        // rate 0 is `+inf`, and the report prints it with `{:.2}` — a line reading `+inf ms` is
+        // indistinguishable from a measurement to anything grepping the output.
+        let rep = lim.report();
+        assert!(
+            rep.latency_ms.is_finite(),
+            "latency_ms must not be infinite at a zero rate: {}",
+            rep.latency_ms
+        );
+        assert!(
+            rep.effective_lookahead_ms.is_finite() && rep.ramp_frames >= 1,
+            "every rate-derived report field has to stay usable: {rep:?}"
+        );
         let mut block: Vec<Vec<f64>> = vec![vec![0.5; 64], vec![-0.5; 64]];
         let mut refs: Vec<&mut [f64]> = block.iter_mut().map(|c| c.as_mut_slice()).collect();
         lim.process(refs.as_mut_slice());
         assert!(block.iter().flatten().all(|&v| v.is_finite()));
+
+        // And at a real rate the milliseconds still say what the samples say.
+        let lim = Limiter::enabled(Cfg::default(), 48_000, 2);
+        let want = lim.latency_samples() as f64 / 48_000.0 * 1e3;
+        assert!(
+            (lim.report().latency_ms - want).abs() < 1e-9,
+            "{} vs {}",
+            lim.report().latency_ms,
+            want
+        );
     }
 
     #[test]

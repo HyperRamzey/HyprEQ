@@ -121,12 +121,6 @@ impl Pchip {
         false // a Pchip always has at least one node, see `new`
     }
 
-    /// Knot frequencies in Hz.
-    #[must_use]
-    pub fn nodes(&self) -> &[f64] {
-        &self.x
-    }
-
     /// Evaluate at frequencies in Hz (clamped to the knot range, like the Python).
     #[must_use]
     pub fn eval(&self, f_hz: f64) -> f64 {

@@ -617,6 +617,104 @@ mod tests {
         assert_eq!(a.planar[0][0], 0.5);
     }
 
+    /// An odd `fmt ` payload carries a pad byte that belongs to the chunk, and every
+    /// writer that emits an 18-byte `fmt ` with a non-`EXTENSIBLE` tag has been seen to
+    /// word-align it. Skipping only the payload leaves every following header one byte
+    /// early, which is not a wrong number but a file that will not parse at all.
+    #[test]
+    fn an_odd_sized_fmt_chunk_still_leaves_the_rest_of_the_file_aligned() {
+        let p = tmp("odd_fmt.wav");
+        let mut fmt_body: Vec<u8> = Vec::new();
+        fmt_body.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        fmt_body.extend_from_slice(&1u16.to_le_bytes()); // one channel
+        fmt_body.extend_from_slice(&8000u32.to_le_bytes());
+        fmt_body.extend_from_slice(&16000u32.to_le_bytes()); // byte rate
+        fmt_body.extend_from_slice(&2u16.to_le_bytes()); // block align
+        fmt_body.extend_from_slice(&16u16.to_le_bytes()); // bits
+        fmt_body.push(0xAA); // one byte of extension, so the chunk size is odd
+
+        let mut b: Vec<u8> = b"RIFF".to_vec();
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"fmt ");
+        b.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
+        b.extend_from_slice(&fmt_body);
+        b.push(0); // the pad byte that word alignment requires
+        let payload = 0x4000u16.to_le_bytes(); // one sample, +0.5
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        b.extend_from_slice(&payload);
+        let len = b.len() as u32;
+        b[4..8].copy_from_slice(&(len - 8).to_le_bytes());
+        std::fs::write(&p, &b).unwrap();
+
+        let a = read_wav(&p).unwrap_or_else(|e| panic!("odd fmt payload broke the parse: {e}"));
+        assert_eq!(a.fmt_desc, "pcm_s16le | 8,000 Hz | 1ch");
+        assert_eq!(
+            a.planar[0],
+            vec![0.5],
+            "the data chunk was found where it is"
+        );
+    }
+
+    /// The `SubFormat` of a `WAVE_FORMAT_EXTENSIBLE` header is a 16-bit tag in the low
+    /// half of its GUID, not a single byte. Reading one byte is the same answer for the
+    /// two formats anyone uses (`01 00` PCM, `03 00` float) and a different answer for
+    /// every other value — so the case that proves the width is a GUID that is neither.
+    #[test]
+    fn the_extensible_subformat_is_read_as_a_16_bit_tag() {
+        let extensible = |subtype_low: u16| {
+            let mut fmt_body: Vec<u8> = Vec::new();
+            fmt_body.extend_from_slice(&0xFFFEu16.to_le_bytes()); // WAVE_FORMAT_EXTENSIBLE
+            fmt_body.extend_from_slice(&1u16.to_le_bytes()); // channels
+            fmt_body.extend_from_slice(&48000u32.to_le_bytes());
+            fmt_body.extend_from_slice(&(48000u32 * 4).to_le_bytes());
+            fmt_body.extend_from_slice(&4u16.to_le_bytes());
+            fmt_body.extend_from_slice(&32u16.to_le_bytes());
+            fmt_body.extend_from_slice(&22u16.to_le_bytes()); // cbSize
+            fmt_body.extend_from_slice(&32u16.to_le_bytes()); // valid bits
+            fmt_body.extend_from_slice(&3u32.to_le_bytes()); // channel mask
+            let mut guid = vec![0u8; 16];
+            guid[..2].copy_from_slice(&subtype_low.to_le_bytes());
+            guid[6] = 0x10; // the shape of every KSDATAFORMAT_SUBTYPE_* GUID
+            fmt_body.extend_from_slice(&guid);
+
+            let mut b: Vec<u8> = b"RIFF".to_vec();
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b.extend_from_slice(b"WAVE");
+            b.extend_from_slice(b"fmt ");
+            b.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
+            b.extend_from_slice(&fmt_body);
+            b.extend_from_slice(b"data");
+            let payload = 0.75f32.to_le_bytes();
+            b.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            b.extend_from_slice(&payload);
+            let len = b.len() as u32;
+            b[4..8].copy_from_slice(&(len - 8).to_le_bytes());
+            b
+        };
+
+        // Control: a real float subtype is float.
+        let p = tmp("sub_float.wav");
+        std::fs::write(&p, extensible(0x0003)).unwrap();
+        assert_eq!(
+            read_wav(&p).unwrap().fmt_desc,
+            "pcm_f32le | 48,000 Hz | 1ch"
+        );
+
+        // 0x0103: the low byte is 3, so a one-byte read would call this IEEE float and
+        // decode the payload as f32 in silence. It is not a subtype in the registry, and
+        // the refusal has to name the full tag — possible only if both bytes were read.
+        let p = tmp("sub_neither.wav");
+        std::fs::write(&p, extensible(0x0103)).unwrap();
+        let e =
+            read_wav(&p).expect_err("an unknown SubFormat must be refused, not decoded as float");
+        assert!(
+            e.to_string().contains("0x0103"),
+            "the message must name the 16-bit tag, got: {e}"
+        );
+    }
+
     #[test]
     fn ragged_and_unsupported_payloads_are_refused() {
         let p = tmp("ragged.wav");

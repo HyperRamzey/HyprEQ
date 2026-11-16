@@ -367,6 +367,153 @@ mod tests {
         );
     }
 
+    /// A `fmt ` chunk whose payload is an odd number of bytes is followed by a pad byte
+    /// that belongs to the chunk. Skipping only the payload leaves every following header
+    /// one byte early — which does not report a wrong number, it stops the file parsing.
+    #[test]
+    fn an_odd_sized_fmt_chunk_leaves_the_next_header_aligned() {
+        let p = tmp("odd-fmt.wav");
+        let mut fmt_body: Vec<u8> = Vec::new();
+        fmt_body.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        fmt_body.extend_from_slice(&2u16.to_le_bytes()); // two channels
+        fmt_body.extend_from_slice(&44100u32.to_le_bytes());
+        fmt_body.extend_from_slice(&176_400u32.to_le_bytes()); // byte rate
+        fmt_body.extend_from_slice(&4u16.to_le_bytes()); // block align
+        fmt_body.extend_from_slice(&16u16.to_le_bytes()); // bits
+        fmt_body.push(0x5A); // one byte of extension, so the chunk size is odd
+
+        let mut b: Vec<u8> = b"RIFF".to_vec();
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"fmt ");
+        b.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
+        b.extend_from_slice(&fmt_body);
+        b.push(0); // the alignment pad byte
+        let payload = vec![0u8; 4 * 10]; // 10 frames x 2ch x 16-bit
+        let payload_start = b.len();
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        b.extend_from_slice(&payload);
+        let len = b.len() as u32;
+        b[4..8].copy_from_slice(&(len - 8).to_le_bytes());
+        std::fs::write(&p, &b).unwrap();
+
+        let (info, off) = read_info(&p).unwrap_or_else(|e| panic!("odd fmt payload: {e}"));
+        assert_eq!((info.channels, info.rate, info.bits), (2, 44100, 16));
+        assert_eq!(
+            off as usize,
+            payload_start + 8,
+            "the data payload begins where the file says it does"
+        );
+        assert_eq!(info.frames(), 10);
+    }
+
+    /// The same word-alignment rule on a chunk the reader does not interpret: an odd
+    /// `LIST` payload is followed by a pad byte, and skipping only the payload puts the
+    /// `data` header one byte early — the metadata chunks are where a reader that only
+    /// ever met 44-byte headers finds out it has to count bytes.
+    #[test]
+    fn an_odd_metadata_chunk_is_skipped_with_its_pad_byte() {
+        let p = tmp("odd-list.wav");
+        let mut fmt_body: Vec<u8> = Vec::new();
+        fmt_body.extend_from_slice(&1u16.to_le_bytes());
+        fmt_body.extend_from_slice(&1u16.to_le_bytes());
+        fmt_body.extend_from_slice(&8000u32.to_le_bytes());
+        fmt_body.extend_from_slice(&8000u32.to_le_bytes());
+        fmt_body.extend_from_slice(&1u16.to_le_bytes());
+        fmt_body.extend_from_slice(&8u16.to_le_bytes());
+
+        let list = b"INFOISFTHyprE".to_vec(); // 13 bytes: odd, so a pad byte follows
+        let payload = vec![0x80u8; 32];
+        let mut b: Vec<u8> = b"RIFF".to_vec();
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"fmt ");
+        b.extend_from_slice(&(fmt_body.len() as u32).to_le_bytes());
+        b.extend_from_slice(&fmt_body);
+        let list_start = b.len();
+        b.extend_from_slice(b"LIST");
+        b.extend_from_slice(&(list.len() as u32).to_le_bytes());
+        b.extend_from_slice(&list);
+        b.push(0); // pad, because (list_start + 8 + 14) is odd
+        let payload_start = b.len();
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        b.extend_from_slice(&payload);
+        let len = b.len() as u32;
+        b[4..8].copy_from_slice(&(len - 8).to_le_bytes());
+        std::fs::write(&p, &b).unwrap();
+        assert_eq!(
+            (list_start + 8 + list.len()) % 2,
+            1,
+            "the fixture is odd-sized"
+        );
+
+        let (info, off) = read_info(&p).unwrap_or_else(|e| panic!("odd LIST chunk: {e}"));
+        assert_eq!((info.channels, info.rate, info.bits), (1, 8000, 8));
+        assert_eq!(off as usize, payload_start + 8, "found where it is");
+        assert_eq!(info.frames(), 32);
+    }
+
+    /// The `SubFormat` of a `WAVE_FORMAT_EXTENSIBLE` header is a 16-bit tag in the low
+    /// half of a 16-byte GUID. One byte is the same answer for the two formats in
+    /// circulation (`01 00` PCM, `03 00` float) and the wrong answer for anything else.
+    #[test]
+    fn the_extensible_subformat_tag_is_sixteen_bits_wide() {
+        let extensible = |sub_low: u16, bits: u16| {
+            let mut body: Vec<u8> = Vec::new();
+            body.extend_from_slice(&0xFFFEu16.to_le_bytes()); // WAVE_FORMAT_EXTENSIBLE
+            body.extend_from_slice(&1u16.to_le_bytes());
+            body.extend_from_slice(&48000u32.to_le_bytes());
+            body.extend_from_slice(&(48000u32 * 4).to_le_bytes());
+            body.extend_from_slice(&4u16.to_le_bytes());
+            body.extend_from_slice(&bits.to_le_bytes());
+            body.extend_from_slice(&22u16.to_le_bytes()); // cbSize
+            body.extend_from_slice(&bits.to_le_bytes()); // valid bits
+            body.extend_from_slice(&0x4000_0003u32.to_le_bytes()); // FL|FR + mask bit
+            let mut guid = vec![0u8; 16];
+            guid[..2].copy_from_slice(&sub_low.to_le_bytes());
+            guid[6] = 0x10; // as in every KSDATAFORMAT_SUBTYPE_* GUID
+            body.extend_from_slice(&guid);
+
+            let mut b: Vec<u8> = b"RIFF".to_vec();
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b.extend_from_slice(b"WAVE");
+            b.extend_from_slice(b"fmt ");
+            b.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            b.extend_from_slice(&body);
+            b.extend_from_slice(b"data");
+            b.extend_from_slice(&8u32.to_le_bytes());
+            b.extend_from_slice(&[0u8; 8]);
+            let len = b.len() as u32;
+            b[4..8].copy_from_slice(&(len - 8).to_le_bytes());
+            b
+        };
+        let write = |name: &str, bytes: Vec<u8>| {
+            let p = tmp(name);
+            std::fs::write(&p, &bytes).unwrap();
+            p
+        };
+
+        // Controls: the two subtypes that exist.
+        let p = write("sub-pcm.wav", extensible(0x0001, 32));
+        let (info, _) = read_info(&p).unwrap();
+        assert!(!info.float, "0x0001 is PCM");
+        let p = write("sub-float.wav", extensible(0x0003, 32));
+        let (info, _) = read_info(&p).unwrap();
+        assert!(info.float, "0x0003 is IEEE float");
+
+        // 0x0103: the low byte is 3, so a one-byte read calls it float. The tag is both
+        // bytes, and both bytes are not 3.
+        let p = write("sub-neither.wav", extensible(0x0103, 32));
+        let (info, _) = read_info(&p).unwrap();
+        assert!(
+            !info.float,
+            "a SubFormat of 0x0103 is not IEEE float; one byte was read as 0x03"
+        );
+        assert_eq!(info.tag, 0xFFFE, "the container tag is still extensible");
+    }
+
     #[test]
     fn an_absurd_fmt_size_is_refused_before_it_is_allocated() {
         let p = tmp("huge-fmt.wav");

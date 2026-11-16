@@ -286,19 +286,19 @@ impl Cfg {
     /// step response is the stated time constant rather than something near it.
     #[must_use]
     pub fn coef(&self, ms: f64, rate: u32) -> f64 {
-        (-1.0 / (ms * 1e-3 * rate as f64)).exp()
+        (-1.0 / (ms * 1e-3 * f64::from(rate.max(1)))).exp()
     }
 
     /// Frames of the [`RELEASE_WINDOW_MS`] peak-hold the slow stage measures over.
     #[must_use]
     pub fn release_window(&self, rate: u32) -> usize {
-        (RELEASE_WINDOW_MS * 1e-3 * rate as f64).round() as usize
+        frames(RELEASE_WINDOW_MS, rate)
     }
 
     /// Lookahead in samples before the floor is applied.
     #[must_use]
     pub fn requested_lookahead_samples(&self, rate: u32) -> usize {
-        (self.lookahead_ms * 1e-3 * rate as f64).round() as usize
+        frames(self.lookahead_ms, rate)
     }
 
     /// Floor: the interpolator's memory plus the shortest ramp that is not a step.
@@ -368,7 +368,7 @@ impl Cfg {
         let room = la
             .saturating_sub(self.ratio.report_delay())
             .saturating_sub(1);
-        let preferred = (ATTACK_MS * 1e-3 * rate as f64).round() as usize;
+        let preferred = frames(ATTACK_MS, rate);
         room.max(MIN_RAMP_FRAMES)
             .min(preferred.max(MIN_RAMP_FRAMES))
     }
@@ -557,6 +557,16 @@ pub struct Limiter {
 /// Mixed in the log domain so that 0.5 means half the *reduction* rather than half the
 /// amplitude, and so that 1.0 is exactly `b` with no residue of `a` left in it. Both
 /// inputs are at most 1.0, so the result never asks for a boost.
+/// Milliseconds to whole frames at `rate`, rounded the way the reference rounds.
+///
+/// `int(round(ms * 1e-3 * rate))` is NumPy's round-half-to-even, so the 44.1 kHz release
+/// window of 220.5 frames lands on 220 and not 221. A zero rate is clamped to 1 Hz: the
+/// command line rejects it with the reference's own message first, and casting an infinite
+/// float to `usize` saturates to `usize::MAX` — an allocation that never comes back.
+fn frames(ms: f64, rate: u32) -> usize {
+    (ms * 1e-3 * f64::from(rate.max(1))).round_ties_even() as usize
+}
+
 fn blend(a: f64, b: f64, w: f64) -> f64 {
     let la = a.max(f64::MIN_POSITIVE).ln();
     let lb = b.max(f64::MIN_POSITIVE).ln();
@@ -614,6 +624,16 @@ impl Limiter {
 
     #[must_use]
     pub fn enabled(cfg: Cfg, rate: u32, channels: usize) -> Self {
+        if !cfg.enable {
+            // A limiter built from a disabled config has to report the same thing
+            // `disabled()` does. Falling through would size rings, latency and a ramp for a
+            // chain that `process` never runs, and `report()` would print a lookahead the
+            // signal never sees.
+            let mut off = Self::disabled();
+            off.cfg = cfg;
+            off.rate = rate;
+            return off;
+        }
         let delta = cfg.ratio.report_delay();
         let _lookahead = cfg.lookahead_samples(rate);
         let latency = cfg.latency_samples(rate);
@@ -1072,11 +1092,10 @@ impl Limiter {
         if !self.cfg.enable || planar.is_empty() {
             return;
         }
-        let n = planar[0].len();
-        debug_assert!(
-            planar.iter().all(|p| p.len() == n),
-            "ragged block into the limiter"
-        );
+        // Process the common prefix. A block whose channels differ in length is a caller
+        // error, but indexing channel 0's length into a shorter channel is a panic in a
+        // release build, and a limiter has no business panicking on audio.
+        let n = planar.iter().map(|p| p.len()).min().unwrap_or(0);
         let nch = self.side.len().min(planar.len());
         let mut frame = std::mem::take(&mut self.scratch);
         frame.clear();
@@ -1943,5 +1962,62 @@ mod diag {
                 20.0 * worst_hi.log10()
             );
         }
+    }
+
+    #[test]
+    fn a_disabled_config_and_a_zero_rate_cost_nothing_to_build() {
+        // Building from a disabled config used to size rings, latency and a ramp for a
+        // chain that never runs, so the report quoted lookahead the signal never saw.
+        let off = Cfg {
+            enable: false,
+            ..Cfg::default()
+        };
+        let lim = Limiter::enabled(off, 48_000, 2);
+        assert_eq!(lim.latency_samples(), 0);
+        assert_eq!(lim.report().ramp_frames, 0);
+
+        // A zero rate is rejected by the command line with the reference's own message.
+        // A library caller that gets there anyway still has to get a finite, usable
+        // limiter out of it: every rate-derived count floors rather than divides.
+        let on = Cfg::default();
+        let mut lim = Limiter::enabled(on, 0, 2);
+        assert!(
+            lim.latency_samples() < 1_000_000,
+            "{}",
+            lim.latency_samples()
+        );
+        let mut block: Vec<Vec<f64>> = vec![vec![0.5; 64], vec![-0.5; 64]];
+        let mut refs: Vec<&mut [f64]> = block.iter_mut().map(|c| c.as_mut_slice()).collect();
+        lim.process(refs.as_mut_slice());
+        assert!(block.iter().flatten().all(|&v| v.is_finite()));
+    }
+
+    #[test]
+    fn frame_counts_round_half_to_even_like_the_reference() {
+        // int(round(5.0 ms * 44100)) is 220.5 -> 220 in Python; half-up gave 221 and the
+        // 44.1 kHz release window was one frame longer than the reference's.
+        let cfg = Cfg::default();
+        assert_eq!(cfg.release_window(44_100), 220);
+        assert_eq!(cfg.release_window(48_000), 240);
+        assert_eq!(cfg.requested_lookahead_samples(44_100), 88);
+        assert_eq!(
+            frames(0.5, 44_100),
+            22,
+            "0.5 ms at 44.1 kHz is 22.05 frames"
+        );
+        assert_eq!(frames(2.0, 44_100), 88, "2 ms is 88.2 frames");
+    }
+
+    #[test]
+    fn a_ragged_block_is_processed_to_the_length_the_channels_share() {
+        // A debug assertion is not a guard in a release build: indexing channel 0's length
+        // into a shorter channel panicked on audio instead of limiting it.
+        let mut lim = Limiter::enabled(Cfg::default(), 48_000, 2);
+        let mut long = vec![0.9f64; 4096];
+        let mut short = vec![0.9f64; 10];
+        let mut refs: Vec<&mut [f64]> = vec![long.as_mut_slice(), short.as_mut_slice()];
+        lim.process(refs.as_mut_slice());
+        assert!(long.iter().all(|&v| v.is_finite()));
+        assert!(short.iter().all(|&v| v.is_finite()));
     }
 }

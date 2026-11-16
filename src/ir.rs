@@ -138,6 +138,11 @@ pub fn synthesize_minimum_phase_ir(
     gauss_apodize: bool,
     kaiser_beta: f64,
 ) -> Result<IrResult, IrError> {
+    if fs == 0 {
+        // The reference has one rate guard and this is its message. Every time constant,
+        // bin width and millisecond figure below divides by the rate.
+        return Err(IrError("sample rate must be positive (got 0)".to_string()));
+    }
     if ctrl_pts.len() < 2 {
         return Err(IrError(
             "control curve needs at least two knots to interpolate".to_string(),
@@ -375,7 +380,12 @@ pub fn export_audit_csv(
 /// `max(65536, 1 << (taps*4 - 1).bit_length())` — the offline/mpv synthesis FFT size.
 #[must_use]
 pub fn mpv_n_fft(taps: usize) -> usize {
-    65536usize.max(fft::shl_bit_length(taps * 4 - 1))
+    // `taps * 4 - 1` is computed on a usize, so a tap count of 0 used to wrap to
+    // usize::MAX; the reference's `1 << (taps * 4 - 1).bit_length()` has no such problem
+    // and lands on the 65536 floor. Saturating gets the same answer without the panic.
+    65536usize.max(fft::shl_bit_length(
+        taps.saturating_mul(4).saturating_sub(1),
+    ))
 }
 
 /// Knot gain at `notch_ref_hz` — the number the concha callout prints. A knot at
@@ -664,5 +674,33 @@ mod linear_probe_tests {
         assert!((peak.1 - 1.0).abs() < 1e-9, "peak magnitude {}", peak.1);
         assert!(ir[..n / 2 - 1].iter().all(|&v| v.abs() < 1e-9));
         assert!(ir[n / 2 + 1..].iter().all(|&v| v.abs() < 1e-9));
+    }
+
+    #[test]
+    fn a_zero_tap_count_and_a_zero_rate_are_answered_not_wrapped() {
+        // `taps * 4 - 1` on a usize wraps to usize::MAX at taps = 0, which then asks
+        // shl_bit_length for a shift nobody can serve. The reference's formula has no such
+        // trouble and floors at 65536.
+        assert_eq!(mpv_n_fft(0), 65_536);
+        assert_eq!(mpv_n_fft(1), 65_536);
+        assert_eq!(mpv_n_fft(2), 65_536);
+        assert_eq!(mpv_n_fft(16_384), 65_536);
+        assert_eq!(mpv_n_fft(65_536), 262_144);
+
+        // A zero sample rate is the one rate error the reference names, and it names it
+        // the same way here.
+        let e = synthesize_minimum_phase_ir(
+            &[(20.0, 0.0), (1000.0, 0.0)],
+            0,
+            65_536,
+            1024,
+            128,
+            -1.5,
+            false,
+            18.0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(e, "sample rate must be positive (got 0)");
     }
 }

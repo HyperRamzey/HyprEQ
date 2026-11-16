@@ -125,15 +125,20 @@ pub fn read_wav(path: &Path) -> Result<WavAudio> {
             })
             .collect();
 
+        // The reference reads *every* chunk's payload and raises when the read comes up
+        // short, so a truncated LIST, bext or junk is reported exactly like a truncated
+        // data chunk. Skipping unknown chunks instead would let a file that the reference
+        // rejects load here — and `size > file_len - pos` cannot overflow.
+        if size > file_len.saturating_sub(pos) {
+            return Err(Error::msg(format!(
+                "Truncated '{id_name}' chunk in '{name}'"
+            )));
+        }
+
         if id == *b"fmt " {
             if size > MAX_FMT_CHUNK {
                 return Err(Error::msg(format!(
                     "absurd WAV fmt chunk size ({size}) in '{name}'"
-                )));
-            }
-            if pos + size > file_len {
-                return Err(Error::msg(format!(
-                    "Truncated '{id_name}' chunk in '{name}'"
                 )));
             }
             let mut b = vec![0u8; size as usize];
@@ -161,14 +166,7 @@ pub fn read_wav(path: &Path) -> Result<WavAudio> {
                 bits,
             });
         } else if id == *b"data" {
-            // The last data chunk wins, as in Python's read loop. A size that
-            // runs past end-of-file is reported as truncation instead of being
-            // allocated first.
-            if pos + size > file_len {
-                return Err(Error::msg(format!(
-                    "Truncated '{id_name}' chunk in '{name}'"
-                )));
-            }
+            // The last data chunk wins, as in Python's read loop.
             data = Some((pos, size));
         }
         // Chunks are word-aligned: an odd size carries a pad byte.
@@ -822,5 +820,32 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("IEEE float output needs 32 or 64 bits"));
+    }
+
+    #[test]
+    fn a_truncated_chunk_of_any_kind_is_reported() {
+        // The reference reads every chunk's payload and raises on a short read, so a file
+        // cut off inside a LIST is an error, not a chunk to walk past on the way to data.
+        let good = tmp("trun_good.wav");
+        write_wav_pcm_or_float(&good, &[vec![0.25, -0.25]], 48_000, 32).unwrap();
+        let mut bytes = std::fs::read(&good).unwrap();
+        // Append a LIST chunk that promises far more than the file holds.
+        bytes.extend_from_slice(b"LIST");
+        bytes.extend_from_slice(&(1u32 << 20).to_le_bytes());
+        bytes.extend_from_slice(b"INFO");
+        let cut = tmp("trun_cut.wav");
+        std::fs::write(&cut, &bytes).unwrap();
+        let e = read_wav(&cut).unwrap_err().to_string();
+        assert!(e.contains("Truncated 'LIST'"), "{e}");
+
+        // An id that is not printable text is replaced rather than reformatted, and a
+        // chunk that claims to be there but is not cannot be seeked past the end.
+        let mut junk = std::fs::read(&good).unwrap();
+        junk.extend_from_slice(&[0xf0u8, 0x9f, 0x92, 0xa9]);
+        junk.extend_from_slice(&100u32.to_le_bytes());
+        let weird = tmp("trun_weird.wav");
+        std::fs::write(&weird, &junk).unwrap();
+        let e = read_wav(&weird).unwrap_err().to_string();
+        assert!(e.contains('\u{fffd}'), "{e}");
     }
 }

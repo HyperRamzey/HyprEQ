@@ -33,6 +33,11 @@ use crate::fft::{shl_bit_length, Complex64};
 /// With `trim_to_input` each channel is cut back to its first `n_in` samples, as
 /// the Python's `acc[:out_len]` does; otherwise the full `n_in + n_ir - 1`
 /// linear response is returned.
+///
+/// Degenerate inputs follow the reference rather than panicking: an empty `ir`
+/// zero-pads inside the transform, so the output is silence of the same length the
+/// formula gives (`n_in - 1`); a channel shorter than channel 0 contributes only the
+/// blocks it actually has.
 #[must_use]
 pub fn convolve_planar_fft(planar: &[Vec<f64>], ir: &[f64], trim_to_input: bool) -> Vec<Vec<f64>> {
     let Some(first) = planar.first() else {
@@ -56,7 +61,9 @@ pub fn convolve_planar_fft(planar: &[Vec<f64>], ir: &[f64], trim_to_input: bool)
         .map(|ch| {
             let mut acc = vec![0.0f64; n_in + n_ir - 1];
             let mut start = 0usize;
-            while start < n_in {
+            // `n_in` is channel 0's length. A shorter channel simply stops early: slicing
+            // `start..stop` past its end would panic, and no audio path wants a panic.
+            while start < n_in && start < ch.len() {
                 let stop = (start + block_len).min(n_in).min(ch.len());
                 let blk = &ch[start..stop];
                 let seg_len = blk.len() + n_ir - 1;
@@ -258,5 +265,50 @@ mod tests {
         for (a, b) in y.iter().zip(&x) {
             assert!((a - b).abs() < 1e-14, "{a} vs {b}");
         }
+    }
+
+    #[test]
+    fn an_empty_filter_and_a_short_channel_neither_panic_nor_garble() {
+        // An empty IR zero-pads inside the transform, so the reference's answer is silence
+        // of length n_in + 0 - 1; a channel shorter than channel 0 contributes only the
+        // blocks it has instead of slicing past its end.
+        let y = convolve_planar_fft(&[vec![1.0, 2.0, 3.0]], &[], false)
+            .pop()
+            .unwrap();
+        assert_eq!(y.len(), 2, "n_in + n_ir - 1 samples of nothing");
+        assert!(y.iter().all(|&v| v == 0.0), "{y:?}");
+
+        // A block is at most 65536 samples, so a channel shorter than n_in only meets the
+        // boundary when n_in crosses it: channel 0 needs to be long enough that the second
+        // channel runs out before the block loop does.
+        let n = 70_000;
+        let ragged = vec![
+            (0..n).map(|i| (i % 7) as f64 * 0.01).collect::<Vec<f64>>(),
+            (0..30).map(|i| (i % 3) as f64 * 0.01).collect::<Vec<f64>>(),
+        ];
+        let out = convolve_planar_fft(&ragged, &[1.0], true);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].len(), n);
+        // Exact only to the rfft/irfft round trip, which is at the 1e-17 level here.
+        assert!(
+            out[0]
+                .iter()
+                .zip(&ragged[0])
+                .all(|(&a, &b)| (a - b).abs() < 1e-12),
+            "a delta filter must reproduce channel 0"
+        );
+        // The short channel keeps the accumulator length channel 0 set, and contributes
+        // only the samples it actually has.
+        assert!(
+            out[1]
+                .iter()
+                .zip(&ragged[1])
+                .all(|(&a, &b)| (a - b).abs() < 1e-12),
+            "the short channel comes through unchanged"
+        );
+        assert!(
+            out[1][ragged[1].len()..].iter().all(|&v| v == 0.0),
+            "nothing beyond a channel's own samples"
+        );
     }
 }

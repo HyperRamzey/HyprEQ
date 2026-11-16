@@ -314,15 +314,20 @@ pub fn derive_ctrl_pts_from_raw(
 }
 
 /// Python's `round(x, 2)` on the 0.01 dB grid the control curves are written in.
+///
+/// `round()` and `np.round()` break ties to even, so 220.5 becomes 220 and 2.675 lands on
+/// 2.67 rather than 2.68. Half-up rounding here moved a control knot by 0.01 dB relative
+/// to the reference whenever a scaled value landed exactly on a half.
 #[must_use]
 pub fn round2(x: f64) -> f64 {
-    (x * 100.0).round() / 100.0
+    (x * 100.0).round_ties_even() / 100.0
 }
 
-/// Round to 4 decimals, as `apply_notch_mode` does to a `tanh`-capped boost.
+/// Round to 4 decimals, as `apply_notch_mode` does to a `tanh`-capped boost, with the
+/// same ties-to-even rule as [`round2`].
 #[must_use]
 pub fn round4(x: f64) -> f64 {
-    (x * 1e4).round() / 1e4
+    (x * 1e4).round_ties_even() / 1e4
 }
 
 /// `hypreq.py::load_csv_points` — 2- or 4-column CSV, `#` comments and blank rows
@@ -1386,5 +1391,15 @@ mod tests {
         assert_eq!(round2(2.675), 2.68);
         assert_eq!(round4(-0.000_049_9), -0.0);
         assert_eq!(round4(1.234_56), 1.234_6);
+        // Python's round()/np.round() break ties to even, and these two are exact binary
+        // halves: 0.125 -> 0.12 and 0.375 -> 0.38. Half-up gave 0.13 and 0.38.
+        assert_eq!(round2(0.125), 0.12, "a tie must go to the even cent");
+        assert_eq!(
+            round2(0.375),
+            0.38,
+            "the other side of the tie goes up to even"
+        );
+        assert_eq!(round2(-0.125), -0.12);
+        assert_eq!(round4(0.0625), 0.0625);
     }
 }

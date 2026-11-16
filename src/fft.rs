@@ -93,7 +93,6 @@ pub fn ifft(x: &[Complex64]) -> Vec<Complex64> {
 /// its DFT — `numpy.fft.rfft(x, n)`.
 #[must_use]
 pub fn rfft(x: &[f64], n: usize) -> Vec<Complex64> {
-    debug_assert!(n >= 2, "rfft needs a length of at least 2");
     let mut buf = vec![Complex64::new(0.0, 0.0); n];
     for (dst, &src) in buf.iter_mut().zip(x) {
         dst.re = src;
@@ -115,7 +114,12 @@ pub fn rfft(x: &[f64], n: usize) -> Vec<Complex64> {
 /// place in this crate where a bit-for-bit match with NumPy is not on offer.
 #[must_use]
 pub fn irfft(spec: &[Complex64], n: usize) -> Vec<f64> {
-    debug_assert!(n >= 2, "irfft needs a length of at least 2");
+    if n == 0 {
+        // NumPy raises `Invalid number of FFT data points (0)`. Here the generic path
+        // would write `buf[0]` into a zero-length buffer, so the degenerate size is
+        // answered directly with the empty time signal it stands for.
+        return Vec::new();
+    }
     let bins = n / 2 + 1;
     let mut buf = vec![Complex64::new(0.0, 0.0); n];
     if let Some(dc) = spec.first() {
@@ -169,6 +173,12 @@ pub fn geomspace(a: f64, b: f64, n: usize) -> Vec<f64> {
 pub fn interp(x: f64, xp: &[f64], fp: &[f64]) -> f64 {
     debug_assert_eq!(xp.len(), fp.len());
     debug_assert!(!xp.is_empty());
+    if x.is_nan() {
+        // NumPy propagates NaN through `np.interp`. Every comparison against NaN is false,
+        // so without this the query falls through the end clamps and lands on an interior
+        // knot, quietly replacing a missing measurement with a guessed one.
+        return f64::NAN;
+    }
     if xp.len() == 1 || x <= xp[0] {
         return fp[0];
     }
@@ -376,5 +386,36 @@ mod tests {
         // And the difference from next_power_of_two that the convolver depends on:
         assert_eq!(next_pow2(65536), 65536);
         assert_eq!(shl_bit_length(65536), 131072);
+    }
+
+    #[test]
+    fn a_degenerate_transform_size_returns_empty_instead_of_panicking() {
+        // numpy raises `Invalid number of FFT data points (0)`; the caller here is a
+        // library, and the non-panicking answer to "what is the spectrum of nothing" is
+        // nothing. A length-1 transform is legal in numpy and has to stay correct.
+        // Behaviour pinned to NumPy, whatever the transform machinery does underneath:
+        // `np.fft.rfft(x, 0)` and `irfft(X, 0)` are the sizes it refuses, and length 1 is
+        // the size it answers with the sample itself.
+        assert!(rfft(&[1.0, 2.0], 0).is_empty());
+        assert!(irfft(&[Complex64::new(1.0, 0.0)], 0).is_empty());
+        assert_eq!(rfft(&[3.0], 1), vec![Complex64::new(3.0, 0.0)]);
+        assert_eq!(rfft(&[], 1), vec![Complex64::new(0.0, 0.0)]);
+        assert_eq!(irfft(&[Complex64::new(2.0, 0.0)], 1), vec![2.0]);
+        assert_eq!(irfft(&[Complex64::new(2.0, 7.0)], 1), vec![2.0], "imag part is unused");
+        // Zero-padding is the same rule at the other end of the size range.
+        assert_eq!(rfft(&[1.0], 4).len(), 3);
+    }
+
+    #[test]
+    fn a_nan_query_stays_nan_through_interp() {
+        // np.interp propagates NaN. Comparisons against NaN are all false, so without an
+        // explicit rule a missing measurement was answered with an interior knot value.
+        let xp = [1.0, 2.0, 3.0];
+        let fp = [10.0, 20.0, 30.0];
+        assert!(interp(f64::NAN, &xp, &fp).is_nan());
+        // The end clamps are what numpy does for the infinities.
+        assert_eq!(interp(f64::NEG_INFINITY, &xp, &fp), 10.0);
+        assert_eq!(interp(f64::INFINITY, &xp, &fp), 30.0);
+        assert_eq!(interp(2.5, &xp, &fp), 25.0);
     }
 }

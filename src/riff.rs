@@ -220,6 +220,23 @@ pub fn read_info_file(f: &mut std::fs::File) -> Result<(WavInfo, u64)> {
         // The chunk header is 4 bytes of id followed by 4 bytes of size.
         let id = &ch[0..4];
         let size = u32::from_le_bytes([ch[4], ch[5], ch[6], ch[7]]) as u64;
+        let truncated = |e: std::io::Error| -> Error {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                let name: String = id
+                    .iter()
+                    .map(|&b| {
+                        if b.is_ascii_graphic() || b == b' ' {
+                            b as char
+                        } else {
+                            '\u{fffd}'
+                        }
+                    })
+                    .collect();
+                Error::msg(format!("Truncated '{name}' chunk"))
+            } else {
+                Error::Io(e)
+            }
+        };
         if id == b"fmt " {
             // Cap checked before the allocation, not after. A chunk header can claim any
             // 32-bit size, and `vec![0u8; size]` on the strength of it means a 44-byte
@@ -229,7 +246,12 @@ pub fn read_info_file(f: &mut std::fs::File) -> Result<(WavInfo, u64)> {
                 return Err(Error::msg("absurd WAV fmt chunk size"));
             }
             let mut b = vec![0u8; size as usize];
-            f.read_exact(&mut b).map_err(short)?;
+            f.read_exact(&mut b).map_err(truncated)?;
+            // RIFF chunks are word-aligned: an odd payload carries a pad byte that belongs
+            // to it, and skipping only the payload leaves every later header one byte early.
+            if size & 1 == 1 {
+                f.seek(SeekFrom::Current(1))?;
+            }
             if b.len() < 16 {
                 return Err(Error::msg("short WAV fmt chunk"));
             }
@@ -243,7 +265,10 @@ pub fn read_info_file(f: &mut std::fs::File) -> Result<(WavInfo, u64)> {
                 // cbSize is at 16, so dwChannelMask follows the 2-byte valid-bits
                 // field at 20, and the 16-byte sub-format GUID starts at 24.
                 info.mask = Some(u32::from_le_bytes([b[20], b[21], b[22], b[23]]));
-                info.float = b[24] == 0x03; // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+                // The sub-format is a 16-byte GUID whose first two bytes are the old
+                // WAVE_FORMAT tag. Reading one byte would call anything starting with 0x03
+                // float; the tag is the whole 16-bit field.
+                info.float = u16::from_le_bytes([b[24], b[25]]) == WAVE_FORMAT_IEEE_FLOAT;
             } else if info.channels > 2 {
                 info.mask = Some(guess_mask(info.channels));
             }

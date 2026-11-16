@@ -61,8 +61,24 @@ impl Pchip {
     pub fn new(f_nodes: &[f64], g_nodes: &[f64]) -> Self {
         assert_eq!(f_nodes.len(), g_nodes.len(), "node/gain length mismatch");
         assert!(!f_nodes.is_empty(), "PCHIP needs at least one node");
+        // A repeated knot makes one interval zero wide, and every divided slope over it
+        // becomes inf or NaN, which then spreads through the whole cubic. The loaders
+        // deduplicate already (last write wins, like the reference's dict); doing it here
+        // too keeps a directly-constructed interpolator honest.
+        let mut nodes: Vec<f64> = Vec::with_capacity(f_nodes.len());
+        let mut gains: Vec<f64> = Vec::with_capacity(g_nodes.len());
+        for (&f, &g) in f_nodes.iter().zip(g_nodes.iter()) {
+            if nodes.last().is_some_and(|&prev| prev == f) {
+                let n = gains.len() - 1;
+                gains[n] = g;
+            } else {
+                nodes.push(f);
+                gains.push(g);
+            }
+        }
+        let f_nodes: &[f64] = &nodes;
+        let y = gains;
         let x: Vec<f64> = f_nodes.iter().map(|f| f.log10()).collect();
-        let y = g_nodes.to_vec();
         if x.len() == 1 {
             return Self {
                 x,
@@ -117,11 +133,15 @@ impl Pchip {
         if self.x.len() == 1 {
             return self.y[0];
         }
-        // Python clamps in Hz then takes log10; log10 is monotonic, so clamping the
-        // log grid is the same operation with one less rounding step (and it makes
-        // the end points land on `x[0]`/`x[n-1]` exactly).
-        let fq = f_hz.log10().clamp(self.x[0], self.x[self.x.len() - 1]);
-        let idx = (searchsorted_right(&self.x, fq) - 1).clamp(0, self.x.len() - 2);
+        // Clamp in Hz first, exactly as `np.clip(f_query, f[0], f[-1])` does before the
+        // log10. Taking the log first meant a 0 Hz query produced -inf and a negative one
+        // produced NaN - and NaN then searched to index 0, where `0 - 1` on a usize is
+        // what actually crashed. A NaN query keeps NumPy's answer (NaN) instead.
+        let f = f_hz.clamp(10f64.powf(self.x[0]), 10f64.powf(self.x[self.x.len() - 1]));
+        let fq = f.log10();
+        let idx = searchsorted_right(&self.x, fq)
+            .saturating_sub(1)
+            .min(self.x.len() - 2);
         let hi = self.h[idx];
         let t = (fq - self.x[idx]) / hi;
         let t2 = t * t;
@@ -248,5 +268,37 @@ mod tests {
         assert_eq!(searchsorted_right(&a, 2.0), 3, "right of equal elements");
         assert_eq!(searchsorted_right(&a, 5.0), 4);
         assert_eq!(searchsorted_right(&a, 6.0), 4);
+    }
+
+    #[test]
+    fn a_query_off_the_end_of_the_grid_clamps_instead_of_wrapping() {
+        // log10 of 0 Hz is -inf and of a negative frequency NaN; the NaN searched to index
+        // 0 and `0 - 1` on a usize is what crashed. The reference clamps in Hz first, so
+        // every frequency below the first knot reads as the first knot.
+        let p = Pchip::new(&[20.0, 1000.0, 20000.0], &[1.0, 0.0, -1.0]);
+        assert_eq!(p.eval(0.0), 1.0);
+        assert_eq!(p.eval(-5.0), 1.0);
+        assert_eq!(p.eval(f64::NEG_INFINITY), 1.0);
+        assert_eq!(p.eval(f64::INFINITY), -1.0);
+        assert_eq!(p.eval(20.0), 1.0);
+        assert_eq!(p.eval(20000.0), -1.0);
+        // np.interp's answer for a NaN query is NaN, not a guess.
+        assert!(p.eval(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn a_repeated_knot_cannot_turn_the_curve_into_nan() {
+        // A zero-wide interval makes every divided slope over it infinite, and one
+        // infinite slope is enough to poison the whole cubic.
+        let p = Pchip::new(&[20.0, 1000.0, 1000.0, 20000.0], &[1.0, 0.5, -0.5, -1.0]);
+        assert_eq!(
+            p.len(),
+            3,
+            "the repeated knot is folded, last value winning"
+        );
+        for f in [20.0, 100.0, 1000.0, 5000.0, 20000.0] {
+            assert!(p.eval(f).is_finite(), "{f} Hz gave {}", p.eval(f));
+        }
+        assert_eq!(p.eval(1000.0), -0.5);
     }
 }

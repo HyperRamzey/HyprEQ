@@ -99,7 +99,9 @@ pub fn measure_signal_block(
     block_size: usize,
 ) -> SignalMeasurements {
     let nch = planar.len();
-    let frames = planar.first().map_or(0, |c| c.len());
+    // Metering walks the channels in lockstep, so it runs over the length they all share.
+    // Per-channel peak and RMS below still see each channel's own samples.
+    let frames = planar.iter().map(|c| c.len()).min().unwrap_or(0);
     if nch == 0 || frames == 0 {
         return SignalMeasurements::empty(nch, fs, ratio);
     }
@@ -123,12 +125,17 @@ pub fn measure_signal_block(
     tp_main.drain();
     tp_itu.drain();
 
-    for start in (0..frames).step_by(block_size.max(1)) {
-        let end = (start + block_size).min(frames);
-        let blk = end - start;
-        let views: Vec<&[f64]> = planar.iter().map(|c| &c[start..end]).collect();
-        meters.set_format(fs as f32, blk);
-        meters.observe_planar(&views, blk);
+    // The meter model converts sample counts to time, so it needs a rate. Without one the
+    // integration window is a division by zero; the peak/RMS/TP figures below are pure
+    // sample statistics and stay valid, so only the meter block is skipped.
+    if fs > 0 {
+        for start in (0..frames).step_by(block_size.max(1)) {
+            let end = (start + block_size).min(frames);
+            let blk = end - start;
+            let views: Vec<&[f64]> = planar.iter().map(|c| &c[start..end]).collect();
+            meters.set_format(fs as f32, blk);
+            meters.observe_planar(&views, blk);
+        }
     }
 
     let sp_lin = sp_ch.iter().copied().fold(0.0f64, f64::max);
@@ -257,7 +264,7 @@ fn join_signed(xs: &[f64], dp: usize) -> String {
 ///   `-3 dBTP` ceiling to work immediately.
 #[must_use]
 pub fn build_convolver_probe(fs: u32, duration_s: f64) -> Vec<f64> {
-    let n = ((fs as f64 * duration_s).round() as usize).max(4096);
+    let n = ((fs as f64 * duration_s).round_ties_even() as usize).max(4096);
     let nyq_safe = 0.43 * fs as f64;
     let f_hi = 12000.0f64.min(nyq_safe);
     let f_mid = 4060.0f64.min(0.35 * fs as f64);
@@ -520,6 +527,37 @@ mod tests {
             "{} vs {}",
             a.meter_peak_hold_dbfs,
             b.meter_peak_hold_dbfs
+        );
+    }
+
+    #[test]
+    fn ragged_channels_and_a_zero_rate_do_not_panic() {
+        // Channel 0 is not a promise the other channels made. Metering walks the common
+        // prefix; the sample statistics still see everything.
+        let ragged = vec![vec![0.5; 100], vec![0.25; 40]];
+        let m = measure_signal(&ragged, 48_000, Ratio::X16);
+        assert!(m.sample_peak_dbfs.is_finite(), "{m:?}");
+
+        // A zero rate cannot be metered (its integration window is a division by zero),
+        // but the peak/TP figures are pure sample statistics and stay valid.
+        let m = measure_signal(&[vec![0.5; 64]], 0, Ratio::X16);
+        assert!(
+            m.sample_peak_dbfs.is_finite(),
+            "sample peak must survive: {m:?}"
+        );
+        assert!(
+            m.true_peak_dbtp.is_finite(),
+            "true peak must survive: {m:?}"
+        );
+        // Observed on this build: metering at a zero rate produces NaN, so the guard is
+        // what keeps the meter fields at their "nothing metered" values instead.
+        assert!(
+            !m.meter_param.is_nan() && !m.meter_peak_hold_lin.is_nan(),
+            "a zero rate must not put NaN in the meter fields: {m:?}"
+        );
+        assert_eq!(
+            m.meter_param, 0.0,
+            "nothing was metered, so nothing to report"
         );
     }
 }

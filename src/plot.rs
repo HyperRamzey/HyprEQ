@@ -945,9 +945,7 @@ fn clip_polyline(xs: &[f64], ys: &[f64], w: Window) -> Vec<(Vec<f64>, Vec<f64>)>
 macro_rules! bypass_span {
     ($chart:expr, $from:expr, $to:expr, $win:expr) => {{
         let w = $win;
-        let from = $from.max(w.xr.0);
-        let to = $to.min(w.xr.1);
-        if from < to {
+        if let Some((from, to)) = $crate::plot::clamp_span($from, $to, w.xr) {
             $chart
                 .draw_series(vec![plotters::element::Rectangle::new(
                     [(from, w.yr.0), (to, w.yr.1)],
@@ -956,6 +954,19 @@ macro_rules! bypass_span {
                 .map_err($crate::plot::dv)?;
         }
     }};
+}
+
+/// The bypass zone intersected with the axis window, or `None` when it lies wholly
+/// outside.
+///
+/// The reference gets this for free: `axvspan` draws into an axis that clips. Here an
+/// unclamped rectangle is painted over the frame and into the neighbouring panel, and a
+/// model whose bypass starts past 20 kHz shades the whole plot. A span that only touches
+/// the window at one edge has no width and is not drawn either.
+#[must_use]
+pub fn clamp_span(from: f64, to: f64, window: (f64, f64)) -> Option<(f64, f64)> {
+    let (from, to) = (from.max(window.0), to.min(window.1));
+    (from < to).then_some((from, to))
 }
 
 /// One polyline in data coordinates, clipped to the panel window. Solid by default;
@@ -2234,6 +2245,38 @@ mod tests {
         );
     }
 
+    /// The coupler-null zone against the axis window. The reference clips it for free;
+    /// here an unclamped rectangle paints over the frame and into the neighbouring panel,
+    /// and a model whose bypass starts past the plot edge shades the entire plot.
+    #[test]
+    fn the_bypass_zone_is_intersected_with_the_axis_it_is_drawn_on() {
+        let win = (20.0, 20_000.0);
+        // Fully inside: untouched.
+        assert_eq!(
+            clamp_span(6_000.0, 20_000.0, win),
+            Some((6_000.0, 20_000.0))
+        );
+        // Running past the right edge: the rectangle stops at the edge.
+        assert_eq!(
+            clamp_span(18_000.0, 96_000.0, win),
+            Some((18_000.0, 20_000.0)),
+            "an unclamped span paints over the frame"
+        );
+        // Starting before the left edge, and both ends outside on one side.
+        assert_eq!(clamp_span(1.0, 40.0, win), Some((20.0, 40.0)));
+        assert_eq!(
+            clamp_span(30_000.0, 96_000.0, win),
+            None,
+            "entirely off-axis"
+        );
+        assert_eq!(clamp_span(1.0, 9.0, win), None, "entirely off-axis, left");
+        // Touching the window at one edge only is zero width, not a hairline.
+        assert_eq!(clamp_span(20_000.0, 40_000.0, win), None);
+        assert_eq!(clamp_span(5.0, 20.0, win), None);
+        // A window the span swallows whole still draws, clamped on both sides.
+        assert_eq!(clamp_span(1.0, 1e6, win), Some((20.0, 20_000.0)));
+    }
+
     #[test]
     fn hz_labels_are_hundreds_then_kilo() {
         assert_eq!(format_hz(20.0), "20");
@@ -2517,6 +2560,107 @@ mod tests {
         assert_eq!((w, h), (FIG_W, FIG_H), "figure must be 1950x1725");
         assert!(bytes.len() > 20_000, "suspiciously small figure");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The things that sit *on* an axis limit, which is what a window filter quietly
+    /// deletes: the end tick labels (`20` and `20k` under the level and phase panels, `-1`
+    /// and `4` under the impulse panel), the phase panel's `90` and `-90`, and the two
+    /// x-axis titles — each title pinned to the panel that owns it, because the row shares
+    /// nothing and matplotlib shares no axes here. Dropping a limit tick looks like tidying
+    /// the frame, so this test is verified discriminating by tightening `ticks_in` to
+    /// `range.0 < *v && *v < range.1` and watching it fail on the pixels, not just numbers.
+    #[test]
+    fn the_labels_on_the_axis_limits_are_drawn() {
+        let dir = scratch("edge-labels");
+        let (ir, mag) = full_inputs();
+        let d = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        let path = d.render_to(&dir.join("figure.png")).expect("render");
+        let (w, _, px) = decode_png(&path);
+
+        // Ink pixels in a box, and how far that ink reaches horizontally.
+        let box_ink = |x0: usize, y0: usize, x1: usize, y1: usize| -> usize {
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter(|&(x, y)| !close(at(&px, w, x, y), FIG_BG, 6))
+                .count()
+        };
+        let box_width = |x0: usize, y0: usize, x1: usize, y1: usize| -> usize {
+            let cols: Vec<usize> = (x0..x1)
+                .filter(|&x| (y0..y1).any(|y| !close(at(&px, w, x, y), FIG_BG, 6)))
+                .collect();
+            cols.first()
+                .copied()
+                .map(|a| cols[cols.len() - 1] - a)
+                .unwrap_or(0)
+        };
+
+        let rects = PlotData::panel_rects();
+        let [level, _gain, phase, impulse] = rects;
+
+        // End tick labels, below each panel's frame and clear of its 3 px tick marks.
+        for (idx, r, ends) in [
+            (1usize, level, "20 / 20k"),
+            (3, phase, "20 / 20k"),
+            (4, impulse, "-1 / 4"),
+        ] {
+            let (x0, x1, y1) = (r.0 as usize, r.2 as usize, r.3 as usize);
+            let left = box_ink(x0.saturating_sub(18), y1 + 4, x0 + 22, y1 + 22);
+            let right = box_ink(x1.saturating_sub(24), y1 + 4, x1 + 26, y1 + 22);
+            assert!(
+                left > 20,
+                "panel {idx} has no label at its left limit ({ends}): {left} px"
+            );
+            assert!(
+                right > 20,
+                "panel {idx} has no label at its right limit ({ends}): {right} px"
+            );
+        }
+
+        // The phase panel keeps ±90 as labelled limits, left of its frame.
+        let (x0, y0, y1) = (phase.0 as usize, phase.1 as usize, phase.3 as usize);
+        let top = box_ink(
+            x0.saturating_sub(40),
+            y0.saturating_sub(11),
+            x0 - 8,
+            y0 + 12,
+        );
+        let bottom = box_ink(x0.saturating_sub(40), y1 - 11, x0 - 8, y1 + 12);
+        assert!(
+            top > 12,
+            "no label at the phase panel's +90 limit: {top} px"
+        );
+        assert!(
+            bottom > 12,
+            "no label at the phase panel's -90 limit: {bottom} px"
+        );
+
+        // Each x-axis title on its own panel, told apart by how far the string reaches:
+        // "Frequency (Hz)" belongs to the phase panel, "Time Relative to Transient Peak
+        // (ms)" — two and a half times as long — to the impulse panel.
+        for (idx, r, min_w, max_w, name) in [
+            (3usize, phase, 60, 200, "Frequency (Hz)"),
+            (
+                4usize,
+                impulse,
+                220,
+                900,
+                "Time Relative to Transient Peak (ms)",
+            ),
+        ] {
+            let (x0, x1, y1) = (r.0 as usize, r.2 as usize, r.3 as usize);
+            let mid = (x0 + x1) / 2;
+            let (bx0, by0, bx1, by1) = (mid.saturating_sub(320), y1 + 22, mid + 320, y1 + 50);
+            let ink = box_ink(bx0, by0, bx1, by1);
+            let wide = box_width(bx0, by0, bx1, by1);
+            assert!(
+                ink > 60,
+                "panel {idx} has no x-axis title {name:?}: {ink} px"
+            );
+            assert!(
+                wide > min_w && wide < max_w,
+                "panel {idx} title is {wide} px wide, not {name:?} ({min_w}..{max_w})"
+            );
+        }
     }
 
     #[test]
@@ -2862,6 +3006,17 @@ mod tests {
         assert!(
             (centres[0] - centres[1] - dy).abs() < 1e-9,
             "rows must be one pitch apart: {centres:?}"
+        );
+
+        // An empty annotation is not a zero-height line of text: the reference calls
+        // `annotate("")`, which draws the arrow and nothing else. Counting that as one row
+        // would lift the shaft off its anchor by a line pitch.
+        let (no_rows, tail_down) = callout_layout(0, -9.2, -13.0, dy);
+        let (_, tail_up) = callout_layout(0, -9.2, -6.0, dy);
+        assert!(no_rows.is_empty(), "no text, no rows");
+        assert!(
+            (tail_down - (-9.2)).abs() < 1e-12 && (tail_up - (-9.2)).abs() < 1e-12,
+            "an empty block starts and ends on its anchor: {tail_down} / {tail_up}"
         );
         assert!(
             (centres[1] - centres[0]).abs() > 1e-6,

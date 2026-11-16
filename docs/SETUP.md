@@ -156,6 +156,28 @@ The harness exits non-zero if any comparison fails, so it is usable as a CI gate
   pattern: `(frame, channel)` row-major, one pair of uniform draws per sample. Changing
   the layout changes the bytes.
 
+### Where the port refuses what the reference accepts
+
+Parity is the rule, and two places break it deliberately. Both are sizes, both would make
+the reference produce a file or a number that cannot be used, and no parity scenario
+reaches either one, so the harness stays green while they differ.
+
+* **The 4 GiB write ceiling is two ceilings, not one.** The oracle refuses a payload when
+  `36 + data_size` exceeds `u32::MAX`. That measures a classic 44-byte header, so under a
+  68-byte `WAVE_FORMAT_EXTENSIBLE` header (every file above two channels) a payload 24
+  bytes too large passes, and the size field the writer then stores wraps to a few dozen
+  bytes. The file plays and is silently truncated at the wrap. `src/wav.rs` keeps the
+  reference's threshold and its exact sentence for the classic header, and adds
+  `riff::riff_sizes`, which checks the payload against *both* size fields the container
+  carries. Pinned by `a_payload_too_wide_for_the_riff_field_is_refused_not_wrapped` and
+  `the_write_is_refused_before_it_can_pass_a_size_it_cannot_hold`.
+* **`--taps` far above the usable range is answered, not panicked on.** The snippet the
+  report prints contains `1 << (taps * 4 - 1).bit_length()`. Python's integer is
+  unbounded, so `--taps 5000000000000000000` prints an enormous number; the Rust shift at
+  that width was an overflow panic. `fft::shl_bit_length` now saturates at `usize::MAX`
+  so the arithmetic stays total and the caller reports the size. Pinned by
+  `a_shift_wider_than_a_machine_word_saturates_instead_of_panicking`.
+
 ## 6. Adding headphone measurements
 
 Three ways, none of which touch the DSP:

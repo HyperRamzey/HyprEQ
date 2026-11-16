@@ -25,7 +25,8 @@ pub const DEFAULT_RATIO: Ratio = Ratio::X16;
 /// Everything the `--tp-*` options select, before it becomes a [`Cfg`].
 #[derive(Clone, Debug)]
 pub struct TpArgs {
-    /// `--tp-ratio`, kept as written so a bad spelling names itself in the error.
+    /// `--tp-ratio`, kept exactly as typed: the refusal quotes the spelling the user
+    /// wrote (`got 'x64'`) rather than the field it came from.
     pub ratio: String,
     pub ceiling_db: f64,
     pub lookahead_ms: f64,
@@ -60,10 +61,11 @@ impl TpArgs {
     /// numbers invented here). A disabled limiter skips validation:
     /// `--no-tp-limiter` with a nonsense ceiling still measures the file.
     pub fn to_cfg(&self) -> Result<Cfg, String> {
-        let ratio: Ratio = self
-            .ratio
-            .parse()
-            .map_err(|e: String| format!("--tp-ratio: {e}"))?;
+        // The ratio parser's sentence *is* the message. Naming the flag would read
+        // better in isolation, but the reference raises this as a bare ValueError and
+        // argparse prints `error: over-sampling ratio must be … (got 'x64')`; a prefix
+        // here is a message no script written against the reference can grep for.
+        let ratio: Ratio = self.ratio.parse()?;
         let cfg = Cfg {
             enable: !self.disable,
             ceiling_db: self.ceiling_db,
@@ -247,7 +249,10 @@ mod tests {
         }
         .to_cfg()
         .unwrap_err();
-        assert!(e.starts_with("--tp-ratio:"), "got {e}");
+        assert_eq!(
+            e, "over-sampling ratio must be 2, 4, 8, 16 or 32 (got 'x64')",
+            "the message the reference prints, with nothing added"
+        );
     }
 
     #[test]

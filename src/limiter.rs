@@ -242,10 +242,13 @@ impl Cfg {
             && self.ceiling_db >= MIN_CEILING_DB
             && self.ceiling_db <= MAX_CEILING_DB)
         {
+            // The bounds and the offending value are spelled the way Python's f-string
+            // spells them: an error read off a terminal is part of the interface.
             return Err(format!(
-                "true-peak ceiling must be between {MIN_CEILING_DB} and \
-                 {MAX_CEILING_DB} dBTP (got {})",
-                self.ceiling_db
+                "true-peak ceiling must be between {} and {} dBTP (got {})",
+                crate::pyfmt::py_float(MIN_CEILING_DB),
+                crate::pyfmt::py_float(MAX_CEILING_DB),
+                crate::pyfmt::py_float(self.ceiling_db)
             ));
         }
         if !(self.lookahead_ms.is_finite()
@@ -253,9 +256,10 @@ impl Cfg {
             && self.lookahead_ms <= MAX_LOOKAHEAD_MS)
         {
             return Err(format!(
-                "lookahead must be between {MIN_LOOKAHEAD_MS} and {MAX_LOOKAHEAD_MS} ms \
-                 (got {self})",
-                self = self.lookahead_ms
+                "lookahead must be between {} and {} ms (got {})",
+                crate::pyfmt::py_float(MIN_LOOKAHEAD_MS),
+                crate::pyfmt::py_float(MAX_LOOKAHEAD_MS),
+                crate::pyfmt::py_float(self.lookahead_ms)
             ));
         }
         for (name, v, lo, hi) in [
@@ -263,7 +267,12 @@ impl Cfg {
             ("release", self.release_ms, MIN_RELEASE_MS, MAX_RELEASE_MS),
         ] {
             if !(v.is_finite() && v >= lo && v <= hi) {
-                return Err(format!("{name} must be between {lo} and {hi} ms (got {v})"));
+                return Err(format!(
+                    "{name} must be between {} and {} ms (got {})",
+                    crate::pyfmt::py_float(lo),
+                    crate::pyfmt::py_float(hi),
+                    crate::pyfmt::py_float(v)
+                ));
             }
         }
         for (name, v) in [
@@ -272,7 +281,9 @@ impl Cfg {
         ] {
             if !(v.is_finite() && (0.0..=1.0).contains(&v)) {
                 return Err(format!(
-                    "{name} must be between 0 and 1 (got {v}; it is a fraction, so 75 % is 0.75)"
+                    "{} must be between 0 and 1 (got {}; it is a fraction, so 75 % is 0.75)",
+                    name,
+                    crate::pyfmt::py_float(v)
                 ));
             }
         }
@@ -374,8 +385,9 @@ impl Cfg {
     }
 
     /// The lookahead the processor really has, in ms. Differs from the request when
-    /// the interpolator or the attack ramp needed more room, and `--dry-run` prints
-    /// both so the difference is never hidden.
+    /// the interpolator or the attack ramp needed more room; the limiter report prints
+    /// both (`{eff} ms eff ({req} ms req`, with `[RAISED to filter floor]` when the
+    /// floor took over) so the difference is never hidden.
     #[must_use]
     pub fn effective_lookahead_ms(&self, rate: u32) -> f64 {
         self.lookahead_samples(rate) as f64 / rate as f64 * 1e3
@@ -575,7 +587,7 @@ fn blend(a: f64, b: f64, w: f64) -> f64 {
 
 impl Limiter {
     /// A limiter that does nothing and adds no delay. Cheaper than configuring one
-    /// off, and it is what the runner uses when `--tp-disable` is set.
+    /// off, and it is what the runner uses when `--no-tp-limiter` is set.
     #[must_use]
     pub fn disabled() -> Self {
         Self {
@@ -635,7 +647,6 @@ impl Limiter {
             return off;
         }
         let delta = cfg.ratio.report_delay();
-        let _lookahead = cfg.lookahead_samples(rate);
         let latency = cfg.latency_samples(rate);
         let ramp = cfg.ramp_frames(rate);
         // Every live index needs a slot: the emission cursor, the scheduling cursor

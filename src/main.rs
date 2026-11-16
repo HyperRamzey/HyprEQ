@@ -370,11 +370,20 @@ fn validate_choice(value: &str, choices: &[&str], flag: &str) {
     }
 }
 
-/// `--out-bits`: the choices are integers, so argparse lists them unquoted.
+/// `--out-bits`: the choices are ints, but argparse still lists them quoted —
+/// CPython renders that list with `repr(str(choice))`, so 3.14 prints
+/// `(choose from '16', '24', '32', '64')`. Older interpreters dropped the quotes; the
+/// wording here follows the interpreter the reference is run with, and the parity
+/// harness compares the line word for word so a future change shows up as a failure.
 fn validate_out_bits(bits: i64) {
     if !OUT_BITS.contains(&bits) {
+        let list = OUT_BITS
+            .iter()
+            .map(|b| format!("'{b}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
         usage_error(format!(
-            "argument --out-bits: invalid choice: '{bits}' (choose from 16, 24, 32, 64)"
+            "argument --out-bits: invalid choice: '{bits}' (choose from {list})"
         ));
     }
 }
@@ -666,14 +675,7 @@ fn run_model(
     // mpv wants an absolute path with escaped separators. `absolute` is the lexical
     // equivalent of Python's `os.path.abspath`: unlike `canonicalize` it neither touches
     // the disk nor hands back a Windows `\\?\` prefix that mpv cannot open.
-    let mut abs_ir_path = std::path::absolute(Path::new(&f64_wav))
-        .unwrap_or_else(|_| PathBuf::from(&f64_wav))
-        .display()
-        .to_string()
-        .replace('\\', "/");
-    if abs_ir_path.contains(':') {
-        abs_ir_path = abs_ir_path.replace(':', "\\:");
-    }
+    let abs_ir_path = mpv_snippet_path(&f64_wav);
     println!(
         "\n=== [4] Matching mpv.conf Snippet ({fs} Hz, minp=1024:maxp=8192 -> {:.1} ms block latency) ===",
         1024.0 / fs as f64 * 1000.0
@@ -860,6 +862,23 @@ fn notch_mode(args: &Args) -> NotchMode {
             "argument --notch-mode: invalid choice: '{}' (choose from 'safe', 'original', 'zero')",
             args.notch_mode
         )),
+    }
+}
+
+/// The path as mpv.conf wants it: absolute, forward slashes, escaped drive colon.
+///
+/// Lexical, like Python's `os.path.abspath`. `canonicalize` is not interchangeable here:
+/// it resolves symlinks and fails outright on the convolver this very run is about to
+/// write, and the fallback it would force is a *relative* path, which mpv cannot resolve
+/// against its own working directory.
+#[must_use]
+fn mpv_snippet_path(raw: &str) -> String {
+    let abs = std::path::absolute(Path::new(raw)).unwrap_or_else(|_| PathBuf::from(raw));
+    let s = abs.display().to_string().replace('\\', "/");
+    if s.contains(':') {
+        s.replace(':', "\\:")
+    } else {
+        s
     }
 }
 
@@ -1101,6 +1120,31 @@ mod tests {
         let a = argv(&["--data-file", "custom/db.json"]);
         let (data, _) = database_paths(&a);
         assert_eq!(data, Path::new("custom/db.json"));
+    }
+
+    /// The mpv snippet names a path mpv can actually open: absolute, without the file
+    /// having to exist yet, and with the drive colon escaped the way the reference does.
+    /// Pinned because `canonicalize` looks like the modern spelling and is wrong here — it
+    /// refuses a path to a file that has not been written yet.
+    #[test]
+    fn the_mpv_snippet_names_a_path_that_does_not_exist_yet() {
+        let p = mpv_snippet_path("not/written/yet/ir.wav");
+        assert!(p.starts_with('/'), "must be absolute, got {p}");
+        assert!(
+            p.ends_with("/not/written/yet/ir.wav"),
+            "must keep the given path, got {p}"
+        );
+        assert!(!p.contains('\\'), "no backslashes may survive, got {p}");
+
+        // A drive letter is escaped, not rewritten: `C:/x` becomes `C\:/x`.
+        let win = mpv_snippet_path("C:/eq/ir.wav");
+        assert!(
+            win.contains("C\\:"),
+            "the colon must be escaped for mpv, got {win}"
+        );
+        // An absolute input is left alone apart from the separator walk.
+        let abs = mpv_snippet_path("/tmp/already/absolute.wav");
+        assert_eq!(abs, "/tmp/already/absolute.wav");
     }
 
     #[test]

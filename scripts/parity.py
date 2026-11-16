@@ -75,6 +75,22 @@ class Scenario:
     expect_engaged: bool = False
 
 
+ERROR_PREFIX = re.compile(r"^(?:hypreq(?:\.py)?(?:\.exe)?:\s*)?error:\s*", re.IGNORECASE)
+
+
+def norm_error(text: str) -> str:
+    """The line a script would grep, with only the program-name prefix normalised away.
+
+    argparse writes `hypreq.py: error: ...`, clap writes `error: ...` — that prefix is the
+    one difference the two cannot be made to share, since one is a Python file and the
+    other a binary. Everything after it is a user-facing string and has to match word for
+    word, quotes included, because `'16'` and `16` are different things to grep for.
+    """
+    lines = [line for line in text.strip().splitlines() if "error" in line.lower()]
+    line = lines[-1] if lines else ""
+    return ERROR_PREFIX.sub("", line.strip())
+
+
 def norm(text: str, workdir: Path) -> str:
     """Make stdout comparable across the two scratch directories."""
     text = text.replace(str(workdir.resolve()), "<DIR>")
@@ -520,7 +536,41 @@ def main() -> int:
         Scenario("usage-bad-bits", ["--bypass-eq", "--input", "input_audio.wav", "--out-bits", "20"], expected_exit=2),
         Scenario("usage-bad-ratio", ["--bypass-eq", "--input", "input_audio.wav", "--tp-ratio", "x64"], expected_exit=2),
         Scenario("usage-bad-ceiling", ["--bypass-eq", "--input", "input_audio.wav", "--tp-ceiling", "-30"], expected_exit=2),
+        # Every domain refusal the limiter can raise, and the two argparse choices the
+        # CLI owns. Each one compares the whole message, so a reworded or re-quoted error
+        # is a parity failure rather than a silent drift.
+        Scenario(
+            "usage-bad-lookahead",
+            ["--bypass-eq", "--input", "input_audio.wav", "--tp-lookahead", "5.0"],
+            expected_exit=2,
+        ),
+        Scenario(
+            "usage-bad-attack",
+            ["--bypass-eq", "--input", "input_audio.wav", "--tp-attack", "500"],
+            expected_exit=2,
+        ),
+        Scenario(
+            "usage-bad-release",
+            ["--bypass-eq", "--input", "input_audio.wav", "--tp-release", "5"],
+            expected_exit=2,
+        ),
+        Scenario(
+            "usage-bad-link",
+            ["--bypass-eq", "--input", "input_audio.wav", "--tp-link-transient", "75"],
+            expected_exit=2,
+        ),
+        Scenario("usage-bad-notch", ["--notch-mode", "bogus", "--no-plot"], expected_exit=2),
+        Scenario(
+            "usage-bad-notch-audio",
+            ["--bypass-eq", "--input", "input_audio.wav", "--notch-mode", "bogus"],
+            expected_exit=2,
+        ),
     ]
+
+    # Say which two programs were actually compared. A stale `target/release/hypreq`
+    # otherwise passes every check and proves nothing about the code you just changed.
+    print(f"rust: {args.rust}")
+    print(f"python: {args.python}\nreference: {args.ref}\n")
 
     rows: list[tuple[str, list[Check]]] = []
     failures = 0
@@ -591,6 +641,19 @@ def main() -> int:
             b = norm(rr.stderr, rs_dir).strip().splitlines()
             tail_a = a[-1] if a else ""
             tail_b = b[-1] if b else ""
+            # The message itself, not merely the fact that something was called an error:
+            # a usage error is a user-facing string, and scripts grep it. The program-name
+            # prefix is the one difference clap and argparse cannot be made to share (one
+            # is a Python file, the other a binary), so that is normalised away and the
+            # rest has to match word for word.
+            ea, eb = norm_error(rp.stderr), norm_error(rr.stderr)
+            checks.append(
+                Check(
+                    "usage wording",
+                    ea == eb,
+                    "identical" if ea == eb else f"py: {ea!r}\n    rs: {eb!r}",
+                )
+            )
             checks.append(
                 Check(
                     "usage error",

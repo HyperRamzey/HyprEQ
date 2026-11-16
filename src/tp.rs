@@ -173,34 +173,6 @@ pub const BAND_EDGE: f64 = 0.45;
 /// move a reading by a few ten-thousandths of a dB.
 pub const STOPBAND_DB: f64 = 80.0;
 
-/// Modified Bessel function of the first kind, order zero, by its power series.
-#[must_use]
-pub fn bessel_i0(x: f64) -> f64 {
-    let q = x * x / 4.0;
-    let mut term = 1.0f64;
-    let mut sum = 1.0f64;
-    let mut k = 1.0f64;
-    while term > 1e-18 * sum {
-        term *= q / (k * k);
-        sum += term;
-        k += 1.0;
-    }
-    sum
-}
-
-/// Kaiser's window shape parameter for a stop-band attenuation of `att_db` (Kaiser 1974,
-/// as given in Oppenheim & Schafer, *Discrete-Time Signal Processing*, section 7.5).
-#[must_use]
-pub fn kaiser_beta(att_db: f64) -> f64 {
-    if att_db > 50.0 {
-        0.1102 * (att_db - 8.7)
-    } else if att_db >= 21.0 {
-        0.5842 * (att_db - 21.0).powf(0.4) + 0.07886 * (att_db - 21.0)
-    } else {
-        0.0
-    }
-}
-
 /// Taps per phase of a derived bank.
 ///
 /// Kaiser's length estimate `N = (A - 7.95) / (14.36 * df)` for a prototype of `N = taps *
@@ -210,7 +182,7 @@ pub fn kaiser_beta(att_db: f64) -> f64 {
 /// count does**. A bank needs about 51 taps per phase to have a 0.1 fs transition band
 /// and an 80 dB stop band, whether it has 2 phases or 32.
 #[must_use]
-pub fn derived_taps(_upsample: usize) -> usize {
+pub fn derived_taps() -> usize {
     ((STOPBAND_DB - 7.95) / (14.36 * (1.0 - 2.0 * BAND_EDGE))).ceil() as usize
 }
 
@@ -246,8 +218,11 @@ pub fn derived_branches(upsample: usize, taps: usize) -> Vec<Vec<f64>> {
     let l = upsample as f64;
     let centre = (taps - 1) as f64 / 2.0;
     let half = centre + (l - 1.0) / (2.0 * l);
-    let beta = kaiser_beta(STOPBAND_DB);
-    let i0_beta = bessel_i0(beta);
+    // One Bessel and one Kaiser formula in the whole crate: the detector bank and the
+    // FIR tail are meant to agree to the last bit, and two copies is how they stop doing
+    // that without anything failing.
+    let beta = crate::window::kaiser_beta(STOPBAND_DB);
+    let i0_beta = crate::window::i0(beta);
     (0..upsample)
         .map(|p| {
             let offset = (p as f64 - (l - 1.0) / 2.0) / l;
@@ -263,7 +238,7 @@ pub fn derived_branches(upsample: usize, taps: usize) -> Vec<Vec<f64>> {
                         x.sin() / x
                     };
                     let r = d / half;
-                    let w = bessel_i0(beta * (1.0 - r * r).max(0.0).sqrt()) / i0_beta;
+                    let w = crate::window::i0(beta * (1.0 - r * r).max(0.0).sqrt()) / i0_beta;
                     s * w
                 })
                 .collect()
@@ -332,7 +307,7 @@ impl Ratio {
     pub fn taps(self) -> usize {
         match self {
             Ratio::X4 => ITU_TAPS,
-            r => derived_taps(r.n()),
+            _ => derived_taps(),
         }
     }
 
@@ -464,7 +439,9 @@ impl Ratio {
         (self.bound_db(0.45), self.bound_db(0.5))
     }
 
-    /// What the filter is, for `--dry-run` and the GUI.
+    /// What the filter is, in words. The limiter report prints it on the
+    /// "Side-Chain / Ratio" line, so the reader can see which interpolator produced the
+    /// numbers below it.
     #[must_use]
     pub fn chain(self) -> &'static str {
         match self {
@@ -486,8 +463,11 @@ impl FromStr for Ratio {
             "8" | "x8" => Ok(Ratio::X8),
             "16" | "x16" => Ok(Ratio::X16),
             "32" | "x32" => Ok(Ratio::X32),
+            // Quoted the way `f"{s!r}"` quotes it, because this sentence reaches the
+            // terminal verbatim: `(got 'x64')`, not `(got "x64")`.
             _ => Err(format!(
-                "over-sampling ratio must be 2, 4, 8, 16 or 32 (got {s:?})"
+                "over-sampling ratio must be 2, 4, 8, 16 or 32 (got {})",
+                crate::pyfmt::py_repr(s)
             )),
         }
     }
@@ -1503,7 +1483,7 @@ mod tests {
         );
         // Cost is the argument for the default, so it has to be right.
         assert_eq!(Ratio::X4.mac_per_sample(), 4 * ITU_TAPS);
-        assert_eq!(Ratio::X32.mac_per_sample(), 32 * derived_taps(32));
+        assert_eq!(Ratio::X32.mac_per_sample(), 32 * derived_taps());
         assert!(Ratio::X32.mac_per_sample() > 30 * Ratio::X4.mac_per_sample());
         for &r in Ratio::ALL.iter() {
             assert!(!r.chain().is_empty());
@@ -1512,7 +1492,7 @@ mod tests {
         // Half the kernel, except for the printed bank, whose phases fan out from the
         // current sample and so carry the extra fraction of an interval.
         assert!((Ratio::X4.group_delay() - 5.875).abs() < 1e-12);
-        let half = (derived_taps(2) - 1) as f64 / 2.0;
+        let half = (derived_taps() - 1) as f64 / 2.0;
         for r in [Ratio::X2, Ratio::X8, Ratio::X16, Ratio::X32] {
             assert!((r.group_delay() - half).abs() < 1e-12, "{r}");
         }
@@ -1522,7 +1502,15 @@ mod tests {
         // Accuracy is bought: a narrow transition band needs a long filter, and a
         // limiter pays for it in lookahead.
         assert!(Ratio::X8.group_delay() > 4.0 * Ratio::X4.group_delay());
-        assert_eq!(derived_taps(8), 51);
+        assert_eq!(derived_taps(), 51);
+        // The phase count cancels out of Kaiser's length estimate, which is why
+        // `derived_taps` takes no argument: every *derived* bank is 51 taps deep and the
+        // ratios differ only in how narrow a transition band those taps have to cover.
+        // x4 is not one of them — it is the ITU BS.1770-5 printed bank at its own depth.
+        for r in [Ratio::X2, Ratio::X8, Ratio::X16, Ratio::X32] {
+            assert_eq!(r.taps(), derived_taps(), "{r} reports a different depth");
+        }
+        assert_eq!(Ratio::X4.taps(), ITU_TAPS);
     }
 
     #[test]

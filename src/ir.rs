@@ -655,6 +655,14 @@ mod tests {
             65536,
             "the 65536 floor dominates for small taps"
         );
+        // Zero taps is not an error here: `(0*4 - 1)` underflows to a huge width in the
+        // reference's own arithmetic, so the floor is the answer. Pinned because the
+        // snippet is printed even for a bypass run whose filter is trivially short.
+        assert_eq!(mpv_n_fft(0), 65536, "zero taps lands on the floor");
+        assert!(
+            mpv_n_fft(usize::MAX) >= 65536,
+            "an absurd tap count saturates instead of wrapping"
+        );
     }
 
     #[test]

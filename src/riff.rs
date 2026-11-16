@@ -102,6 +102,40 @@ pub fn header(rate: u32, channels: u16, bits: u32, float: bool, mask: Option<u32
     h
 }
 
+/// The length of the header `header` would produce for these settings.
+///
+/// Both RIFF size fields are measured from this number, so it is not allowed to be a
+/// guess: a 68-byte `WAVE_FORMAT_EXTENSIBLE` header measured as 44 writes a RIFF size 24
+/// bytes short, and near 4 GiB the same confusion is what lets a payload slip past the
+/// size check and wrap.
+/// Measured from the header builder itself rather than from arithmetic that could drift
+/// away from it — this runs once per output file, and the number it returns is what both
+/// size fields are measured against.
+#[must_use]
+pub fn header_len(channels: u16, bits: u32, float: bool) -> usize {
+    header(8000, channels, bits, float, None).len()
+}
+
+/// The two sizes a WAV header carries, checked before either is written.
+///
+/// `u32::MAX` is not one ceiling but two: the data chunk size, and the RIFF chunk size,
+/// which is the payload *plus the header minus 8*. Measuring only the payload lets a
+/// multichannel file pass a check it should fail, and `as u32` then wraps the RIFF size
+/// down to a few dozen bytes — a file that plays, and quietly drops the audio past the
+/// wrap. The reference shares that arithmetic, so this is one place where being correct
+/// means disagreeing with it (documented in `docs/SETUP.md`).
+pub fn riff_sizes(payload: u64, hdr_len: u64) -> Result<(u32, u32)> {
+    let riff = payload
+        .checked_add(hdr_len)
+        .and_then(|t| t.checked_sub(8))
+        .ok_or_else(|| Error::msg("WAV payload length overflows the RIFF size field"))?;
+    let data = u32::try_from(payload)
+        .map_err(|_| Error::msg("WAV payload is larger than the data chunk size field"))?;
+    let riff = u32::try_from(riff)
+        .map_err(|_| Error::msg("WAV file is larger than the RIFF size field"))?;
+    Ok((riff, data))
+}
+
 /// Streaming WAV writer: header first, sizes patched on [`finish`](WavWriter::finish).
 pub struct WavWriter {
     f: std::fs::File,
@@ -154,14 +188,14 @@ impl WavWriter {
         // RIFF size 24 bytes short onto every 68-byte extensible file — which is every
         // multichannel WAV this program writes. A strict parser honours that size and
         // drops the last 24 bytes of audio, so the file plays and is quietly truncated.
+        let (riff, data) = riff_sizes(total, self.hdr_len)?;
         self.f.seek(SeekFrom::Start(4))?;
-        self.f
-            .write_all(&((total + self.hdr_len - 8) as u32).to_le_bytes())?;
+        self.f.write_all(&riff.to_le_bytes())?;
         // The header ends with "data" followed by its 4-byte size, so the size
         // field is the last 4 bytes of the header — writing 8 bytes back would
         // land on the "data" tag itself and ffmpeg would reject the file.
         self.f.seek(SeekFrom::Start(self.hdr_len - 4))?;
-        self.f.write_all(&(total as u32).to_le_bytes())?;
+        self.f.write_all(&data.to_le_bytes())?;
         self.f.flush()?;
         Ok(total)
     }
@@ -526,6 +560,61 @@ mod tests {
         std::fs::write(&p, &b).unwrap();
         let e = read_info(&p).unwrap_err();
         assert!(e.to_string().contains("fmt"), "got: {e}");
+    }
+
+    /// The header length both size fields are measured from, checked against the header
+    /// builder rather than against arithmetic about it.
+    #[test]
+    fn the_measured_header_is_the_header_written() {
+        for (ch, bits, float, want) in [
+            (1u16, 16, false, 44usize),
+            (2, 32, true, 44),
+            (2, 24, false, 44),
+            (3, 16, false, 68),
+            (8, 32, true, 68),
+        ] {
+            assert_eq!(
+                header_len(ch, bits, float),
+                header(48000, ch, bits, float, None).len(),
+                "{ch}ch {bits}bit float={float}"
+            );
+            assert_eq!(header_len(ch, bits, float), want, "{ch}ch {bits}bit");
+        }
+    }
+
+    /// A payload can fit the data chunk's 32-bit size and still not fit the RIFF chunk's,
+    /// because the RIFF field also counts the header. Truncating instead of refusing is
+    /// what writes a file that plays and is silently cut at the wrap.
+    #[test]
+    fn a_payload_too_wide_for_the_riff_field_is_refused_not_wrapped() {
+        let max = u64::from(u32::MAX);
+        // Comfortably inside both fields.
+        assert_eq!(riff_sizes(1000, 44).unwrap(), (1036, 1000));
+        assert_eq!(riff_sizes(1000, 68).unwrap(), (1060, 1000));
+        // Fits the data field, does not fit the RIFF field of a 68-byte header: exactly
+        // the multichannel case a payload-only check lets through.
+        let too_big = max - 50;
+        assert!(
+            u32::try_from(too_big).is_ok(),
+            "the data chunk field alone would accept it"
+        );
+        assert_eq!(
+            (too_big + 68 - 8) as u32,
+            9,
+            "and a truncating cast writes a 9-byte RIFF size for it"
+        );
+        assert!(
+            riff_sizes(too_big, 68).is_err(),
+            "so this must be an error, not a 9-byte header"
+        );
+        // The largest payload that genuinely fits a classic header, at the boundary.
+        assert!(
+            riff_sizes(max - 36, 44).is_ok(),
+            "max - 36 is the true limit"
+        );
+        assert!(riff_sizes(max - 35, 44).is_err(), "one byte past it");
+        // And a payload that does not fit its own field at all.
+        assert!(riff_sizes(max + 1, 44).is_err());
     }
 
     #[test]

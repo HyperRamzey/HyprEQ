@@ -298,16 +298,39 @@ fn decode(payload: &[u8], fmt: &Format, name: &str) -> Result<(Vec<f64>, &'stati
     }
 }
 
-/// The 4 GiB RIFF ceiling, checked the way Python checks it: on `36 + data_size`,
-/// before anything is written.
-fn riff_guard(name: &str, data_size: usize) -> Result<()> {
+/// The 4 GiB ceiling, checked before a byte is written.
+///
+/// Two bounds, because a WAV carries two sizes. The first is the reference's own: it
+/// measures `36 + data_size` against `u32::MAX`, and that wording and that threshold are
+/// kept so a file this size fails the way the reference says it fails. The second is the
+/// file's: the RIFF field holds `hdr_len - 8 + data_size`, so under a 68-byte
+/// `WAVE_FORMAT_EXTENSIBLE` header the payload that still fits is 24 bytes smaller than
+/// the first bound allows. Without it a multichannel write slips past the check, `as u32`
+/// wraps the RIFF size down to a few dozen bytes, and the result is a file that plays and
+/// is silently truncated at the wrap. The reference shares that arithmetic, so this is
+/// the one place the port is deliberately stricter than it (see `docs/SETUP.md`).
+fn riff_guard(name: &str, data_size: usize, hdr_len: usize) -> Result<()> {
     let riff = 36usize + data_size;
     if u64::try_from(riff).expect("usize fits in u64") > u64::from(u32::MAX) {
         return Err(Error::msg(format!(
             "WAV output '{name}' exceeds 4 GiB RIFF limit ({riff} bytes)"
         )));
     }
+    if let Err(e) = crate::riff::riff_sizes(data_size as u64, hdr_len as u64) {
+        return Err(Error::msg(format!(
+            "WAV output '{name}' cannot be written: {e}"
+        )));
+    }
     Ok(())
+}
+
+/// The header the writer will emit for these settings, without pretending to know its
+/// length: asked of the builder that makes it.
+#[must_use]
+fn header_len_for(channels: usize, bits: u32, float: bool) -> usize {
+    // A channel count too wide for the format is refused by `writer()` a moment later;
+    // clamping here only keeps the guard on the strict (extensible) side while it decides.
+    crate::riff::header_len(u16::try_from(channels).unwrap_or(u16::MAX), bits, float)
 }
 
 /// Open the writer for a mono/stereo file: [`WavWriter`] emits the plain
@@ -337,7 +360,7 @@ pub fn write_wav_ieee_float(path: &Path, planar: &[Vec<f64>], fs: u32, bits: u32
     let frames = planar.iter().map(|c| c.len()).min().unwrap_or(0);
     let bps = (bits / 8) as usize;
     let data_size = frames * channels * bps;
-    riff_guard(&name, data_size)?;
+    riff_guard(&name, data_size, header_len_for(channels, bits, true))?;
 
     let mut w = writer(path, fs, channels, bits, true)?;
     // Written in frame-major blocks so the interleave is explicit and the
@@ -392,7 +415,7 @@ pub fn write_wav_pcm_or_float(
     let frames = planar.iter().map(|c| c.len()).min().unwrap_or(0);
     let bps = (bits / 8) as usize;
     let data_size = frames * channels * bps;
-    riff_guard(&name, data_size)?;
+    riff_guard(&name, data_size, header_len_for(channels, bits, false))?;
 
     let (scale, vmin, vmax) = if bits == 16 {
         (32768.0f64, -32768.0f64, 32767.0f64)
@@ -917,6 +940,32 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("IEEE float output needs 32 or 64 bits"));
+    }
+
+    /// The two ceilings the writer enforces, and the wording of the one the reference
+    /// owns. Nothing here writes 4 GiB: the guard runs before the first byte, so it is
+    /// tested as the arithmetic it is.
+    #[test]
+    fn the_write_is_refused_before_it_can_pass_a_size_it_cannot_hold() {
+        let max = usize::try_from(u32::MAX).expect("32 bits fit anywhere");
+        // The reference's own bound and its exact sentence, on a classic 44-byte header.
+        let e = riff_guard("big.wav", max - 35, 44).unwrap_err().to_string();
+        assert_eq!(
+            e, "WAV output 'big.wav' exceeds 4 GiB RIFF limit (4294967296 bytes)",
+            "the reference's sentence, byte count included"
+        );
+        // A payload the data field accepts but the RIFF field of an extensible header does
+        // not: the multichannel case that used to slip past and wrap.
+        let e = riff_guard("multi.wav", max - 50, 68)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("cannot be written"),
+            "the second ceiling must speak for itself, got: {e}"
+        );
+        // Ordinary files are untouched by any of this.
+        riff_guard("ok.wav", 48000 * 2 * 4, 44).unwrap();
+        riff_guard("ok8.wav", 48000 * 8 * 4, 68).unwrap();
     }
 
     #[test]

@@ -56,8 +56,11 @@ pub fn i0_vec(x: &[f64]) -> Vec<f64> {
 
 /// Kaiser window shape parameter for `att_db` stop-band attenuation.
 ///
-/// The same three-branch formula as [`crate::tp::kaiser_beta`], kept here
-/// because the FIR tail wants it independently of the over-sampling bank.
+/// Kaiser 1974, as given in Oppenheim & Schafer, *Discrete-Time Signal Processing*,
+/// section 7.5. This is the crate's only copy: the true-peak bank in [`crate::tp`] calls
+/// it with [`crate::tp::STOPBAND_DB`] and the FIR tail calls it with the tail's own
+/// attenuation, and
+/// the two are meant to agree to the last bit.
 #[must_use]
 pub fn kaiser_beta(att_db: f64) -> f64 {
     if att_db > 50.0 {

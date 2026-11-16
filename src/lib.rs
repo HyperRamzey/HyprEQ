@@ -83,6 +83,7 @@ pub mod meter;
 pub mod model;
 pub mod pchip;
 pub mod plot;
+pub mod pyfmt;
 pub mod riff;
 pub mod tp;
 pub mod wav;

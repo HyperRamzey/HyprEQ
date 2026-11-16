@@ -221,10 +221,17 @@ pub fn bit_length(v: usize) -> usize {
     usize::BITS as usize - v.leading_zeros() as usize
 }
 
-/// `1 << v.bit_length()` — the Python expression, verbatim.
+/// `1 << v.bit_length()` — the Python expression, saturating at `usize::MAX`.
+///
+/// Python's int is unbounded and a `usize` is not: at `v == usize::MAX` the shift amount
+/// is 64, which is not a shift at all but an overflow panic. Saturating keeps the
+/// arithmetic total, so the caller can report a size nobody can serve instead of the
+/// process dying on it.
 #[must_use]
 pub fn shl_bit_length(v: usize) -> usize {
-    1usize << bit_length(v)
+    1usize
+        .checked_shl(u32::try_from(bit_length(v)).unwrap_or(u32::MAX))
+        .unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]
@@ -378,6 +385,23 @@ mod tests {
         // And the difference from next_power_of_two that the convolver depends on:
         assert_eq!(next_pow2(65536), 65536);
         assert_eq!(shl_bit_length(65536), 131072);
+    }
+
+    /// The shift the Python expression implies stops being a shift once its argument is
+    /// 64 bits wide. `--taps` is a signed integer the user types, and a tap count above
+    /// 2.3e18 reaches exactly that width: the reference prints an enormous integer, and
+    /// this side used to die on an overflow panic while computing it.
+    #[test]
+    fn a_shift_wider_than_a_machine_word_saturates_instead_of_panicking() {
+        assert_eq!(bit_length(usize::MAX), usize::BITS as usize);
+        assert_eq!(shl_bit_length(usize::MAX), usize::MAX);
+        assert_eq!(shl_bit_length(usize::MAX >> 1), 1usize << 63);
+        // The largest argument with an honest answer, then the first without one:
+        // (2^63-1).bit_length() is 63, and 1<<63 still fits a word.
+        assert_eq!(shl_bit_length((1usize << 62) - 1), 1usize << 62);
+        assert_eq!(shl_bit_length((1usize << 63) - 1), 1usize << 63);
+        // 2^63 needs 2^64, which no word holds, so it saturates rather than panicking.
+        assert_eq!(shl_bit_length(1usize << 63), usize::MAX);
     }
 
     #[test]

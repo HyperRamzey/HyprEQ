@@ -79,6 +79,14 @@ impl Meters {
         // A non-finite previous value is decayed to silence rather than multiplied: inf ×
         // 0.99 is inf, so one bad sample used to latch the bar at full scale for the rest
         // of the session, and only reset() would free it.
+        //
+        // The reference writes `float(np.float32(prev * self.decay()))`, which multiplies
+        // in f64 and then rounds to f32. That is not a wider arithmetic than the `f32`
+        // multiply here: the product of two binary32 significands needs at most 48 bits,
+        // which a binary64 holds exactly, so the f64 path rounds the same exact value
+        // once — the identical result, including into subnormals. `hold` staying in `f32`
+        // is therefore parity, not a narrowing; the test `the_wider_multiply_is_a_no_op`
+        // pins it against the f64 form bit for bit.
         let fall = if prev.is_finite() {
             prev * self.decay()
         } else {
@@ -168,12 +176,9 @@ impl Meters {
 /// reproducing the module's transfer function is the point of the port.
 #[must_use]
 pub fn level_to_param(v: f32) -> f32 {
-    // Written as a failed `>` rather than `<=` so that NaN takes this branch: both
-    // comparisons with NaN are false, and a NaN reaching egui's geometry panics on the
-    // first Rect built from it. A meter has no honest answer for NaN; the floor is the
-    // safe one, and the value is still visible in the numeric report.
     // NaN has no ordering, and `partial_cmp` says so instead of quietly answering `false`
-    // twice. A meter has no honest reading for NaN; the floor is the safe one, and the
+    // twice (`v <= 0.001` would also be false for NaN, and would fall through to the log
+    // below). A meter has no honest reading for NaN; the floor is the safe one, and the
     // value is still visible in the numeric report.
     if v.partial_cmp(&0.001).is_none_or(|o| o.is_le()) {
         return 0.0; // at or below the -60 dBFS floor, and anything unmeasurable
@@ -202,6 +207,48 @@ mod tests {
         // exp(-1024 / (0.30 * 48000))
         let want = (-(1024.0f64 / (METER_FALL_S * 48000.0))).exp() as f32;
         assert_eq!(m.decay().to_bits(), want.to_bits());
+    }
+
+    /// The reference multiplies in `f64` and rounds once to `f32`; this port multiplies
+    /// in `f32`. Those are the same operation, because a binary32 × binary32 product fits
+    /// a binary64 significand exactly — so the `f64` step rounds nothing. Pinned because
+    /// "widen the multiply to match the Python" would be a no-op at best and a double
+    /// rounding bug at worst if someone changed the accumulation later.
+    #[test]
+    fn the_wider_multiply_is_a_no_op() {
+        let mut state = 0x243F_6A88_85A3_08D3u64; // splitmix64, fixed seed
+        let mut next = || {
+            state = state
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add(0x4B7F_1F0D_DD1B_4C3B);
+            let u = ((state >> ((state >> 59) as u32 & 5)) | 1) >> 1;
+            f32::from_bits(u as u32 >> 8)
+        };
+        let mut checked = 0usize;
+        for _ in 0..100_000 {
+            let a = next().abs();
+            let b = next().abs();
+            if !a.is_finite() || !b.is_finite() {
+                continue;
+            }
+            let narrow = a * b;
+            let wide = (f64::from(a) * f64::from(b)) as f32;
+            assert_eq!(narrow.to_bits(), wide.to_bits(), "{a:e} * {b:e}");
+            checked += 1;
+        }
+        assert!(checked > 50_000, "the sweep degenerated: {checked}");
+
+        // The decay factors the meter actually uses, at the rates it sees them.
+        for (rate, block) in [(48_000.0, 1024.0), (44_100.0, 512.0), (384_000.0, 64.0)] {
+            let d = (-(block / (METER_FALL_S * rate))).exp();
+            for prev in [1.0f32, 0.5, f32::MIN_POSITIVE, 1e-38] {
+                assert_eq!(
+                    (prev * (d as f32)).to_bits(),
+                    ((f64::from(prev) * f64::from(d as f32)) as f32).to_bits(),
+                    "decay at {rate} Hz / {block} frames"
+                );
+            }
+        }
     }
 
     #[test]

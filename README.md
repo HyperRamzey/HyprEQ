@@ -14,6 +14,10 @@ stdout, WAV containers and payloads, audit CSVs, and usage errors. See
 fontconfig/freetype), the build and verification gates, the numerical rules (f64 internals,
 no FMA/fast-math), and the artefact naming.
 
+[`docs/ROADMAP.md`](docs/ROADMAP.md) is the assessment around that implementation: what the
+engine is good at and where it stops, how it differs from AutoEq, REW and CamillaDSP, and
+the six DSP changes worth making next — with the papers they come from.
+
 ```bash
 cargo build --release
 ./target/release/hypreq --headphone all --export-csv

@@ -119,10 +119,11 @@ cargo test -- --include-ignored
 python3 scripts/parity.py                 # everything
 python3 scripts/parity.py --only audio    # scenarios whose name contains "audio"
 python3 scripts/parity.py --keep          # leave the scratch tree behind
+python3 scripts/parity.py --selftest      # check the harness's own normalisers, no binaries
 python3 scripts/parity.py --rust ./target/release/hypreq --python python3 --ref hypreq.py
 ```
 
-Each of the 22 scenarios runs `hypreq.py` and the Rust binary in **separate scratch
+Each of the 28 scenarios runs `hypreq.py` and the Rust binary in **separate scratch
 directories** seeded with the same `measurements.json` and the same input WAV, then
 compares:
 
@@ -140,6 +141,44 @@ compares:
   exact geometry is covered by unit tests that decode the PNG the same way.
 
 The harness exits non-zero if any comparison fails, so it is usable as a CI gate.
+
+#### One usage-error message is spelled differently by different CPythons
+
+`usage wording` is compared word for word, with two exceptions the harness owns: the
+`hypreq.py:` / `error:` prefix, and the quoting of argparse's `invalid choice:` message. That
+exception is not laziness — argparse has changed the spelling of this message twice and reverted
+one of its own changes, and it did so at **patch** granularity, so there is no version range that
+is "the" wording:
+
+| interpreter | bad `--notch-mode` (string choices) | bad `--out-bits` (int choices) |
+| --- | --- | --- |
+| ≤ 3.12.7, 3.13.0 | `'bogus' (choose from 'safe', 'original', 'zero')` | `20 (choose from 16, 24, 32, 64)` |
+| 3.12.8 – 3.14.3 | `'bogus' (choose from safe, original, zero)` | `'20' (choose from 16, 24, 32, 64)` |
+| 3.13.7+, 3.14.4+ | `'bogus' (choose from 'safe', 'original', 'zero')` | `'20' (choose from '16', '24', '32', '64')` |
+
+The middle row is `str(value)` + `map(str, choices)` rendered through `%(value)r`, which is why
+the *value* stays quoted while the list loses its quotes; the last row is `repr(str(x))` in both
+slots. The Rust binary prints one fixed string (the last row, matching what people actually run
+now), so a strict comparison would make parity red on the interpreters in rows one and two while
+the CLI is telling the user something entirely correct. `canonicalize_choice` therefore strips
+quotes from inside that message and nothing else; the flag name, the phrase, the value, the set
+of choices and the exit code are all still compared.
+
+`--selftest` asserts both halves — that the three spellings collapse, and that the normaliser
+does not swallow content (a different flag, a different value, a shortened choice list, and every
+non-choice message must survive byte for byte). It runs without a binary, numpy, or the reference.
+
+To reproduce the table, or to check a new interpreter:
+
+```bash
+uv python install 3.11 3.12.7 3.13.0            # or any patch level you care about
+uv venv /tmp/v311 --python 3.11 && uv pip install -p /tmp/v311/bin/python numpy soundfile
+python3 scripts/parity.py --python /tmp/v311/bin/python --only usage   # 33/33
+/tmp/v311/bin/python hypreq.py --out-bits 20 | grep 'invalid choice'   # the raw spelling
+```
+
+`numpy` and `soundfile` are needed because the reference imports them before it parses the
+command line; `matplotlib` is not, because the usage-error scenarios never reach the plot.
 
 ## 5. Numerical rules
 

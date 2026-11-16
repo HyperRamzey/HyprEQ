@@ -395,6 +395,13 @@ const NOTCH_MODES: [&str; 3] = ["safe", "original", "zero"];
 const OUT_BITS: [i64; 4] = [16, 24, 32, 64];
 
 /// Reject a value outside a choice list with argparse's wording and exit code.
+///
+/// Quoted value, quoted choices: that is what a current interpreter prints for a list of
+/// strings (`repr(str(choice))`), and it is what the oldest ones printed too. CPython changed
+/// the quoting of this message twice and reverted one of the changes, so the quote characters
+/// here match some patch levels and not others; `scripts/parity.py --selftest` documents the
+/// table and the harness ignores quoting inside this one message, so every interpreter from 3.10
+/// on compares equal on content. Do not "fix" the quoting to chase a specific patch release.
 fn validate_choice(value: &str, choices: &[&str], flag: &str) {
     if !choices.contains(&value) {
         let list = choices
@@ -408,11 +415,13 @@ fn validate_choice(value: &str, choices: &[&str], flag: &str) {
     }
 }
 
-/// `--out-bits`: the choices are ints, but argparse still lists them quoted —
-/// CPython renders that list with `repr(str(choice))`, so 3.14 prints
-/// `(choose from '16', '24', '32', '64')`. Older interpreters dropped the quotes; the
-/// wording here follows the interpreter the reference is run with, and the parity
-/// harness compares the line word for word so a future change shows up as a failure.
+/// `--out-bits`: the depths are ints, and a current CPython quotes them anyway — it renders
+/// both slots with `repr(str(x))`, giving `invalid choice: '20' (choose from '16', '24', '32',
+/// '64')`, which is what this prints. That is not stable across patch releases: 3.12.7 and 3.13.0
+/// print the value as `20` with no quotes, and 3.12.8 through 3.14.3 drop the quotes from the
+/// list. The string printed here is fixed and cannot follow the interpreter, so the harness
+/// forgives quoting inside this message and nothing else (`--selftest`); measured on 3.11.18,
+/// 3.12.7, 3.12.16, 3.13.0, 3.14.3 and 3.14.10.
 fn validate_out_bits(bits: i64) {
     if !OUT_BITS.contains(&bits) {
         let list = OUT_BITS

@@ -78,17 +78,62 @@ class Scenario:
 ERROR_PREFIX = re.compile(r"^(?:hypreq(?:\.py)?(?:\.exe)?:\s*)?error:\s*", re.IGNORECASE)
 
 
+# argparse has rendered this one message three different ways, and reverted one of its own
+# changes on the way. Measured by running `hypreq.py` on each interpreter — not read off a
+# changelog, which is what makes the boundary a patch level rather than a minor version:
+#
+#   <= 3.12.7, 3.13.0     repr everywhere    invalid choice: 'bogus' (choose from 'safe', 'original', 'zero')
+#                                           invalid choice: 20 (choose from 16, 24, 32, 64)
+#   3.12.8 .. 3.14.3      str() everywhere   invalid choice: '20' (choose from safe, original, zero)
+#   3.13.7+, 3.14.4+      repr(str(x))        invalid choice: '20' (choose from '16', '24', '32', '64')
+#
+# Observed on 3.11.18, 3.12.7, 3.12.16, 3.13.0, 3.14.3 and 3.14.10; `--selftest` asserts the
+# shapes. The flag name, the wording, the value and the set of choices are ours to get right and
+# stay compared word for word. The quote characters are CPython's: they have moved twice, one of
+# those moves was undone, and they move at patch granularity, so pinning them makes the harness
+# fail on an interpreter that is telling the user exactly the correct thing. Only the quoting
+# *inside this one message* is forgiven, and `--selftest` checks that nothing else is.
+INVALID_CHOICE = re.compile(r"(invalid choice: )(.*?)( \(choose from [^()]*\))")
+
+
+def _unquote(token: str) -> str:
+    """Strip one matched pair of surrounding quotes, and only those."""
+    token = token.strip()
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+        return token[1:-1]
+    return token
+
+
+def canonicalize_choice(message: str) -> str:
+    """Drop the quoting from the `invalid choice:` message, leaving its content alone.
+
+    The choice list is split on commas, which is safe for every list this CLI owns: all of them
+    are model keys, mode names and bit depths, none of which contain a comma. Anything that does
+    not match the message is returned untouched, byte for byte, quotes included.
+    """
+    match = INVALID_CHOICE.search(message)
+    if match is None:
+        return message
+    value = _unquote(match.group(2))
+    tail = match.group(3)
+    listed = tail[len(" (choose from ") : -1]
+    choices = ", ".join(_unquote(choice) for choice in listed.split(","))
+    return f"{message[: match.start()]}{match.group(1)}{value} (choose from {choices}){message[match.end() :]}"
+
+
 def norm_error(text: str) -> str:
-    """The line a script would grep, with only the program-name prefix normalised away.
+    """The line a script would grep, with the two things CPython owns normalised away.
 
     argparse writes `hypreq.py: error: ...`, clap writes `error: ...` — that prefix is the
-    one difference the two cannot be made to share, since one is a Python file and the
-    other a binary. Everything after it is a user-facing string and has to match word for
-    word, quotes included, because `'16'` and `16` are different things to grep for.
+    first difference the two cannot be made to share, since one is a Python file and the other
+    a binary. The second is the quoting of the `invalid choice:` message, which is a CPython
+    patch-level detail (see `INVALID_CHOICE`). Everything else is a user-facing string and has
+    to match word for word: a script greps it, and `'16'` and `16` are different things to grep
+    for in any message that is not the one argparse re-quotes itself.
     """
     lines = [line for line in text.strip().splitlines() if "error" in line.lower()]
     line = lines[-1] if lines else ""
-    return ERROR_PREFIX.sub("", line.strip())
+    return canonicalize_choice(ERROR_PREFIX.sub("", line.strip()))
 
 
 def norm(text: str, workdir: Path) -> str:
@@ -96,6 +141,68 @@ def norm(text: str, workdir: Path) -> str:
     text = text.replace(str(workdir.resolve()), "<DIR>")
     text = text.replace(str(workdir), "<DIR>")
     return text.replace("\\", "/")
+
+
+def selftest() -> int:
+    """Prove the harness forgives CPython's quoting and nothing else.
+
+    `norm_error` deliberately ignores one thing, and a normaliser that is never checked is how a
+    parity harness ends up passing when nothing matches. The strings below were captured from
+    `hypreq.py` on 3.11.18, 3.12.7, 3.12.16, 3.13.0, 3.14.3 and 3.14.10 — they are what those
+    interpreters actually print, not what their changelogs say they print.
+    """
+    failures: list[str] = []
+    checks = 0
+
+    def expect(want: bool, got: bool, what: str) -> None:
+        nonlocal checks
+        checks += 1
+        if want != got:
+            failures.append(what)
+
+    # The three CPython renderings of one error must collapse to one string.
+    bits = [
+        "hypreq.py: error: argument --out-bits: invalid choice: 20 (choose from 16, 24, 32, 64)",
+        "hypreq.py: error: argument --out-bits: invalid choice: '20' (choose from 16, 24, 32, 64)",
+        "error: argument --out-bits: invalid choice: '20' (choose from '16', '24', '32', '64')",
+    ]
+    notch = [
+        "hypreq.py: error: argument --notch-mode: invalid choice: 'bogus' (choose from 'safe', 'original', 'zero')",
+        "error: argument --notch-mode: invalid choice: 'bogus' (choose from safe, original, zero)",
+    ]
+    expect(True, len({norm_error(t) for t in bits}) == 1, "the three --out-bits renderings must agree")
+    expect(True, len({norm_error(t) for t in notch}) == 1, "the two --notch-mode renderings must agree")
+
+    # Collapsing quoting must not collapse content. Each of these is one real mistake the CLI
+    # could make, and each has to stay distinguishable.
+    base = norm_error(bits[-1])
+    for other, why in [
+        (base.replace("--out-bits", "--tp-window"), "a different flag must stay different"),
+        (base.replace("choice: 20", "choice: 21"), "a different value must stay different"),
+        (base.replace(", 64", ""), "a shortened choice list must stay different"),
+        (base.replace("invalid choice", "invalid Choice"), "the wording must stay compared"),
+        (norm_error(notch[0]), "a different message must stay different"),
+    ]:
+        expect(True, base != other, why)
+
+    # Every other message is compared byte for byte, quotes and all: these carry meaning that is
+    # not argparse's to change.
+    for literal in [
+        "hypreq.py: error: argument --tp-ceiling: expected one argument",
+        "hypreq.py: error: sample rate must be positive (got 0)",
+        "error: argument --tp-ratio: could not convert string to float: 'x64'",
+        "hypreq.py: error: argument --fs: invalid int value: 'wide'",
+    ]:
+        got = norm_error(literal)
+        want = ERROR_PREFIX.sub("", literal)
+        expect(True, got == want, f"non-choice message must pass through untouched: {literal!r}")
+
+    if failures:
+        for reason in failures:
+            print(f"FAIL  selftest: {reason}")
+        return 1
+    print(f"selftest: {checks} assertions passed (choice quoting normalised, nothing else)")
+    return 0
 
 
 def read_wav_header(path: Path) -> dict[str, Any]:
@@ -375,6 +482,10 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
 
 
 def main() -> int:
+    # Checked before the parser, so the harness's own logic is testable without a built binary,
+    # a numpy, or the reference present.
+    if "--selftest" in sys.argv:
+        return selftest()
     ap = argparse.ArgumentParser(
         description="Parity harness: Rust hypreq against the Python reference in hypreq.py"
     )
@@ -388,6 +499,11 @@ def main() -> int:
     ap.add_argument("--ref", default=str(REPO / "hypreq.py"))
     ap.add_argument("--data", default=str(REPO / "measurements.json"))
     ap.add_argument("--only", default=None, help="run scenarios whose name contains this")
+    ap.add_argument(
+        "--selftest",
+        action="store_true",
+        help="check the harness's own normalisers and exit (no binaries run)",
+    )
     ap.add_argument("--keep", action="store_true", help="keep the scratch tree")
     args = ap.parse_args()
 

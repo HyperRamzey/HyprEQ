@@ -18,6 +18,60 @@
 //! wider accumulator — the two can only disagree in the last bit, and only when the true
 //! value sits within 2^-64 of a rounding boundary.
 
+/// One running Neumaier sum: `add` a term, `total` reads the compensated result.
+///
+/// This is the same recurrence `sum_of_squares` uses, exposed so a *prefix* sum can be built
+/// with it. A prefix sum is where the loss actually bites: `prefix[i+1] = prefix[i] + x[i]`
+/// walks the same left-to-right path as a plain sum, so every later entry inherits the bits the
+/// earlier additions dropped, and a window total `prefix[hi] - prefix[lo]` can come out as
+/// exactly zero for a window of values that are all nonzero.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RunningSum {
+    sum: f64,
+    comp: f64,
+}
+
+impl RunningSum {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one term. A non-finite term gives up on compensation: `inf` has to propagate as `inf`
+    /// and `NaN` as `NaN` rather than turn into a compensated approximation of either.
+    pub fn add(&mut self, v: f64) {
+        if !v.is_finite() || !self.sum.is_finite() {
+            self.sum += v;
+            return;
+        }
+        let next = self.sum + v;
+        self.comp += if self.sum.abs() >= v.abs() {
+            (self.sum - next) + v
+        } else {
+            (v - next) + self.sum
+        };
+        self.sum = next;
+    }
+
+    #[must_use]
+    pub fn total(&self) -> f64 {
+        self.sum + self.comp
+    }
+}
+
+/// Prefix sums, compensated: `out[0] = 0.0` and `out[i] = Σ x[0..i]`.
+#[must_use]
+pub fn prefix_sums(x: &[f64]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(x.len() + 1);
+    let mut acc = RunningSum::new();
+    out.push(0.0f64);
+    for &v in x {
+        acc.add(v);
+        out.push(acc.total());
+    }
+    out
+}
+
 /// `Σ x[i]²`, compensated.
 ///
 /// Written for the shape the reports need — energy over a whole filter or spectrum — so
@@ -89,6 +143,34 @@ mod tests {
         assert!(sum_of_squares(&[f64::NAN, 1.0]).is_nan());
         // Inf first and inf later both have to read the same way round.
         assert!(sum_of_squares(&[1e200, 1.0]).is_infinite());
+    }
+
+    #[test]
+    fn a_window_of_small_values_survives_a_prefix_that_reached_the_sky() {
+        // The shape that breaks a plain prefix sum: one enormous term, then a long run of small
+        // ones. Once the running total has reached 1e16, adding 1.0 to it changes nothing, so
+        // every later prefix entry equals the one before it and a window of a thousand 1.0s
+        // reads a total of exactly 0.0 — a mean of 0 for values that are all 1.
+        let mut v = vec![1e16];
+        v.extend(std::iter::repeat_n(1.0f64, 1000));
+        let plain: Vec<f64> = std::iter::once(0.0)
+            .chain(v.iter().scan(0.0f64, |acc, &x| {
+                *acc += x;
+                Some(*acc)
+            }))
+            .collect();
+        assert_eq!(
+            plain[1001] - plain[1],
+            0.0,
+            "the uncompensated prefix must be the broken one here"
+        );
+        let pre = prefix_sums(&v);
+        assert_eq!(pre[1001] - pre[1], 1000.0);
+        assert_eq!(
+            pre[501] - pre[1],
+            500.0,
+            "any window, not just the last one"
+        );
     }
 
     #[test]

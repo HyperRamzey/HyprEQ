@@ -44,6 +44,43 @@
 
 use crate::pchip::pchip_log_interp;
 
+/// The level of a raw measurement, which is what its magnitude has to be reduced by before the
+/// curve can stand for `S`.
+///
+/// The load `β` is defined against a *normalized* transfer function — one that reads about 0 dB
+/// in the mid-band — because `β` is compared with `|S|²`. A curve that arrives in dB SPL, or one
+/// that was never normalized because its knots were hand-placed and `normalize_1khz` was off,
+/// carries an arbitrary offset `C`, and feeding it in as-is is not a cosmetic slip: `|S|²` scales
+/// by `10^(C/10)`, which is the same thing as dividing the load by that factor. A 90 dB offset
+/// with [`KNEE_PER_DB`] at 8 moves the knee by `90 / 8` ≈ 11 dB, so a measurement recorded at a
+/// different calibration is silently a different policy — `--regularize` would do nothing at all
+/// on a dB-SPL curve and everything on the same curve written in dBFS.
+///
+/// The statistic is the **median** of the curve, deliberately not its value at 1 kHz. A reference
+/// read at one frequency is only a reference if nothing is happening at that frequency, and the
+/// curves here are full of narrow features: a measurement with a 12 dB coupler null at 1 kHz would
+/// be referenced 12 dB low, which raises every `|S|²` by that much and switches the load off over
+/// the whole band — the same failure the offset was. The median is the level the curve actually
+/// spends its time at, and it moves by exactly the offset it is meant to remove.
+#[must_use]
+pub fn reference_db(raw: &[(f64, f64)]) -> f64 {
+    let mut v: Vec<f64> = raw
+        .iter()
+        .map(|&(_, y)| y)
+        .filter(|y| y.is_finite())
+        .collect();
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_unstable_by(|a, b| a.total_cmp(b));
+    let mid = v.len() / 2;
+    if v.len() % 2 == 1 {
+        v[mid]
+    } else {
+        (v[mid - 1] + v[mid]) / 2.0
+    }
+}
+
 /// Octave width of the window that decides what "smooth" means for the fit residual.
 ///
 /// Half an octave, which is the choice Gómez-Bolaños (2016) makes for this estimate: wide
@@ -173,12 +210,22 @@ impl Policy {
 /// trustworthy.
 ///
 /// `f` must be ascending (a frequency axis is). Two cursors walk the window's edges while the
-/// bins advance, and the window's content comes from prefix sums, so neither the width of the
-/// window nor the length of the curve multiplies the cost.
+/// bins advance, and the window's content comes from compensated prefix sums, so neither the
+/// width of the window nor the length of the curve multiplies the cost.
 ///
-/// Non-finite input propagates rather than being quietly dropped: a curve with a `NaN` in it is
-/// a broken curve, and a `NaN` that survives to the report is easier to find than a smoothing
-/// window that silently went missing one sample.
+/// The mean is **weighted by each sample's own slice of the log axis** — the trapezoid rule on a
+/// log-frequency axis, where a sample owns the interval halfway to its neighbours and the two end
+/// samples own half a spacing each. An unweighted mean of "the samples that fell in the window"
+/// is that integral only when the samples are log-uniform, and the curves here are not: a CSV
+/// model hand-placed its knots, and where they sit further than the window apart the window holds
+/// a single knot, which makes the smoothing a silent no-op at exactly the frequencies someone
+/// took the trouble to place.
+///
+/// Non-finite input propagates, but *only to the windows that contain it*. A curve with a `NaN` in
+/// it is a broken curve and a `NaN` that reaches the report is easier to find than a smoothing
+/// window that quietly went missing; what must not happen is one `NaN` value rewriting the
+/// smoothed curve at every frequency above it, or one `NaN` frequency stopping the edge cursors
+/// so that every later window comes back empty. Both did.
 #[must_use]
 pub fn smooth_octave(f: &[f64], g: &[f64], fraction: f64) -> Vec<f64> {
     let n = f.len().min(g.len());
@@ -186,36 +233,103 @@ pub fn smooth_octave(f: &[f64], g: &[f64], fraction: f64) -> Vec<f64> {
         return vec![f64::NAN; n];
     }
     let half = fraction / 2.0;
-    // Prefix sums, so a window's total is two lookups at any width.
-    let mut prefix = vec![0.0f64; n + 1];
+
+    // Only a finite, positive frequency can take a place on a log axis. Those that cannot are
+    // left off the axis instead of sitting on it: a cursor advanced with `<` or `<=` stops dead
+    // at a `NaN`, because both comparisons are false against `NaN`, and every window after it
+    // then reads empty.
+    let mut hz = Vec::with_capacity(n);
+    let mut val = Vec::with_capacity(n);
+    let mut keep = Vec::with_capacity(n);
     for i in 0..n {
-        prefix[i + 1] = prefix[i] + g[i];
+        let ok = f[i].is_finite() && f[i] > 0.0;
+        if ok {
+            hz.push(f[i]);
+            val.push(g[i]);
+        }
+        keep.push(ok);
+    }
+    let m = hz.len();
+    let mut out = vec![f64::NAN; n];
+    if m == 0 {
+        return out;
     }
 
-    let mut out = vec![f64::NAN; n];
-    // Both cursors only ever move forward: the window's edges rise with the centre.
-    let mut lo = 0usize;
-    let mut hi = 0usize;
+    // Cell edges in log2, and the compensated prefix sums of "weight" and "weight × value".
+    // A sample whose *value* is not finite keeps its place on the axis (its neighbours must not
+    // grow to cover a gap that is really a broken measurement) but carries no weight; the badness
+    // prefix is what turns it back into a NaN for every window that overlaps it.
+    let c: Vec<f64> = hz.iter().map(|h| h.log2()).collect();
+    let mut edge = Vec::with_capacity(m + 1);
+    if m == 1 {
+        edge.push(c[0] - 0.5);
+        edge.push(c[0] + 0.5);
+    } else {
+        edge.push(c[0] - (c[1] - c[0]) / 2.0);
+        for i in 1..m {
+            edge.push((c[i - 1] + c[i]) / 2.0);
+        }
+        edge.push(c[m - 1] + (c[m - 1] - c[m - 2]) / 2.0);
+    }
+    let mut w = Vec::with_capacity(m);
+    let mut wg = Vec::with_capacity(m);
+    let mut bad = Vec::with_capacity(m);
+    for j in 0..m {
+        let width = (edge[j + 1] - edge[j]).max(0.0);
+        let finite = val[j].is_finite();
+        w.push(if finite { width } else { 0.0 });
+        wg.push(if finite { width * val[j] } else { 0.0 });
+        bad.push(if finite { 0.0 } else { 1.0 });
+    }
+    let pw = crate::accum::prefix_sums(&w);
+    let pwg = crate::accum::prefix_sums(&wg);
+    let pbad = crate::accum::prefix_sums(&bad);
+
+    // Both cursors only ever move forward: the window's edges rise with its centre.
+    let mut full_lo = 0usize;
+    let mut full_hi = 0usize;
+    let mut p = 0usize;
     for i in 0..n {
-        let centre = f[i];
-        if !(centre.is_finite() && centre > 0.0) {
+        if !keep[i] {
             continue;
         }
-        let low_hz = centre * 2f64.powf(-half);
-        let high_hz = centre * 2f64.powf(half);
-        while lo < n && f[lo] < low_hz {
-            lo += 1;
+        let lo2 = c[p] - half;
+        let hi2 = c[p] + half;
+        // Cells wholly inside the window are [full_lo, full_hi); at most one more cell hangs
+        // over each edge, and those two are added by hand.
+        while full_lo < m && edge[full_lo] < lo2 {
+            full_lo += 1;
         }
-        if hi < lo {
-            hi = lo;
+        if full_hi < full_lo {
+            full_hi = full_lo;
         }
-        while hi < n && f[hi] <= high_hz {
-            hi += 1;
+        while full_hi < m && edge[full_hi + 1] <= hi2 {
+            full_hi += 1;
         }
-        let count = hi - lo;
-        if count > 0 {
-            out[i] = (prefix[hi] - prefix[lo]) / f64::from(count as u32);
+        let mut first = full_lo;
+        let mut last_plus = full_hi;
+        let mut weight = pw[full_hi] - pw[full_lo];
+        let mut wsum = pwg[full_hi] - pwg[full_lo];
+        if full_lo > 0 && edge[full_lo] > lo2 {
+            let over = edge[full_lo] - lo2;
+            weight += over;
+            wsum += over * val[full_lo - 1];
+            first = full_lo - 1;
         }
+        if full_hi < m && edge[full_hi] < hi2 {
+            let over = hi2 - edge[full_hi];
+            weight += over;
+            wsum += over * val[full_hi];
+            last_plus = full_hi + 1;
+        }
+        // A non-finite value anywhere under the window makes this window non-finite, and nothing
+        // else's.
+        if pbad[last_plus] - pbad[first] > 0.0 {
+            out[i] = f64::NAN;
+        } else if weight > 0.0 {
+            out[i] = wsum / weight;
+        }
+        p += 1;
     }
     out
 }
@@ -287,6 +401,9 @@ pub fn beta(s_db: f64, policy: &Policy) -> f64 {
 /// engine writes today. `β → ∞` gives 1, i.e. 0 dB. Both ends are asserted in the tests, and
 /// the second one is the reason this form was chosen over the one that penalises `‖G‖²`.
 #[must_use]
+///
+/// `raw_db` is the measurement *relative to its own reference level* — see [`reference_db`]. The
+/// load is compared against `|S|²`, so an absolute reading is a policy change in disguise.
 pub fn regularized_gain_db(raw_db: f64, target_db: f64, beta: f64) -> f64 {
     if !raw_db.is_finite() || !target_db.is_finite() {
         return f64::NAN;
@@ -308,6 +425,10 @@ pub fn regularized_gain_db(raw_db: f64, target_db: f64, beta: f64) -> f64 {
 }
 
 /// Shrink an existing correction toward a bypass by the trust factor at that band.
+///
+/// `raw_db` is the measurement relative to its own reference level, exactly as in
+/// [`regularized_gain_db`]: the load is weighed against `|S|²`, so `S` has to be a normalized
+/// transfer function rather than an absolute reading of the rig.
 ///
 /// `G_reg = (|S|²·G + β) / (|S|² + β)`. This is [`regularized_gain_db`] with the target taken
 /// to be whatever the correction already implies — `D = S·G`, the compensated response the
@@ -392,6 +513,10 @@ pub fn regularized_curve(
     let tg: Vec<f64> = target.iter().map(|&(_, y)| y).collect();
     let target_on_raw = pchip_log_interp(&tf, &tg, &f);
     let s = deviation(&f, &g, policy.residual_octave, policy.beta_octave);
+    // Both sides of `S·D` are put on the curve's own reference. They have to move together: the
+    // error this produces when the load is zero is `target − raw`, and a shared offset cancels out
+    // of that, so the unregularized curve is bit-for-bit what it always was.
+    let base = reference_db(raw);
 
     raw.iter()
         .zip(target_on_raw)
@@ -400,7 +525,7 @@ pub fn regularized_curve(
             let (freq, raw_db) = *raw_pt;
             (
                 freq,
-                regularized_gain_db(raw_db, target_db, beta(deviation_db, policy)),
+                regularized_gain_db(raw_db - base, target_db - base, beta(deviation_db, policy)),
             )
         })
         .collect()
@@ -419,44 +544,383 @@ mod tests {
 
     /// The smoother must be the mean of the window it claims, including at the ends where the
     /// window hangs off the grid. Recomputed the naive way, bin by bin, on a random curve.
+    /// The window's mean is the trapezoid integral of the curve over the window divided by the
+    /// window's own measure, computed here independently and slowly from the definition.
+    ///
+    /// The previous version of this test asserted the *unweighted* mean of the samples whose
+    /// centres happened to fall inside the window, which is the same thing only on a log-uniform
+    /// axis; it is now the reference implementation's job to say what the mean is.
     #[test]
-    fn the_smoother_divides_by_the_samples_inside_the_window() {
+    fn the_smoother_is_the_log_domain_integral_of_the_window() {
         let f = grid(361);
         // Deterministic pseudo-noise: no RNG, no global state, same curve every run.
         let g: Vec<f64> = (0..f.len())
             .map(|i| ((i as f64) * 0.732).sin() * 3.0 + ((i as f64) * 2.11).cos())
             .collect();
-        let got = smooth_octave(&f, &g, 0.5);
         let half = 0.25f64;
+        let got = smooth_octave(&f, &g, 0.5);
+        let want = brute_log_trapezoid(&f, &g, half);
         for i in 0..f.len() {
-            let lo = f[i] * 2f64.powf(-half);
-            let hi = f[i] * 2f64.powf(half);
-            let win: Vec<f64> = f
-                .iter()
-                .zip(&g)
-                .filter(|(x, _)| **x >= lo && **x <= hi)
-                .map(|(_, y)| *y)
-                .collect();
-            let hz = f[i];
-            assert!(!win.is_empty(), "bin {i} ({hz:.1} Hz) had an empty window");
-            let want = win.iter().sum::<f64>() / win.len() as f64;
             assert!(
-                (got[i] - want).abs() < 1e-9,
-                "bin {i} ({hz:.1} Hz, {} samples in window): got {}, naive {}",
-                win.len(),
+                (got[i] - want[i]).abs() < 1e-9,
+                "bin {i} ({:.1} Hz): smoothed {}, integral of the window {}",
+                f[i],
                 got[i],
-                want
+                want[i]
             );
-            // The first and last windows are genuinely partial. If the implementation divided
-            // by the nominal width, the ends of the curve would be pulled toward zero.
-            if i == 0 || i + 1 == f.len() {
+        }
+        // The first window is genuinely partial, and a flat curve must stay flat at the ends:
+        // divide a truncated window by the nominal width and the ends of the curve get pulled
+        // toward zero, at exactly the two places a headphone measurement is least trustworthy.
+        let count0 = f
+            .iter()
+            .filter(|y| {
+                let lo = f[0] * 2f64.powf(-half);
+                **y >= lo && **y <= f[0] * 2f64.powf(half)
+            })
+            .count();
+        assert!(count0 < 30, "edge window should be truncated, got {count0}");
+        let flat = vec![1.0f64; f.len()];
+        let s = smooth_octave(&f, &flat, 0.5);
+        for (i, &v) in s.iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-12,
+                "bin {i} of a flat curve smoothed to {v}"
+            );
+        }
+    }
+
+    /// The definition, written slowly: build each sample's log-domain cell, clip the cells to the
+    /// window, and take the value-weighted mean of the clipped widths.
+    fn brute_log_trapezoid(f: &[f64], g: &[f64], half: f64) -> Vec<f64> {
+        let n = f.len();
+        let c: Vec<f64> = f.iter().map(|x| x.log2()).collect();
+        let mut edge: Vec<f64> = Vec::with_capacity(n + 1);
+        edge.push(c[0] - (c[1] - c[0]) / 2.0);
+        for i in 1..n {
+            edge.push((c[i - 1] + c[i]) / 2.0);
+        }
+        edge.push(c[n - 1] + (c[n - 1] - c[n - 2]) / 2.0);
+        (0..n)
+            .map(|i| {
+                let (lo, hi) = (c[i] - half, c[i] + half);
+                let mut w = 0.0;
+                let mut s = 0.0;
+                for j in 0..n {
+                    let over = (edge[j + 1].min(hi) - edge[j].max(lo)).max(0.0);
+                    w += over;
+                    s += over * g[j];
+                }
+                s / w
+            })
+            .collect()
+    }
+
+    /// One `NaN` value must reach the windows that contain it and stop there. It used to poison
+    /// every prefix sum after it, so the smoothed curve came back `NaN` at every frequency above
+    /// the bad sample — and a `NaN` frequency wedged both cursors, which emptied every later
+    /// window as well.
+    #[test]
+    fn one_bad_sample_reaches_the_windows_that_hold_it_and_no_others() {
+        let f = grid(361);
+        let g: Vec<f64> = (0..f.len())
+            .map(|i| ((i as f64) * 0.732).sin() * 3.0 + ((i as f64) * 2.11).cos())
+            .collect();
+        let clean = smooth_octave(&f, &g, 0.5);
+
+        let mut poisoned = g.clone();
+        let k = 180;
+        poisoned[k] = f64::NAN;
+        let got = smooth_octave(&f, &poisoned, 0.5);
+        assert!(got[k].is_nan(), "the broken sample itself must stay broken");
+        let mut near = 0usize;
+        for i in 0..f.len() {
+            let window = f[i] * 2f64.powf(-0.25)..=f[i] * 2f64.powf(0.25);
+            let holds_it = window.contains(&f[k]);
+            if holds_it {
+                near += 1;
+                assert!(got[i].is_nan(), "bin {i} holds the NaN and must read NaN");
+            } else {
                 assert!(
-                    win.len() < 30,
-                    "edge window should be truncated, got {}",
-                    win.len()
+                    (got[i] - clean[i]).abs() < 1e-12,
+                    "bin {i} ({:.1} Hz) does not hold the NaN but smoothed to {} instead of {}",
+                    f[i],
+                    got[i],
+                    clean[i]
                 );
             }
         }
+        assert!(
+            near > 0 && near < 40,
+            "a half-octave window is narrow: {near} bins"
+        );
+
+        // An infinity behaves the same way: it is a value, not a window.
+        let mut infinite = g.clone();
+        infinite[k] = f64::NEG_INFINITY;
+        let got = smooth_octave(&f, &infinite, 0.5);
+        assert!(
+            got[k].is_nan(),
+            "an infinite value cannot be averaged into a mean"
+        );
+        assert!(
+            (got[f.len() - 1] - clean[f.len() - 1]).abs() < 1e-12,
+            "the far end of the curve is past the infinity: {}",
+            got[f.len() - 1]
+        );
+
+        // A `NaN` frequency: no window can be built for it, but the axis below and above it still
+        // has to be walked to the end.
+        let mut broken_hz = f.clone();
+        broken_hz[k] = f64::NAN;
+        let got = smooth_octave(&broken_hz, &g, 0.5);
+        assert!(
+            got[k].is_nan(),
+            "a frequency that is not a frequency has no window"
+        );
+        for i in (k + 30)..f.len() {
+            assert!(
+                got[i].is_finite(),
+                "bin {i} ({:.1} Hz) went non-finite behind a NaN frequency: {}",
+                f[i],
+                got[i]
+            );
+            assert!(
+                (got[i] - clean[i]).abs() < 1.0,
+                "bin {i} smoothed to {} where the clean curve says {}",
+                got[i],
+                clean[i]
+            );
+        }
+    }
+
+    /// Knots that are unevenly spaced cover uneven slices of the log axis, and an unweighted mean
+    /// of "the samples whose centres fell in the window" treats a knot standing for two thirds of
+    /// an octave and a knot standing for a fortieth as if they said the same amount.
+    ///
+    /// Measured on the axis below, at the 120 Hz knot with a sixth-octave window: the window
+    /// (113.3–127.1 Hz) is 69 % inside 120 Hz's own cell and 31 % inside 115 Hz's, so the curve
+    /// there is 8.21 dB. Counting two samples and averaging them gives 6.00 dB — 2.2 dB of
+    /// regularization that simply is not there, at the low end of a hand-placed curve where knots
+    /// are sparsest.
+    #[test]
+    fn uneven_knot_spacing_is_weighted_by_the_axis_it_covers() {
+        let f = vec![100.0, 105.0, 110.0, 115.0, 120.0, 400.0, 1000.0];
+        let g = vec![0.0, 0.0, 0.0, 0.0, 12.0, 0.0, 0.0];
+        let got = smooth_octave(&f, &g, 1.0 / 6.0);
+        let want = brute_log_trapezoid(&f, &g, 1.0 / 12.0);
+        for i in 0..f.len() {
+            assert!(
+                (got[i] - want[i]).abs() < 1e-9,
+                "knot {i} ({} Hz): smoothed {}, the window's integral is {}",
+                f[i],
+                got[i],
+                want[i]
+            );
+        }
+        assert!(
+            (got[4] - 8.21).abs() < 0.02,
+            "the 120 Hz knot carries most of its window: got {}",
+            got[4]
+        );
+        // What counting samples instead of widths would have said, and how far off it is.
+        let half = 1.0 / 12.0;
+        let (lo, hi) = (f[4] * 2f64.powf(-half), f[4] * 2f64.powf(half));
+        let in_window: Vec<f64> = f
+            .iter()
+            .zip(&g)
+            .filter(|(x, _)| **x >= lo && **x <= hi)
+            .map(|(_, y)| *y)
+            .collect();
+        let counted = in_window.iter().sum::<f64>() / in_window.len() as f64;
+        assert!(
+            (got[4] - counted).abs() > 1.0,
+            "counting two samples instead of integrating the axis they cover: {counted} vs {}",
+            got[4]
+        );
+    }
+
+    /// The prefix sums behind a window are compensated, and this is the case that shows it: one
+    /// absurd sample, then a long run of ordinary ones. Once the running total has reached
+    /// 2.6e13, adding the next cell's weighted contribution (0.0026) to it changes nothing, so an
+    /// uncompensated prefix reports a window total of exactly zero and the smoother answers 0 dB
+    /// for a stretch of curve that is uniformly 1 dB — at every frequency above the outlier, not
+    /// just at it.
+    ///
+    /// The tolerance is not tighter than it looks. Compensation keeps the small terms from being
+    /// dropped on the way in, but a window total is still the *difference of two prefixes*, and
+    /// those are quantised to one ulp of 2.6e13, which is 0.0039 — about 0.008 dB once it is
+    /// divided by the window's weight. An uncompensated prefix is off by the whole 1 dB.
+    #[test]
+    fn a_window_far_from_an_outlier_still_averages_what_it_covers() {
+        let f = grid(4001);
+        let mut g = vec![1.0f64; f.len()];
+        g[0] = 1e16;
+        let s = smooth_octave(&f, &g, 0.5);
+        assert!(
+            s[0].is_finite(),
+            "the outlier's own window has a finite mean"
+        );
+        for i in (400..f.len()).step_by(251) {
+            assert!(
+                (s[i] - 1.0).abs() < 0.05,
+                "bin {i} ({:.0} Hz) is decades above the outlier and read {:+} instead of +1",
+                f[i],
+                s[i]
+            );
+        }
+    }
+
+    /// The load is weighed against `|S|²`, so `S` has to mean a normalized transfer function. A
+    /// measurement saved in absolute units — a rig logging dB SPL puts every sample near +94 —
+    /// used to carry that offset straight into `|S|²`, which is arithmetically the same as
+    /// dividing the load by `10^9.4`: the same curve, written in different units, was corrected in
+    /// full where it should have been bypassed. The target moves with it, because the two are
+    /// stated on one scale, and the correction it asks for is a difference that does not care.
+    #[test]
+    fn a_curve_saved_in_absolute_units_carries_the_same_policy() {
+        let f = grid(241);
+        // A 12 dB null a sixth of an octave wide at 9.5 kHz on an otherwise flat curve.
+        let raw: Vec<(f64, f64)> = f
+            .iter()
+            .map(|&x| {
+                let null = -12.0 * (-2.0 * ((x / 9500.0).log2() / (1.0 / 6.0)).powi(2)).exp();
+                (x, null)
+            })
+            .collect();
+        let target = vec![(20.0, 0.0), (1000.0, 0.0), (20000.0, 0.0)];
+        let policy = Policy::default();
+        let plain = regularized_curve(&raw, &target, &Policy::fixed(f64::INFINITY));
+        let want = regularized_curve(&raw, &target, &policy);
+        assert_eq!(want.len(), plain.len());
+        let bites = (0..want.len()).any(|i| (want[i].1 - plain[i].1).abs() > 1.0);
+        assert!(
+            bites,
+            "the fixture must actually regularize something: max difference {}",
+            (0..want.len())
+                .map(|i| (want[i].1 - plain[i].1).abs())
+                .fold(0.0f64, f64::max)
+        );
+
+        for offset in [94.0f64, -40.0, 0.5] {
+            let shifted: Vec<(f64, f64)> = raw.iter().map(|&(x, y)| (x, y + offset)).collect();
+            let shifted_target: Vec<(f64, f64)> =
+                target.iter().map(|&(x, y)| (x, y + offset)).collect();
+            let got = regularized_curve(&shifted, &shifted_target, &policy);
+            for i in 0..got.len() {
+                assert!(
+                    (got[i].1 - want[i].1).abs() < 1e-9,
+                    "the same measurement written {offset:+.1} dB high regularized {:.0} Hz to {} \
+                     dB instead of {} dB",
+                    got[i].0,
+                    got[i].1,
+                    want[i].1
+                );
+            }
+        }
+    }
+
+    /// The property `--regularize` is sold on: it can only ever make a correction gentler. The
+    /// shrink is a weighted mean of the curve's own gain and a bypass, in linear amplitude, with
+    /// the measurement's power `|S|²` on the curve and the load `β` on the bypass, so the result
+    /// is trapped between them — it cannot overshoot past 0 dB, and it cannot deepen a correction
+    /// that was already there.
+    ///
+    /// The pin is the worst knot on a shipped model, measured rather than invented: the
+    /// Beyerdynamic DT 770 Pro at 3703 Hz, where the raw measurement sits 4.87 dB *below* unity,
+    /// the shipped curve asks for `+4.26 dB` to fill that null, and the load there is 9.7. The
+    /// answer is `+0.18 dB`: the boost is walked almost all the way back, which is the whole
+    /// point of the flag. Two wrong implementations land on numbers this test rejects — putting
+    /// the amplitude `|S|` where the form wants the power `|S|²` gives `+0.30 dB`, and dropping
+    /// the `|S|²` weight altogether (shrinking by `β` alone, so a loud band is as suspect as a
+    /// silent one) gives `+0.50 dB`.
+    #[test]
+    fn the_shrink_lands_between_the_curve_and_bypass_and_never_past_either() {
+        assert!(
+            (regularize_correction(-4.87, 4.26, 9.7) - 0.177).abs() < 0.005,
+            "the DT 770's 3.7 kHz knot read {}",
+            regularize_correction(-4.87, 4.26, 9.7)
+        );
+
+        let mut beta = 1e-3f64;
+        while beta < 1e4 {
+            for &gain_db in &[-12.0, -6.0, -3.0, 0.0, 3.0, 6.0, 12.0] {
+                for &raw_db in &[-18.0, -9.0, -3.0, 0.0, 3.0, 9.0, 18.0] {
+                    let g = regularize_correction(raw_db, gain_db, beta);
+                    assert!(
+                        g.is_finite(),
+                        "finite inputs gave a non-finite shrink at beta {beta}"
+                    );
+                    assert!(
+                        g.abs() <= gain_db.abs() + 1e-12,
+                        "beta {beta}, measurement {raw_db} dB, curve {gain_db} dB: the shrink came \
+                         out at {g} dB, past the curve it was asked to soften"
+                    );
+                    assert!(
+                        g.abs() < 1e-12 || g.signum() == gain_db.signum(),
+                        "beta {beta}, measurement {raw_db} dB, curve {gain_db} dB: the shrink \
+                         changed the sign of the correction, landing on {g} dB"
+                    );
+                }
+            }
+            // More load, more walk-back: monotone toward bypass, never away from it.
+            for &gain_db in &[-6.0, 6.0] {
+                let softer = regularize_correction(-4.0, gain_db, beta * 10.0);
+                let harder = regularize_correction(-4.0, gain_db, beta);
+                assert!(
+                    softer.abs() < harder.abs() + 1e-12,
+                    "load {beta} gave {harder} dB and ten times the load gave {softer} dB"
+                );
+            }
+            beta *= 10.0;
+        }
+
+        // And the weight on `|S|²` is what makes the load bite where it should: at the same load,
+        // the deeper the null the boost is aimed at, the less of that boost survives.
+        let mut previous = f64::MAX;
+        for raw_db in [6.0, 0.0, -6.0, -12.0, -18.0] {
+            let g = regularize_correction(raw_db, 6.0, 5.0);
+            assert!(
+                g < previous,
+                "a boost into a {raw_db} dB band survived at {g} dB, no less than the louder band \
+                 before it"
+            );
+            previous = g;
+        }
+        assert!(
+            regularize_correction(6.0, 6.0, 5.0) > 3.0,
+            "a boost where the measurement is actually loud should mostly stand: {}",
+            regularize_correction(6.0, 6.0, 5.0)
+        );
+    }
+
+    /// The limit of all this, stated rather than hidden: when knots sit further apart than the
+    /// window, a window holds one knot's cell and there is nothing to average — the smoother
+    /// returns the knot itself. That is a property of smoothing a *sampled* curve at a fractional
+    /// octave width, not of the weighting, and it is why `deviation()` on a hand-placed CSV axis
+    /// with 0.7-octave gaps reads no deviation at all. A curve that dense has to be resampled
+    /// before it is smoothed, and nothing here does that; the assertion exists so that changing it
+    /// later is a decision and not an accident.
+    #[test]
+    fn a_window_narrower_than_a_knot_spacing_has_nothing_to_average() {
+        let f = vec![
+            20.0, 55.0, 140.0, 400.0, 1100.0, 2900.0, 5300.0, 8100.0, 16000.0,
+        ];
+        let mut g = vec![0.0f64; f.len()];
+        g[6] = 9.0;
+        let s = smooth_octave(&f, &g, 1.0 / 6.0);
+        assert!(
+            (s[6] - 9.0).abs() < 1e-12,
+            "a sixth-octave window inside a 0.7-octave cell reads the knot: {}",
+            s[6]
+        );
+        // The next knot is 0.62 octave away, so a one-octave window does reach it.
+        let s = smooth_octave(&f, &g, 1.0);
+        assert!(
+            s[6] < 8.0,
+            "an octave window on the same axis must mix: {}",
+            s[6]
+        );
     }
 
     /// A flat curve smooths to itself, and adding an offset changes nothing about the fit.

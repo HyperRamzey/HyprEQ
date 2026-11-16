@@ -216,10 +216,21 @@ impl Model {
         }
         let f: Vec<f64> = self.raw_pts.iter().map(|p| p[0]).collect();
         let g: Vec<f64> = self.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+        let raw: Vec<(f64, f64)> = self
+            .raw_pts
+            .iter()
+            .map(|p| (p[0], *p.last().unwrap()))
+            .collect();
         let knots: Vec<f64> = self.ctrl_pts.iter().map(|&(x, _)| x).collect();
         let loads = crate::fit::beta_at_freqs(&f, &g, &knots, policy);
-        // Where the knot sits on the measurement, which is what `|S|²` in the closed form needs.
-        let raw_at_knots = crate::pchip::pchip_log_interp(&f, &g, &knots);
+        // Where the knot sits on the measurement, which is what `|S|²` in the closed form needs —
+        // relative to the measurement's own level, because a hand-placed curve's knots were tuned
+        // against a raw axis that `normalize_1khz` may never have touched.
+        let base = crate::fit::reference_db(&raw);
+        let raw_at_knots = crate::pchip::pchip_log_interp(&f, &g, &knots)
+            .into_iter()
+            .map(|db| db - base)
+            .collect::<Vec<_>>();
         Regularized::Knots(
             self.ctrl_pts
                 .iter()
@@ -461,23 +472,40 @@ pub fn derive_ctrl_pts_from_raw_regularized(
     policy: &crate::fit::Policy,
 ) -> Vec<(f64, f64)> {
     let raw_pairs: Vec<(f64, f64)> = raw_pts.iter().map(|p| (p[0], *p.last().unwrap())).collect();
-    let shifted: Vec<(f64, f64)> = target_pts
-        .iter()
-        .map(|&(f, g)| (f, g + harm_offset))
-        .collect();
-    let regularized = crate::fit::regularized_curve(&raw_pairs, &shifted, policy);
+    if raw_pairs.len() < 2 || target_pts.len() < 2 {
+        return Vec::new();
+    }
+    let f: Vec<f64> = raw_pairs.iter().map(|&(x, _)| x).collect();
+    let g: Vec<f64> = raw_pairs.iter().map(|&(_, y)| y).collect();
+    let tf: Vec<f64> = target_pts.iter().map(|&(x, _)| x).collect();
+    let tg: Vec<f64> = target_pts.iter().map(|&(_, y)| y + harm_offset).collect();
+    let target_at = crate::pchip::pchip_log_interp(&tf, &tg, &f);
+    let loads = crate::fit::beta_at_freqs(&f, &g, &f, policy);
+    let base = crate::fit::reference_db(&raw_pairs);
+
     raw_pairs
         .iter()
-        .zip(&regularized)
-        .map(|(&(f, _), &(_, e_reg))| {
+        .zip(target_at)
+        .zip(loads)
+        .map(|((&(f, raw_db), target_db), load)| {
+            // The fixture shaping goes on the correction *first*, and the load is applied to the
+            // shaped curve. Doing it the other way round makes a fully bypassed band non-flat: the
+            // load takes the correction to 0 dB, and the sub-bass leak discount then subtracts
+            // itself from that zero, writing a fabricated cut below 65 Hz into a curve whose
+            // measured deviation said "trust nothing here, change nothing".
+            let shaped = shape_error(
+                target_db - raw_db,
+                f,
+                hf_taper_start_hz,
+                hf_bypass_hz,
+                subbass_leak_discount_db,
+            );
             (
                 f,
-                round2(shape_error(
-                    e_reg,
-                    f,
-                    hf_taper_start_hz,
-                    hf_bypass_hz,
-                    subbass_leak_discount_db,
+                round2(crate::fit::regularize_correction(
+                    raw_db - base,
+                    shaped,
+                    load,
                 )),
             )
         })
@@ -1538,6 +1566,171 @@ mod tests {
         assert_eq!(db.resolve("dt770"), Some("dt770_80"));
         assert_eq!(db.resolve("nope"), None);
         assert_eq!(db.keys(), vec!["jbl770nc", "dt770_80", "ft1pro"]);
+    }
+
+    /// A 121-point log axis from 20 Hz to 20 kHz — a knot every 0.025 octave — carrying a 12 dB
+    /// null a sixth of an octave wide at 9.5 kHz: narrow against the half-octave smoothing the
+    /// load is measured with, wide enough against this grid to actually be sampled. The matching
+    /// `ctrl_pts` are the +12 dB that null would demand.
+    fn notch_fixture() -> (Vec<Point>, Vec<(f64, f64)>) {
+        let null_at = |f: f64| -12.0 * (-2.0 * ((f / 9500.0).log2() / (1.0 / 6.0)).powi(2)).exp();
+        let raw: Vec<Point> = (0..121)
+            .map(|i| {
+                let f = 20.0 * 10f64.powf(f64::from(i) / 120.0 * 3.0);
+                pt(&[f, null_at(f)])
+            })
+            .collect();
+        let ctrl: Vec<(f64, f64)> = raw.iter().map(|p| (p[0], -null_at(p[0]))).collect();
+        (raw, ctrl)
+    }
+
+    /// What `--regularize` promises: it softens a correction, and how much it softens it is a
+    /// property of the *shape* of the measurement, not of the units it happened to be saved in.
+    ///
+    /// A rig that logs dB SPL rather than a normalized curve puts every sample ~94 dB high. The
+    /// load is weighed against `|S|²`, so that offset used to divide the load by `10^9.4`: the
+    /// `+10 dB` boost into a one-twelfth-octave null survived at full strength on the same
+    /// measurement, merely re-scaled, while on the normalized copy it walked back to about
+    /// `+0.6 dB`. One flag, two policies.
+    #[test]
+    fn hand_tuned_knots_are_shrunk_the_same_whatever_units_the_measurement_came_in() {
+        let (raw, ctrl) = notch_fixture();
+        let model = Model {
+            derivation: None,
+            key: "fixture".to_string(),
+            name: "Fixture".to_string(),
+            short_title: "Fixture".to_string(),
+            file_prefix: "fixture".to_string(),
+            rig_info: String::new(),
+            target_name: "flat".to_string(),
+            target_pts: vec![(20.0, 0.0), (20000.0, 0.0)],
+            harm_offset: 0.0,
+            gauss_apodize: false,
+            hf_bypass_hz: 20000.0,
+            notch_range_hz: None,
+            notch_ref_hz: None,
+            safe_cap_db: 1.5,
+            autoeq_geq_str: None,
+            autoeq_offset_db: None,
+            plot_meta: Map::new(),
+            raw_pts: raw.clone(),
+            ctrl_pts: ctrl.clone(),
+        };
+        let policy = crate::fit::Policy::default();
+        let normalized = model.regularize(&policy).curve().to_vec();
+
+        // The fixture has to actually bite, or every comparison below is vacuous: the peak of the
+        // boost is where the null is, and that is where the load lives.
+        let peak = normalized
+            .iter()
+            .zip(&ctrl)
+            .max_by(|a, b| (a.0 .1 - a.1 .1).abs().total_cmp(&(b.0 .1 - b.1 .1).abs()))
+            .expect("fixture is non-empty");
+        assert!(
+            (peak.1 .1 - peak.0 .1).abs() > 3.0,
+            "the fixture must shrink something to test anything: {} against {}",
+            peak.0 .1,
+            peak.1 .1
+        );
+
+        for offset in [94.0f64, -40.0, 0.5] {
+            let mut absolute = model.clone();
+            for p in &mut absolute.raw_pts {
+                let last = p.len() - 1;
+                p[last] += offset;
+            }
+            let shifted = absolute.regularize(&policy).curve().to_vec();
+            assert_eq!(shifted.len(), normalized.len());
+            for i in 0..shifted.len() {
+                assert!(
+                    (shifted[i].1 - normalized[i].1).abs() <= 0.011,
+                    "the same measurement written {offset:+.1} dB high regularized knot {i} \
+                     ({:.0} Hz) to {} dB instead of {} dB",
+                    normalized[i].0,
+                    shifted[i].1,
+                    normalized[i].1
+                );
+            }
+        }
+    }
+
+    /// Where the load says "trust nothing in this band", the curve has to become a flat wire —
+    /// including below 65 Hz, where the fixture's sub-bass leak discount lives.
+    ///
+    /// The discount used to be applied *after* the shrink, so a fully bypassed band came back at
+    /// `−discount · exp(−z²)` instead of 0 dB: a curve whose own measurement said "change nothing"
+    /// was delivered a fabricated sub-bass cut. Shaping the correction before the load is applied
+    /// is what makes the bypass limit mean what it says.
+    #[test]
+    fn a_fully_bypassed_derivation_is_a_flat_wire_below_65_hz_too() {
+        let (raw, _) = notch_fixture();
+        let target = vec![(20.0, 0.0), (1000.0, 0.0), (20000.0, 0.0)];
+        let everywhere = crate::fit::Policy {
+            lambda_db: f64::NEG_INFINITY,
+            ..crate::fit::Policy::default()
+        };
+        let ctrl = derive_ctrl_pts_from_raw_regularized(
+            &raw,
+            &target,
+            0.0,
+            8800.0,
+            10000.0,
+            6.0,
+            &everywhere,
+        );
+        assert_eq!(ctrl.len(), raw.len());
+        for &(hz, gain) in &ctrl {
+            assert_eq!(
+                gain, 0.0,
+                "{hz:.0} Hz was fully bypassed and still came back at {gain} dB"
+            );
+        }
+
+        // And the discount is genuinely in play on an ordinary policy at these frequencies, so the
+        // assertion above is about the sub-bass and not about a fixture that never reached it.
+        let normal = derive_ctrl_pts_from_raw_regularized(
+            &raw,
+            &target,
+            0.0,
+            8800.0,
+            10000.0,
+            6.0,
+            &crate::fit::Policy::default(),
+        );
+        let sub: Vec<(f64, f64)> = normal.iter().filter(|p| p.0 < 40.0).copied().collect();
+        assert!(!sub.is_empty(), "the fixture axis must reach below 40 Hz");
+        assert!(
+            sub.iter().any(|&(_, g)| g < -5.0),
+            "the 6 dB leak discount should be near full strength at the bottom: {sub:?}"
+        );
+    }
+
+    /// With no load anywhere, the regularized derivation has to be the plain one to the last bit —
+    /// the flag's "off" end is the curve everyone has today, not a round trip through `10^x`.
+    #[test]
+    fn an_infinite_knee_reproduces_the_plain_derivation() {
+        let (raw, _) = notch_fixture();
+        let target = vec![(20.0, 3.0), (1000.0, 0.0), (20000.0, -4.0)];
+        for discount in [0.0, 6.0] {
+            let plain = derive_ctrl_pts_from_raw(&raw, &target, 1.5, 8800.0, 10000.0, discount);
+            let reg = derive_ctrl_pts_from_raw_regularized(
+                &raw,
+                &target,
+                1.5,
+                8800.0,
+                10000.0,
+                discount,
+                &crate::fit::Policy::fixed(f64::INFINITY),
+            );
+            assert_eq!(plain.len(), reg.len());
+            for i in 0..plain.len() {
+                assert_eq!(
+                    plain[i], reg[i],
+                    "knot {i} ({:.0} Hz) with no load: {} against {}",
+                    plain[i].0, plain[i].1, reg[i].1
+                );
+            }
+        }
     }
 
     #[test]

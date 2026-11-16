@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -68,6 +69,10 @@ class Scenario:
     artifacts: list[str] = field(default_factory=list)
     compare_stdout: bool = True
     png: list[str] = field(default_factory=list)
+    # Whether this scenario is meant to drive gain reduction. Byte-identical reports
+    # would also be satisfied by both sides reporting an idle limiter, so each audio
+    # scenario says which of the two outcomes it is actually testing.
+    expect_engaged: bool = False
 
 
 def norm(text: str, workdir: Path) -> str:
@@ -279,7 +284,69 @@ def make_input_wav(path: Path, fs: int = 48000, seconds: float = 3.0) -> None:
     sf.write(path, sig.astype(np.float32), fs, subtype="FLOAT")
 
 
+ENGAGED_RE = re.compile(r"Engaged:\s*([\d,]+)\s*frames")
+# One report line, with the oversampling ratio read from it rather than assumed: the
+# scenarios exercise both x16 and x32 and the line names the ratio twice.
+PRE_POST_RE = re.compile(
+    r"Pre -> Post\s*:\s*([+-][\d.]+)\s*->\s*([+-][\d.]+)\s*dBTP\s*\(x\d+\)\s*\|"
+    r"\s*Independent x\d+:\s*([+-][\d.]+)"
+)
+
+
+def limiter_engaged(report: str, want: bool) -> Check:
+    """Assert what the scenario claims about its limiter, and cross-check its numbers.
+
+    The report line is `Limiter Pre -> Post : a -> b dBTP (x16) | Independent x16: c`,
+    where `c` comes from a second true-peak detector run over the written output — so
+    `b != c` means the limiter's accounting and its own meter disagree. A scenario that
+    expects to stay under its ceiling is checked the other way: `b == a`, nothing gained
+    or lost, because a transparent run that quietly shaved the peaks is a bug too.
+    """
+    m = ENGAGED_RE.search(report)
+    if m is None:
+        return Check("limiter state", False, "no 'Engaged: N frames' line in the report")
+    frames = int(m.group(1).replace(",", ""))
+    pp = PRE_POST_RE.search(report)
+    if pp is None:
+        return Check("limiter state", False, "no Pre -> Post line to cross-check")
+    pre, post, independent = (float(pp.group(i)) for i in (1, 2, 3))
+    if abs(post - independent) > 0.005:
+        return Check(
+            "limiter state",
+            False,
+            f"post {post} dBTP vs the report's own independent detector {independent} dBTP",
+        )
+    if want and frames == 0:
+        return Check("limiter state", False, f"ceiling never reached (pre {pre} dBTP)")
+    if not want and (frames or abs(post - pre) > 0.005):
+        return Check(
+            "limiter state",
+            False,
+            f"expected transparency, got {frames:,} engaged frames, {pre} -> {post} dBTP",
+        )
+    return Check(
+        "limiter state",
+        True,
+        f"{frames:,} engaged frames, {pre} -> {post} dBTP, "
+        f"independent detector agrees ({independent} dBTP)",
+    )
+
+
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    """Run one side of a scenario.
+
+    The child inherits the caller's environment: the reference is launched by
+    `sys.executable` (or `--python`), and a venv, conda or Nix install reaches its
+    own libraries through variables that a hand-written four-key environment drops —
+    which reads as a reference crash, not as a harness bug. Only the knobs that
+    actually move the output are pinned here: the matplotlib backend, the locale,
+    and a scratch font/image cache so a stale user cache cannot bend the figure.
+    """
+    env = os.environ.copy()
+    env.setdefault("HOME", str(Path.home()))
+    env["MPLBACKEND"] = "Agg"
+    env["LC_ALL"] = "C"
+    env["MPLCONFIGDIR"] = str(cwd / ".mplcache")
     return subprocess.run(
         cmd,
         check=False,
@@ -287,12 +354,7 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         timeout=1800,
-        env={
-            "PATH": "/usr/bin:/bin",
-            "HOME": str(Path.home()),
-            "MPLBACKEND": "Agg",
-            "LC_ALL": "C",
-        },
+        env=env,
     )
 
 
@@ -399,26 +461,36 @@ def main() -> int:
             ["-H", "jbl770nc", "--input", "input_audio.wav", "--out-bits", "24", "--taps", "8192"],
             artifacts=["input_audio_jbl770nc_tp_x16.wav"],
         ),
+        # The model preamp (-5.6 dB here) parks the corrected signal under a -3 dBTP
+        # ceiling, so this scenario pulls the ceiling to -8 to drive gain reduction
+        # through the f32 path; `audio-eq-pcm24` stays at the default ceiling and
+        # asserts the never-engaged report is identical too.
         Scenario(
             "audio-eq-trim-f32",
             [
                 "-H", "dt770_80ohm", "--input", "input_audio.wav",
                 "--out-bits", "32", "--trim-tail", "--taps", "8192",
+                "--tp-ceiling", "-8.0",
             ],
             artifacts=["input_audio_dt770_80ohm_tp_x16.wav"],
+            expect_engaged=True,
         ),
         Scenario(
             "audio-bypass-pcm16",
             ["--bypass-eq", "--input", "input_audio.wav", "--out-bits", "16"],
             artifacts=["input_audio_tp_x16.wav"],
+            expect_engaged=True,
         ),
         Scenario("measure-wav", ["--measure-wav", "input_audio.wav"]),
         Scenario(
             "audio-custom-out-x32",
             [
+                # -6 dBTP is below this model's post-EQ peak (-1.96), so the f64 writer
+                # and the x32 detector are exercised with the limiter actually working.
                 "-H", "ft1pro", "--input", "input_audio.wav", "--output", "custom_out.wav",
-                "--out-bits", "64", "--tp-ratio", "x32", "--tp-ceiling", "-1.0", "--taps", "8192",
+                "--out-bits", "64", "--tp-ratio", "x32", "--tp-ceiling", "-6.0", "--taps", "8192",
             ],
+            expect_engaged=True,
             artifacts=["custom_out.wav"],
         ),
         Scenario(
@@ -429,10 +501,14 @@ def main() -> int:
         Scenario(
             "audio-lookahead-raised",
             [
+                # A lookahead the limiter never reaches cannot be observed, so this
+                # scenario sets a ceiling below the post-EQ peak (-1.96 dBTP).
                 "-H", "ft1pro", "--input", "input_audio.wav", "--tp-ratio", "x32",
                 "--tp-lookahead", "0.2", "--taps", "4096", "--out-bits", "32",
+                "--tp-ceiling", "-6.0",
             ],
             artifacts=["input_audio_ft1pro_tp_x32.wav"],
+            expect_engaged=True,
         ),
         Scenario(
             "upgrade-json",
@@ -524,6 +600,12 @@ def main() -> int:
                     f"py: {tail_a[:110]!r} | rs: {tail_b[:110]!r}",
                 )
             )
+
+        if sc.expected_exit == 0 and any("_tp_" in n for n in sc.artifacts):
+            # Byte-identical stdout would also be satisfied by two sides that agree the
+            # limiter never touched the signal, so engagement and the cross-check the
+            # report performs on itself are asserted here as well.
+            checks.append(limiter_engaged(rp.stdout, sc.expect_engaged))
 
         for name in sc.artifacts:
             p, r = py_dir / name, rs_dir / name

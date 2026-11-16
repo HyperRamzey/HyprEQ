@@ -75,7 +75,35 @@ requirement the verification figure has):
 # Measure / EQ / true-peak-limit an existing recording:
 ./target/release/hypreq -H jbl770nc --input song.wav --out-bits 24
 ./target/release/hypreq --measure-wav song.wav
+
+# Ask what the correction demands of that recording before applying it:
+./target/release/hypreq -H dt770_80 --input song.wav --assess
+./target/release/hypreq -H dt770_80 --assess --assess-budget 9
 ```
+
+### What a Correction Demands (`--assess`)
+
+The report has always printed the biggest boost in the curve, and a boost is a promise about
+the headphone, not about the music: a `+9 dB` shelf at 40 Hz costs nothing on a podcast and
+asks a small driver for excursion it does not have on a bass-heavy track. `--assess` puts the
+applied correction on the same bands the content occupies — third-octave bands per
+**IEC 61260-1** (reference 1 kHz, base-10 spacing, edges at `centre · 10^(±1/20)`) — and prints
+what the filter moves in each:
+
+```text
+=== Correction Demand (budget +6.00 dB, headroom -1.50 dB, ceiling -3.00 dBTP) ===
+  Curve extreme : boost +4.10 dB @ 200 Hz, cut -5.04 dB @ 8 kHz
+  Content       : 96,000 samples/channel, 1/3-octave bands, worst channel kept
+  Boost demand  : 0 band(s) boost 6.00 dB or more into audible content
+  Ceiling       : no band reaches -3.00 dBTP after -1.50 dB of headroom
+```
+
+Report-only, and off by default: it changes no filter, no level and no output file, and the
+default report is byte-compared against the reference program, so a line added there would be
+a parity failure. What it states is a claim about measured quantities — content level in a
+band, the filter's gain there, and where the sum lands relative to the limiter ceiling. It does
+not model a driver, an amplifier or a distortion threshold, and no number in it should be read
+as one.
 
 `hypreq.py` accepts the same options and is kept only as the parity oracle for
 `scripts/parity.py`.

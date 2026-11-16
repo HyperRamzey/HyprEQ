@@ -156,6 +156,25 @@ The harness exits non-zero if any comparison fails, so it is usable as a CI gate
   pattern: `(frame, channel)` row-major, one pair of uniform draws per sample. Changing
   the layout changes the bytes.
 
+**Band assessment (`--assess`, `src/assess.rs`).** Nothing here is compared against the
+reference program, because the reference has no equivalent; the rules below are what makes the
+numbers defensible on their own:
+
+- Bands are **IEC 61260-1** base-10: centre `1000 · 10^(k/10)`, edges `centre · 10^(±1/20)`,
+  and bands named by the standard's nominal value (20, 25, 31.5 … 16 k, 20 k). The nominal
+  mantissa index is `k - 10·⌊k/10⌋`, not a truncated remainder: at `k = -17` the truncated
+  version reports 50 Hz where the standard says 20 Hz.
+- Levels are windowed RMS with a Hann window, divided by `n · Σw²`. That divisor is Parseval
+  for an unnormalized transform with the window's energy taken out, and it is what makes a
+  full-scale sine read `-3.01 dBFS` instead of a number that moves with the window length.
+- Every FFT bin is assigned to the band whose centre is nearest in log frequency. Testing each
+  bin against a band's edges instead rounds one edge down and the other up, so a bin on a
+  boundary is counted in two bands: measured on a 60 Hz tone, the neighbouring band read 13 dB
+  high.
+- Channels are analysed separately and combined by **maximum**, never averaged: a narrow spike
+  in one ear is the demanding one.
+- A `NaN` in the input reads as *no content* in that band, never as a demand.
+
 ### Where the port refuses what the reference accepts
 
 Parity is the rule, and two places break it deliberately. Both are sizes, both would make

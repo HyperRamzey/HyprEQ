@@ -365,19 +365,40 @@ handles departure from minimum phase rather than fighting an over-detailed targe
 one within a stated tolerance (so phase is the only thing that moved); the figure's phase
 and IR panels must show the difference; the README states that audibility is contested.
 
-### PR 6 — Distortion-aware assessment
+### PR 6 — Distortion-aware assessment — **shipped** as `--assess`
 
 **Problem:** a big boost is reported without any statement about what it demands (§1, cap 6).
 
-**Method:** from the applied EQ curve and the measured signal's own spectrum, estimate the
-per-band excursion/level demand the filter adds, and warn where the demanded boost exceeds
-a configurable budget — using the headroom, pre/post true-peak, and limiter statistics that
-are already computed. This is deliberately a *warning system* on measured quantities, not a
-driver model.
+**Shipped:** `src/assess.rs` and the `--assess` / `--assess-budget` options. It puts the
+applied correction on the content's own third-octave spectrum (IEC 61260-1 base-10, Hann,
+Parseval-normalized; the numerical rules are in `docs/SETUP.md` §5) and reports three facts:
+how many bands the filter boosts past the budget while carrying content, which of them is the
+loudest after the filter, and which reach the limiter's ceiling once the convolver's headroom
+is applied. Channels are combined by maximum, never averaged.
 
-**Acceptance:** a test that a 0 dB curve triggers nothing; a test that a +9 dB bass shelf
-on bass-heavy content triggers a named band; the limiter report gains a line stating the
-measured margin after the filter, which is the number a listener actually cares about.
+It is a warning system on measured quantities, exactly as scoped: it models no driver, no
+amplifier and no distortion threshold, and prints no excursion number.
+
+**Acceptance, and how it was met:**
+- `a_flat_curve_demands_nothing` — a 0 dB curve names nothing.
+- `a_bass_shelf_is_only_a_demand_when_the_file_has_bass` — a +9 dB shelf against a 60 Hz tone
+  names 63 Hz as the peak, at about +6 dBFS after the filter; the same shelf against content
+  with nothing in the bass names nothing; the budget is a knob, not a constant.
+- `the_worst_channel_is_the_one_that_matters`, `without_audio_the_curve_is_still_described`,
+  `degenerate_input_produces_numbers_not_panics`, `the_grid_is_iec_61260_base_10`,
+  `a_tone_lands_in_its_own_band_at_its_own_level`, `a_bare_frequency_is_named_by_its_band`.
+- Sabotage runs: replacing the nearest-centre bin partition with permissive edge rounding, and
+  replacing `n · Σw²` with `n²`, each fail tests; dropping the Hann window leaves a tone only
+  ~32 dB out of its neighbours against the ~105 dB the window delivers, and the 40 dB bound
+  catches it.
+
+**One acceptance line moved.** The plan asked for "the limiter report gains a line stating the
+measured margin after the filter". The limiter report is byte-compared against the reference
+program in `scripts/parity.py`, so a line added there is a parity failure by construction. The
+margin statement ships in the opt-in section instead (`Ceiling : N band(s) reach …; the limiter
+is doing this work`), which is where it can exist without breaking parity. The default report is
+byte-identical with and without the flag — checked end to end, not just by inspection: the same
+input through both paths writes byte-identical WAVs.
 
 ---
 

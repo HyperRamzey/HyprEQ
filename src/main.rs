@@ -197,6 +197,25 @@ struct Args {
     /// Shorthand for --input <wav> --bypass-eq --measure-only
     #[arg(long, help_heading = "True-Peak Limiter & Measurements")]
     measure_wav: Option<String>,
+    /// Report what the correction demands of the content, per 1/3-octave band
+    ///
+    /// Report-only: it changes no filter, no level and no file. Off by default because the
+    /// default report is byte-compared against the reference program, and a section added
+    /// there would be a parity failure.
+    #[arg(long, help_heading = "True-Peak Limiter & Measurements")]
+    assess: bool,
+    /// Boost level in dB at which --assess names a band (default: 6)
+    #[arg(
+        long,
+        default_value_t = hypreq::assess::DEFAULT_BUDGET_DB,
+        allow_negative_numbers = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = format!(
+            "Boost level in dB at which --assess names a band (default: {})",
+            hypreq::assess::DEFAULT_BUDGET_DB
+        )
+    )]
+    assess_budget: f64,
 }
 
 fn main() {
@@ -672,6 +691,11 @@ fn run_model(
         println!("  [Note] True-peak limiter disabled (--no-tp-limiter).");
     }
 
+    if args.assess {
+        // No audio on this path: the section describes the filter, and says so.
+        print_assessment(&active_ctrl, &[], fs, args, headroom_db);
+    }
+
     // mpv wants an absolute path with escaped separators. `absolute` is the lexical
     // equivalent of Python's `os.path.abspath`: unlike `canonicalize` it neither touches
     // the disk nor hands back a Windows `\\?\` prefix that mpv cannot open.
@@ -774,6 +798,11 @@ fn run_audio_wav_mode(
                 mpv.max_boost_db,
                 l1_gain
             );
+            if args.assess {
+                // Asked of the input, before the filter: the question is what the correction
+                // is about to demand of the content that is already there.
+                print_assessment(&active_ctrl, &wav_in.planar, fs, args, args.headroom_db);
+            }
             work = convolve_planar_fft(&work, &mpv.ir, args.trim_tail);
             let m_eq = measure_signal(&work, fs, lim_cfg.ratio);
             print_signal_measurements("Post-EQ (Pre-Limiter)", &m_eq);
@@ -844,6 +873,32 @@ fn run_audio_wav_mode(
 }
 
 /// `--apodize` / `--no-apodize` as a tri-state over the model's own default.
+/// Print what a correction demands of some content. Reached only behind `--assess`.
+///
+/// The ceiling quoted is the limiter's, because that is the order the audio is processed
+/// in: filter, then the convolver's headroom, then the limiter. `--no-tp-limiter` does not
+/// change the number, only whether anything is there to enforce it — which the section's own
+/// wording leaves to the reader.
+fn print_assessment(
+    ctrl: &[(f64, f64)],
+    planar: &[Vec<f64>],
+    fs: u32,
+    args: &Args,
+    headroom_db: f64,
+) {
+    let d = hypreq::assess::assess(
+        ctrl,
+        planar,
+        fs,
+        args.assess_budget,
+        headroom_db,
+        args.tp_ceiling,
+    );
+    for line in hypreq::assess::report_lines(&d, args.assess_budget, headroom_db, args.tp_ceiling) {
+        println!("{line}");
+    }
+}
+
 fn apodize_flag(args: &Args) -> Option<bool> {
     if args.apodize {
         Some(true)
@@ -1167,6 +1222,31 @@ mod tests {
         );
         assert_eq!(target, shown, "the line names the file that was written");
         assert_eq!(shown.file_name().unwrap(), hypreq::model::DEFAULT_DATA_FILE);
+    }
+
+    /// `--assess` is opt-in, and its budget takes a leading dash like every other dB option.
+    #[test]
+    fn assessment_is_off_until_it_is_asked_for() {
+        let plain = Args::try_parse_from(["hypreq", "-H", "hd6xx"]).expect("plain parse");
+        assert!(
+            !plain.assess,
+            "the default report must not grow a new section"
+        );
+        assert_eq!(plain.assess_budget, hypreq::assess::DEFAULT_BUDGET_DB);
+
+        let on = Args::try_parse_from(["hypreq", "-H", "hd6xx", "--assess"]).expect("--assess");
+        assert!(on.assess);
+
+        let tuned = Args::try_parse_from([
+            "hypreq",
+            "-H",
+            "hd6xx",
+            "--assess",
+            "--assess-budget",
+            "-3.5",
+        ])
+        .expect("a negative budget is a value, not a flag");
+        assert!((tuned.assess_budget + 3.5).abs() < 1e-12);
     }
 
     #[test]

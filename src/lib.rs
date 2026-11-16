@@ -71,6 +71,7 @@
 #![warn(clippy::all)]
 
 pub mod accum;
+pub mod assess;
 pub mod convolve;
 pub mod dither;
 pub mod error;

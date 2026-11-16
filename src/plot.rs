@@ -2182,6 +2182,7 @@ mod tests {
 
     fn model() -> Model {
         Model {
+            derivation: None,
             key: "t".into(),
             name: "Test Set".into(),
             short_title: "TEST".into(),

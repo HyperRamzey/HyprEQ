@@ -164,6 +164,114 @@ pub struct Model {
     pub plot_meta: Map<String, Value>,
     pub raw_pts: Vec<Point>,
     pub ctrl_pts: Vec<(f64, f64)>,
+    /// The parameters `ctrl_pts` was derived with, when it was derived rather than shipped.
+    ///
+    /// Kept so `--regularize` can re-run the same derivation with a regularized inversion
+    /// instead of re-implementing the fixture policy from memory next to it. `None` for a model
+    /// that ships hand-tuned knots (`ctrl_pts` in the database or a `ctrl_csv`), where there is
+    /// no inversion to regularize and a person's curve to negotiate with instead.
+    pub derivation: Option<Derivation>,
+}
+
+/// The fixture shaping a derived control curve was passed through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Derivation {
+    /// Frequency where the coupler-null cosine taper begins.
+    pub hf_taper_start_hz: f64,
+    /// Frequency above which the correction is exactly 0 dB.
+    pub hf_bypass_hz: f64,
+    /// Sub-65 Hz Gaussian leak discount, in dB.
+    pub subbass_leak_discount_db: f64,
+}
+
+impl Model {
+    /// This model's control curve, regularized by how well its own measurement fits a smoothed
+    /// version of itself.
+    ///
+    /// Two cases, because the models differ in what there is to regularize. A model whose knots
+    /// were derived from a target gets the regularized *inversion* — the same derivation, the
+    /// same fixture shaping, the load applied where the demand is formed. A model that ships
+    /// hand-tuned knots has no inversion to touch, so its knots are shrunk toward a bypass by
+    /// the load at each knot's own frequency, which is the same closed form with the knot as the
+    /// implied target (see [`crate::fit::regularize_correction`]).
+    ///
+    /// A hand-tuned model with no raw measurement is reported as such. The load comes from the
+    /// measurement; without one there is nothing to be regularized about, and quietly returning
+    /// the knots unchanged would read as if the flag had done something.
+    #[must_use]
+    pub fn regularize(&self, policy: &crate::fit::Policy) -> Regularized {
+        if let Some(d) = self.derivation {
+            return Regularized::Derived(derive_ctrl_pts_from_raw_regularized(
+                &self.raw_pts,
+                &self.target_pts,
+                self.harm_offset,
+                d.hf_taper_start_hz,
+                d.hf_bypass_hz,
+                d.subbass_leak_discount_db,
+                policy,
+            ));
+        }
+        if self.raw_pts.len() < 2 || self.ctrl_pts.len() < 2 {
+            return Regularized::NothingToJudge;
+        }
+        let f: Vec<f64> = self.raw_pts.iter().map(|p| p[0]).collect();
+        let g: Vec<f64> = self.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+        let knots: Vec<f64> = self.ctrl_pts.iter().map(|&(x, _)| x).collect();
+        let loads = crate::fit::beta_at_freqs(&f, &g, &knots, policy);
+        // Where the knot sits on the measurement, which is what `|S|²` in the closed form needs.
+        let raw_at_knots = crate::pchip::pchip_log_interp(&f, &g, &knots);
+        Regularized::Knots(
+            self.ctrl_pts
+                .iter()
+                .zip(loads)
+                .zip(raw_at_knots)
+                .map(|((&(hz, gain), load), raw_db)| {
+                    (
+                        hz,
+                        round2(crate::fit::regularize_correction(raw_db, gain, load)),
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+/// What `--regularize` found to act on, and the curve it produced.
+#[derive(Debug, Clone)]
+pub enum Regularized {
+    /// The knots came from inverting a target, so the inversion itself was regularized.
+    Derived(Vec<(f64, f64)>),
+    /// The model ships hand-tuned knots; each was shrunk toward a bypass by the load at its own
+    /// frequency, using [`crate::fit::regularize_correction`].
+    Knots(Vec<(f64, f64)>),
+    /// Hand-tuned knots and no raw measurement to judge them by. Nothing was changed, and the
+    /// report says so rather than inventing a load out of the curve it was asked to check.
+    NothingToJudge,
+}
+
+impl Regularized {
+    /// The knots this produced — empty for [`Regularized::NothingToJudge`], which is the signal
+    /// to keep the model's own curve.
+    #[must_use]
+    pub fn curve(&self) -> &[(f64, f64)] {
+        match self {
+            Regularized::Derived(c) | Regularized::Knots(c) => c,
+            Regularized::NothingToJudge => &[],
+        }
+    }
+
+    /// What to print about it, naming the path that was taken. Wording lives here so the test
+    /// asserts the sentence a user reads, not an internal tag.
+    #[must_use]
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Regularized::Derived(_) => "regularized the target inversion",
+            Regularized::Knots(_) => "shrunk the shipped knots toward a bypass",
+            Regularized::NothingToJudge => {
+                "no raw measurement to judge the knots by, curve unchanged"
+            }
+        }
+    }
 }
 
 /// Raised for a bad database: unknown target, missing `raw_pts`, unreadable CSV, and
@@ -285,7 +393,6 @@ pub fn derive_ctrl_pts_from_raw(
     let f_tar: Vec<f64> = target_pts.iter().map(|p| p.0).collect();
     let g_tar: Vec<f64> = target_pts.iter().map(|p| p.1 + harm_offset).collect();
     let g_tar_on_raw = crate::pchip::pchip_log_interp(&f_tar, &g_tar, &f_raw);
-    let log_ratio = (hf_bypass_hz / hf_taper_start_hz).log2();
 
     raw_pts
         .iter()
@@ -293,22 +400,86 @@ pub fn derive_ctrl_pts_from_raw(
         .map(|(p, &tar)| {
             let f = p[0];
             let e = tar - *p.last().unwrap();
-            let val = if f < 65.0 && subbass_leak_discount_db > 0.0 {
-                let z = (f.max(20.0) / 20.0).log2() / 0.75;
-                let disc = subbass_leak_discount_db * (-z * z).exp();
-                e - disc
-            } else if f <= hf_taper_start_hz {
-                e
-            } else if f < hf_bypass_hz {
-                let w = 0.5
-                    * (1.0
-                        + (std::f64::consts::PI * (f / hf_taper_start_hz).log2() / log_ratio)
-                            .cos());
-                e * w
-            } else {
-                0.0
-            };
-            (f, round2(val))
+            (
+                f,
+                round2(shape_error(
+                    e,
+                    f,
+                    hf_taper_start_hz,
+                    hf_bypass_hz,
+                    subbass_leak_discount_db,
+                )),
+            )
+        })
+        .collect()
+}
+
+/// The fixture policy applied to an inversion error at one frequency.
+///
+/// Extracted verbatim from [`derive_ctrl_pts_from_raw`] so the regularized derivation below
+/// runs the *same* arithmetic on the same branches; a second copy of a taper is a second chance
+/// for the two curves to disagree somewhere nobody compares them. The float operations are in
+/// the same order as before the extraction, which is what keeps the default path byte-identical.
+fn shape_error(
+    e: f64,
+    f: f64,
+    hf_taper_start_hz: f64,
+    hf_bypass_hz: f64,
+    subbass_leak_discount_db: f64,
+) -> f64 {
+    if f < 65.0 && subbass_leak_discount_db > 0.0 {
+        let z = (f.max(20.0) / 20.0).log2() / 0.75;
+        let disc = subbass_leak_discount_db * (-z * z).exp();
+        e - disc
+    } else if f <= hf_taper_start_hz {
+        e
+    } else if f < hf_bypass_hz {
+        let log_ratio = (hf_bypass_hz / hf_taper_start_hz).log2();
+        let w =
+            0.5 * (1.0 + (std::f64::consts::PI * (f / hf_taper_start_hz).log2() / log_ratio).cos());
+        e * w
+    } else {
+        0.0
+    }
+}
+
+/// [`derive_ctrl_pts_from_raw`], with the inversion regularized by how well the measurement
+/// fits a smoothed version of itself.
+///
+/// Same knots, same fixture shaping, same 0.01 dB grid — only the demand at each frequency is
+/// negotiated by `β` first, so a band the measurement cannot support falls back toward 0 dB
+/// instead of demanding whatever `target − raw` asked for. See [`crate::fit`] for the form and
+/// for why it regularizes toward unity rather than toward silence.
+#[must_use]
+pub fn derive_ctrl_pts_from_raw_regularized(
+    raw_pts: &[Point],
+    target_pts: &[(f64, f64)],
+    harm_offset: f64,
+    hf_taper_start_hz: f64,
+    hf_bypass_hz: f64,
+    subbass_leak_discount_db: f64,
+    policy: &crate::fit::Policy,
+) -> Vec<(f64, f64)> {
+    let raw_pairs: Vec<(f64, f64)> = raw_pts.iter().map(|p| (p[0], *p.last().unwrap())).collect();
+    let shifted: Vec<(f64, f64)> = target_pts
+        .iter()
+        .map(|&(f, g)| (f, g + harm_offset))
+        .collect();
+    let regularized = crate::fit::regularized_curve(&raw_pairs, &shifted, policy);
+    raw_pairs
+        .iter()
+        .zip(&regularized)
+        .map(|(&(f, _), &(_, e_reg))| {
+            (
+                f,
+                round2(shape_error(
+                    e_reg,
+                    f,
+                    hf_taper_start_hz,
+                    hf_bypass_hz,
+                    subbass_leak_discount_db,
+                )),
+            )
         })
         .collect()
 }
@@ -504,6 +675,9 @@ pub fn normalize_model_entry(
     let hf_bypass_hz = f64_or(cfg, "hf_bypass_hz", 9500.0);
     let hf_taper_start_hz = f64_or(cfg, "hf_taper_start_hz", hf_bypass_hz * 0.88);
 
+    // Set only by the branch that derives, so the regularized re-derivation can reuse the same
+    // fixture parameters rather than a second copy of them.
+    let mut derivation: Option<Derivation> = None;
     let ctrl_pts: Vec<(f64, f64)> = if let Some(arr) = ctrl_inline {
         let pairs: Vec<(f64, f64)> = arr
             .iter()
@@ -531,13 +705,19 @@ pub fn normalize_model_entry(
             .map(|p| (p[0], *p.last().unwrap()))
             .collect()
     } else {
+        let subbass_leak_discount_db = f64_or(cfg, "subbass_leak_discount_db", 0.0);
+        derivation = Some(Derivation {
+            hf_taper_start_hz,
+            hf_bypass_hz,
+            subbass_leak_discount_db,
+        });
         derive_ctrl_pts_from_raw(
             &raw_pts,
             &target_pts,
             harm_offset,
             hf_taper_start_hz,
             hf_bypass_hz,
-            f64_or(cfg, "subbass_leak_discount_db", 0.0),
+            subbass_leak_discount_db,
         )
     };
 
@@ -630,6 +810,7 @@ pub fn normalize_model_entry(
 
     Ok(Model {
         key: key.to_string(),
+        derivation,
         plot_meta,
         name,
         short_title,
@@ -1329,6 +1510,7 @@ mod tests {
         let mut db = Database::default();
         for k in ["jbl770nc", "dt770_80", "ft1pro"] {
             let m = Model {
+                derivation: None,
                 key: k.to_string(),
                 name: k.to_string(),
                 short_title: k.to_string(),

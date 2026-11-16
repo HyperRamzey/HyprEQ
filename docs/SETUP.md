@@ -175,6 +175,40 @@ numbers defensible on their own:
   in one ear is the demanding one.
 - A `NaN` in the input reads as *no content* in that band, never as a demand.
 
+**Regularization (`--regularize`, `src/fit.rs`).** Also unreferenced by the oracle, and off by
+default for the same reason the assessment section is: the default report and curve are compared
+byte for byte. What it does is arithmetic, so the rules are numbers:
+
+- The load is added to `|S|²`, so it is in **absolute power units referred to unity**, never
+  scaled by `max|S|`. One knee value therefore means the same thing on a headphone with a 2 dB
+  null and one with a 20 dB null.
+- The closed form is `G = (S*D + βA) / (|S|² + β)` with `A = 1`, which penalises the deviation
+  from an all-pass reference. `β → 0` reproduces `target − raw` exactly; `β → ∞` gives 0 dB, a
+  bypass. The better-known published form (`S*D / (S*S + β|ε|²)`, Norcross et al. 2006, and what
+  `pyfar.dsp.RegularizedSpectrumInversion` ships) penalises `‖G‖²` instead and sends the same
+  band to silence — at `β = 10¹²` and a 20 dB null, `-230 dB` where `0 dB` was needed. Asserted
+  in `infinite_load_bypasses_and_zero_load_is_todays_curve` so the two cannot be swapped quietly.
+- A hand-tuned curve is regularized with the same form, taking its implied target to be
+  `D = S·G`, which makes it `G_reg = (|S|²G + β) / (|S|² + β)`. That is algebraically the same
+  expression, and `shrinking_a_plain_inversion_is_the_same_as_inverting_the_target` asserts the
+  two paths agree to 1e-9 rather than trusting the derivation.
+- The knee sits at **3 dB** of deviation because the shipped measurements put it there: median
+  deviation 0.06 / 0.32 / 0.34 dB on the FT1 Pro, JBL 770NC and DT 770 Pro, worst bands 3.6 to
+  8.4 dB at 3.7 kHz and 8–17 kHz. Steepness is 8 (about one order of magnitude of `β` per 1.25 dB
+  of deviation) because `β` has to be three orders below `|S|²` to be invisible on a trusted band
+  and above it to be decisive on a wild one, and a gentler knee either shaves real corrections or
+  fails to bypass the notch.
+- `auto` reads the **90th percentile** of the deviation, times 1.3, floored at 3 dB. Not a median
+  or a MAD: the deviation of a real curve is near zero almost everywhere with a sparse tail, so
+  a central statistic reads ~0 on every curve (measured MAD: 0.00 on a flat curve *and* on one
+  with a 12 dB notch), and a lone notch must not raise the knee and negotiate its way out of
+  being bypassed.
+- The deviation is smoothed **once** (half-octave residual, then 1/6-octave on its magnitude).
+  Smoothing it a second time when looking it up at a knot frequency erases the narrow features
+  it exists to find — measured: a 10 dB coupler notch's peak went from 3.5 dB to 1.8 dB and
+  stopped being bypassed. `regularized_curve` interpolates the deviation, it does not re-filter
+  it.
+
 ### Where the port refuses what the reference accepts
 
 Parity is the rule, and two places break it deliberately. Both are sizes, both would make

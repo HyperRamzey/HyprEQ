@@ -79,7 +79,35 @@ requirement the verification figure has):
 # Ask what the correction demands of that recording before applying it:
 ./target/release/hypreq -H dt770_80 --input song.wav --assess
 ./target/release/hypreq -H dt770_80 --assess --assess-budget 9
+
+# Regularize the correction, so a narrow notch the measurement cannot support is not chased:
+./target/release/hypreq -H dt770_80 --regularize auto
+./target/release/hypreq -H dt770_80 --regularize 4.5
 ```
+
+### Regularizing the Correction (`--regularize`)
+
+The correction is `target − raw`, evaluated at every measurement point, and that formula trusts
+every wiggle equally. A broad shelf is the system telling you something real; a 3 dB notch one
+twelfth of an octave wide is the fixture — a coupler resonance, a pinna standing wave — and a
+filter that "fixes" it puts a matching spike into the headphone and does nothing for the sound.
+`--regularize` asks each band how well the measurement fits a smoothed copy of itself and
+negotiates the demand down where it does not:
+
+```text
+=== Regularization (knee 3.76 dB of deviation, shrunk the shipped knots toward a bypass) ===
+  Knots moved     : 36 of 128 (largest -4.07 dB @ 3703 Hz)
+  Extreme shifted : +4.26 dB -> +0.19 dB at that knot
+```
+
+On the DT 770 Pro that knee lands on the 3.7 kHz and 8–17 kHz deviations — the narrow HF notches
+— and leaves the bass and mid-band corrections alone. `auto` reads the knee from the curve's own
+top-decile deviation with a 3 dB floor; a number sets the knee directly, in dB of deviation.
+
+It is **not the default**, and `off` writes the curve the reference program writes, byte for byte.
+The reason is the honest one: the regularizer decides which parts of a published correction are
+measurement, and that judgment should be seen in a side-by-side comparison before it becomes the
+thing everyone gets. `docs/ROADMAP.md` §3.6 covers why the fallback is 0 dB and not silence.
 
 ### What a Correction Demands (`--assess`)
 

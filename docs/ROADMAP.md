@@ -266,7 +266,7 @@ today's**, and `scripts/parity.py` stays green. New behaviour is additive and op
 the parity oracle remains a live check on the existing engine while each change is
 proved by its own tests.
 
-### PR 1 — Fit-aware regularization *(highest value)*
+### PR 1 — Fit-aware regularization — **shipped** as `--regularize`
 
 **Problem:** one smoothing/regularization policy for every curve (§3.1, §3.2).
 
@@ -282,16 +282,54 @@ correction is computed as an inversion rather than a knot edit, the diagonal loa
 magnitude goes to **0 dB**, not toward silence (§3.6). That single assertion is what
 distinguishes a regularizer from a shrinker.
 
-**Implementation shape:** a new `fit.rs` — `smooth_octave(f, g, fraction)`,
-`regularization_lambda(g)`, `notch_cap(lambda)`-style pure f64 functions — called from
-`ir::apply_notch_mode` and from the model normalizer, with `--regularize auto|off|<λ>`.
-`auto` is *not* the default in PR 1; it becomes the default only after the figure shows
-the two side by side on real curves.
+**Shipped as:** `src/fit.rs` (pure `f64`) plus `--regularize off|auto|<λ>`, wired at both places
+a correction curve is formed — `model::derive_ctrl_pts_from_raw_regularized` for a model whose
+knots come from inverting a target, and `Model::regularize`'s knot path for a model that ships
+hand-tuned knots, which every model in this database does. Notch capping in
+`ir::apply_notch_mode` was **not** changed: the regularizer supersedes it rather than stacking on
+it, and `--notch-mode` keeps its own meaning.
 
-**Acceptance:** unit tests for the smoother on known curves (a pure tone, an impulse
-notch, a shelf) proving the λ estimate rises with notch depth/width and is invariant to
-flat gain; a test that `--regularize off` reproduces today's bytes exactly; a figure panel
-overlay of auto vs off; parity unchanged.
+The shape differs from the sketch in one place worth naming. `regularization_lambda(g)` and
+`notch_cap(lambda)` became a *frequency-dependent* `β(f)` plus a knee, because the §3.6 argument
+is that the load has to be per-band — a scalar λ plus a depth cap cannot leave a broad shelf
+untouched while bypassing a notch an octave away, which is the whole behaviour.
+
+**Acceptance, and how it was met:**
+- `infinite_load_bypasses_and_zero_load_is_todays_curve` is the §3.6 test: `β → ∞` gives 0 dB,
+  `β = 0` gives `target − raw` to 1e-12, and the same band under the `‖G‖²` form is asserted to
+  collapse to silence, so the two forms cannot be interchanged quietly.
+- `the_smoother_divides_by_the_samples_inside_the_window` compares every bin against a naive
+  recomputation on a random curve, edges included.
+- `the_fit_measures_shape_not_level` (invariant to a 12 dB offset; a broad shelf does not read as
+  a fit failure), `the_auto_knee_ignores_a_sparse_notch_and_follows_broad_texture` (a sparse 12 dB
+  notch leaves the knee at the floor; ±9 dB broad texture lifts it to the measured 7.9 dB),
+  `texture_is_left_alone_and_a_notch_is_walked_back` (measured knee shape),
+  `a_narrow_notch_stops_being_corrected_and_its_neighbourhood_does_not` and
+  `a_hand_tuned_curve_keeps_its_shelf_and_loses_its_notch_chase` end to end.
+- `regularize_off_hands_back_the_models_own_curve` asserts `off` returns `model.ctrl_pts`
+  untouched and prints nothing, and that a knee far above every deviation is an exact no-op;
+  parity stays **98/98** with the flag present in the parser.
+- Sabotage runs, each killing tests: swapping the all-pass reference for the `‖G‖²` penalty;
+  dividing the smoother's window by its nominal width instead of the samples inside it; pinning
+  `β` to a constant so the knee does nothing; re-smoothing the deviation at lookup.
+- End to end on a shipped model: `--regularize auto` on `dt770_80` estimates a 3.76 dB knee,
+  moves 36 of 128 knots, the largest `-4.07 dB @ 3703 Hz` — one of the two bands the real-curve
+  scan flagged, and `--regularize off` writes the same bytes as before the flag existed.
+
+**What did not ship: the figure overlay.** The acceptance list asked for a panel drawing auto and
+off together. That item was substituted, not implemented, and the reason is scope on this turn,
+not a blocker: `scripts/parity.py` never passes `--regularize` (checked: no occurrence), so with
+the flag at its default the figure's bytes are untouched and an overlay could have gone in with
+parity green. What it actually takes is a second trace on the gain panel, an entry in the
+hand-drawn legend (`plot.rs` draws those itself, to matplotlib's geometry), a test that renders
+with the flag on and counts ink, and one that the flag-off figure is unchanged.
+
+What shipped instead is the same quantity as text: `Knots moved` and `Extreme shifted`, plus
+running both into separate directories and diffing the reports. Text gives the size of the change
+at the worst knot; the overlay would show its *shape* — how wide the backed-off region is and how
+fast it recovers, which is exactly the judgment "is this the fixture or the headphone" needs. If
+the printed numbers say the flag is worth keeping, the overlay is the right next change, and it
+belongs with the decision to make `auto` the default rather than with this PR.
 
 ### PR 2 — Fixture-aware targets
 

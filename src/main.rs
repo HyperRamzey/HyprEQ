@@ -216,6 +216,20 @@ struct Args {
         )
     )]
     assess_budget: f64,
+    /// Regularize the correction by how well the measurement fits a smoothed copy of itself
+    ///
+    /// `off` (the default) keeps the curve the reference program writes. `auto` sets the knee
+    /// from the curve's own deviation; a number sets it directly, in dB of deviation. Not a
+    /// default in this release: it changes the filter, and the comparison against the current
+    /// behaviour is the point of running it explicitly.
+    #[arg(
+        long,
+        default_value = "off",
+        allow_hyphen_values = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = "Regularize the correction: 'off' (default), 'auto', or a lambda in dB of deviation"
+    )]
+    regularize: String,
 }
 
 fn main() {
@@ -288,6 +302,11 @@ fn run(args: Args) -> Result<(), Error> {
     }
     validate_choice(&args.notch_mode, &NOTCH_MODES, "--notch-mode");
     validate_out_bits(args.out_bits);
+    // `--regularize` takes a word or a number, so clap cannot check it; a value that is neither
+    // of the documented forms is a usage error like any other bad choice.
+    if let Err(msg) = regularize_arg(&args.regularize) {
+        usage_error(msg);
+    }
 
     if args.taps < 256 {
         usage_error("--taps must be >= 256");
@@ -490,8 +509,12 @@ fn run_model(
         title = format!("{title} | Notch: {}", notch_mode.as_str());
     }
 
+    let (base_ctrl, reg_lines) = regularized_ctrl(model, args);
+    for line in reg_lines {
+        println!("{line}");
+    }
     let active_ctrl = apply_notch_mode(
-        &model.ctrl_pts,
+        &base_ctrl,
         notch_mode,
         model.safe_cap_db,
         model.notch_range_hz,
@@ -768,8 +791,12 @@ fn run_audio_wav_mode(
                 None => model.gauss_apodize,
             };
             let notch_mode = notch_mode(args);
+            let (base_ctrl, reg_lines) = regularized_ctrl(model, args);
+            for line in reg_lines {
+                println!("{line}");
+            }
             let active_ctrl = apply_notch_mode(
-                &model.ctrl_pts,
+                &base_ctrl,
                 notch_mode,
                 model.safe_cap_db,
                 model.notch_range_hz,
@@ -873,6 +900,101 @@ fn run_audio_wav_mode(
 }
 
 /// `--apodize` / `--no-apodize` as a tri-state over the model's own default.
+/// What `--regularize` asked for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RegularizeArg {
+    /// Write the curve the reference program writes. The default, and the parity-pinned path.
+    Off,
+    /// Set the knee from the curve's own deviation.
+    Auto,
+    /// Set the knee directly, in dB of deviation.
+    Fixed(f64),
+}
+
+/// Parse `--regularize`, accepting the three documented forms and nothing else.
+///
+/// A value that parses as a number but is not finite (`inf`, `NaN`) is rejected rather than
+/// carried into the DSP: `λ = NaN` would quietly regularize nothing and print a `NaN` knee, which
+/// is worse than an error message.
+fn regularize_arg(raw: &str) -> Result<RegularizeArg, String> {
+    let text = raw.trim();
+    match text.to_ascii_lowercase().as_str() {
+        "" | "off" | "none" => Ok(RegularizeArg::Off),
+        "auto" => Ok(RegularizeArg::Auto),
+        _ => match text.parse::<f64>() {
+            Ok(v) if v.is_finite() => Ok(RegularizeArg::Fixed(v)),
+            _ => Err(format!(
+                "argument --regularize: expected 'off', 'auto', or a number in dB (got '{raw}')"
+            )),
+        },
+    }
+}
+
+/// The control curve to build the filter from, and the lines describing what regularization did
+/// to it.
+///
+/// With `--regularize off` this hands back the model's own knots, untouched — the same `Vec` the
+/// reference program derives, which is why parity is unaffected by the flag existing. Anything
+/// else goes through [`Model::regularize`], and the report says which path it took and how far
+/// the knots moved, because "it regularized something" is not a reviewable claim.
+fn regularized_ctrl(model: &Model, args: &Args) -> (Vec<(f64, f64)>, Vec<String>) {
+    // Validated in the argument phase, where a bad value becomes a usage error. `Off` is the
+    // fallback rather than a panic so this function stays total.
+    let arg = regularize_arg(&args.regularize).unwrap_or(RegularizeArg::Off);
+    if arg == RegularizeArg::Off {
+        return (model.ctrl_pts.clone(), Vec::new());
+    }
+    let f: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
+    let g: Vec<f64> = model.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+    let policy = match arg {
+        RegularizeArg::Auto => hypreq::fit::Policy::auto(&f, &g),
+        RegularizeArg::Fixed(knee) => hypreq::fit::Policy::fixed(knee),
+        RegularizeArg::Off => return (model.ctrl_pts.clone(), Vec::new()),
+    };
+    let done = model.regularize(&policy);
+    let mut lines = vec![format!(
+        "=== Regularization (knee {:.2} dB of deviation, {}) ===",
+        policy.lambda_db,
+        done.describe()
+    )];
+    if done.curve().is_empty() {
+        lines.push("  Curve           : unchanged".to_string());
+        return (model.ctrl_pts.clone(), lines);
+    }
+    let curve = done.curve().to_vec();
+    let plain_f: Vec<f64> = model.ctrl_pts.iter().map(|&(x, _)| x).collect();
+    let plain_g: Vec<f64> = model.ctrl_pts.iter().map(|&(_, y)| y).collect();
+
+    let mut worst_db = 0.0f64;
+    let mut worst_hz = 0.0f64;
+    let mut moved = 0usize;
+    let (mut was_at_worst, mut now_at_worst) = (0.0f64, 0.0f64);
+    for &(hz, gain) in &curve {
+        // Evaluating the plain curve at the regularized knot's frequency: the two curves share
+        // frequencies on both paths (knots, or the measurement grid the knots were derived on),
+        // and a PCHIP passes through its own nodes, so this reads the exact old value.
+        let plain = hypreq::pchip::pchip_eval1(&plain_f, &plain_g, hz);
+        let delta = gain - plain;
+        if delta.abs() > worst_db.abs() {
+            worst_db = delta;
+            worst_hz = hz;
+            was_at_worst = plain;
+            now_at_worst = gain;
+        }
+        if delta.abs() >= 0.005 {
+            moved += 1;
+        }
+    }
+    lines.push(format!(
+        "  Knots moved     : {moved} of {} (largest {worst_db:+.2} dB @ {worst_hz:.0} Hz)",
+        curve.len()
+    ));
+    lines.push(format!(
+        "  Extreme shifted : {was_at_worst:+.2} dB -> {now_at_worst:+.2} dB at that knot"
+    ));
+    (curve, lines)
+}
+
 /// Print what a correction demands of some content. Reached only behind `--assess`.
 ///
 /// The ceiling quoted is the limiter's, because that is the order the audio is processed
@@ -1222,6 +1344,81 @@ mod tests {
         );
         assert_eq!(target, shown, "the line names the file that was written");
         assert_eq!(shown.file_name().unwrap(), hypreq::model::DEFAULT_DATA_FILE);
+    }
+
+    /// `--regularize` takes a word or a number, so clap cannot check it and this must.
+    #[test]
+    fn regularize_accepts_the_three_forms_and_rejects_the_rest() {
+        assert_eq!(regularize_arg("off").unwrap(), RegularizeArg::Off);
+        assert_eq!(regularize_arg("OFF").unwrap(), RegularizeArg::Off);
+        assert_eq!(regularize_arg("  auto ").unwrap(), RegularizeArg::Auto);
+        assert_eq!(regularize_arg("6").unwrap(), RegularizeArg::Fixed(6.0));
+        assert_eq!(
+            regularize_arg("-2.5").unwrap(),
+            RegularizeArg::Fixed(-2.5),
+            "a leading dash is a value here, not a flag"
+        );
+        // The point of the check: a number that is not a number, and a number that is not a
+        // finite one, both become usage errors rather than a silent no-op.
+        for bad in ["yes", "5dB", "autoo", "inf", "NaN", "1e999"] {
+            assert!(
+                regularize_arg(bad).is_err(),
+                "'{bad}' should not parse as a knee"
+            );
+            assert!(
+                regularize_arg(bad)
+                    .err()
+                    .unwrap_or_default()
+                    .contains("--regularize"),
+                "the message must name the option"
+            );
+        }
+    }
+
+    /// With the flag off, the curve handed to the filter builder is the model's own — the same
+    /// bytes the reference program derives. Nothing else in this PR is allowed to move that.
+    #[test]
+    fn regularize_off_hands_back_the_models_own_curve() {
+        let db = hypreq::model::load_measurement_database(
+            Path::new("measurements.json"),
+            Path::new("models"),
+        )
+        .expect("shipped database loads");
+        let model = db
+            .models
+            .iter()
+            .find(|m| m.key == "dt770_80")
+            .expect("dt770_80 ships");
+        let mut args = Args::try_parse_from(["hypreq", "-H", "dt770_80"]).expect("parses");
+        let (curve, lines) = regularized_ctrl(model, &args);
+        assert_eq!(curve, model.ctrl_pts, "off must not touch the curve");
+        assert!(lines.is_empty(), "off must not print anything: {lines:?}");
+
+        // A knee high enough to trust everything must also leave the curve alone, exactly.
+        args.regularize = "1000".to_string();
+        let (curve, lines) = regularized_ctrl(model, &args);
+        assert_eq!(
+            curve, model.ctrl_pts,
+            "lambda far above every deviation must be a no-op"
+        );
+        assert!(lines.iter().any(|l| l.contains("0 of")), "{lines:?}");
+
+        // A knee low enough to distrust everything walks the curve to 0 dB, and says so.
+        args.regularize = "-40".to_string();
+        let (curve, lines) = regularized_ctrl(model, &args);
+        assert!(
+            curve.iter().all(|&(_, g)| g.abs() < 0.01),
+            "a hopeless knee should bypass every band: {:?}",
+            &curve[..3]
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Regularization (knee")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Knots moved")),
+            "the report must quantify the change: {lines:?}"
+        );
     }
 
     /// `--assess` is opt-in, and its budget takes a leading dash like every other dB option.

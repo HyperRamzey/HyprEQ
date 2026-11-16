@@ -259,8 +259,12 @@ pub fn synthesize_minimum_phase_ir(
 
     let windowed_floor_dbfs = db_floor(&ir, 100);
 
-    let energy_in: f64 = ir.iter().map(|v| v * v).sum();
-    let energy_full: f64 = ir_full.iter().map(|v| v * v).sum();
+    // Compensated, and it is not decoration: the ratio is printed with twelve significant
+    // digits, and on the ft1pro curve at the default tap count the true value is
+    // 99.9999999999 while a left-to-right walk reports exactly 100.0000000000 — a
+    // one-sided difference in the printed report, on identical filters.
+    let energy_in = crate::accum::sum_of_squares(&ir);
+    let energy_full = crate::accum::sum_of_squares(&ir_full);
     let energy_pct = energy_in / energy_full * 100.0;
 
     Ok(IrResult {

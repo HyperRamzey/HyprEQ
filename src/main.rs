@@ -235,10 +235,11 @@ fn py_bool(b: bool) -> &'static str {
 
 fn run(args: Args) -> Result<(), Error> {
     if args.upgrade_json {
-        let path = upgrade_measurements_json(&args.data_file).map_err(|e| Error::msg(e.0))?;
+        let (target, shown) = upgrade_target(&args);
+        upgrade_measurements_json(&target).map_err(|e| Error::msg(e.0))?;
         println!(
             "Upgraded '{}' with plot_meta and callout annotations.",
-            path.display()
+            shown.display()
         );
         return Ok(());
     }
@@ -894,6 +895,26 @@ pub fn default_out_path(input: &str, ir_tag: &str, limiter: Option<&str>) -> Str
         .to_string()
 }
 
+/// Which file `--upgrade-json` rewrites, and the path the line above prints for it.
+///
+/// The reference's `--data-file` default is an absolute path beside the script, so an
+/// untouched default is what its message shows as absolute; an explicit `--data-file` is
+/// echoed exactly as it was typed. Reproducing that split is the difference between two
+/// byte-identical reports and two that differ in one path.
+fn upgrade_target(args: &Args) -> (PathBuf, PathBuf) {
+    let (data_file, _) = database_paths(args);
+    if data_file == Path::new(hypreq::model::DEFAULT_DATA_FILE) {
+        // Never found anywhere: report the path the user would have to act on, in the
+        // form that says where that is.
+        let abs = std::path::absolute(&data_file).unwrap_or(data_file.clone());
+        (abs.clone(), abs)
+    } else {
+        // Either an explicit argument, verbatim, or the executable's own directory —
+        // which is already absolute.
+        (data_file.clone(), data_file)
+    }
+}
+
 /// Where the database and the extra-model directory are actually looked for.
 ///
 /// Both defaults are relative, so they resolve against the working directory. That is right
@@ -1080,6 +1101,28 @@ mod tests {
         let a = argv(&["--data-file", "custom/db.json"]);
         let (data, _) = database_paths(&a);
         assert_eq!(data, Path::new("custom/db.json"));
+    }
+
+    #[test]
+    fn the_upgrade_line_names_the_path_the_reference_would_name() {
+        // An explicit --data-file is echoed exactly as typed, the way the reference
+        // formats its own message.
+        let a = argv(&["--data-file", "custom/db.json"]);
+        let (target, shown) = upgrade_target(&a);
+        assert_eq!(target, Path::new("custom/db.json"));
+        assert_eq!(shown, Path::new("custom/db.json"));
+
+        // The untouched default is reported as an absolute path, because that is the form
+        // the reference's default has and the form its message prints.
+        let a = argv(&[]);
+        let (target, shown) = upgrade_target(&a);
+        assert!(
+            shown.is_absolute(),
+            "the default must be reported absolute, got {}",
+            shown.display()
+        );
+        assert_eq!(target, shown, "the line names the file that was written");
+        assert_eq!(shown.file_name().unwrap(), hypreq::model::DEFAULT_DATA_FILE);
     }
 
     #[test]

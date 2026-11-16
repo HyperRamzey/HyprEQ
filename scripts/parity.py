@@ -10,9 +10,12 @@ Each scenario runs in its own scratch directory on both sides, from the same
 * audit CSVs, byte-for-byte;
 * usage errors: message and exit code.
 
-The verification PNGs are deliberately *not* compared: matplotlib and `plotters`
-are different renderers, so the PNG check is "the Rust side wrote a decodable PNG
-of the expected size", and the geometry itself is covered by unit tests.
+The verification PNGs are deliberately *not* compared pixel to pixel: matplotlib and
+`plotters` are different renderers. What is checked instead is that the Rust side wrote
+a PNG of the expected size **with real plotted ink inside each of the four panels** —
+a figure whose panels are empty (or hold nothing but their own frames) fails. Panel
+ink is counted strictly inside each panel, inset past the frame and the tick marks, so
+what is counted is data. The exact geometry is covered by the crate's own unit tests.
 
 Exit code is 0 only when every comparison passed.
 """
@@ -29,12 +32,22 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import soundfile as sf
 
 REPO = Path(__file__).resolve().parent.parent
 SAMPLE_TOL = 4e-16  # relative to the payload peak; ~2 ULP of f64
+# The convolvers are built through a minimum-phase synthesis on a transform of up to
+# 2**19 bins, and NumPy's pocketfft and `rustfft` do not agree to the last bit at that
+# size: the measured worst case over the whole sweep is 1.4e-15 relative, spread over
+# essentially every sample, which is the signature of two transform libraries rather
+# than of two different filters. A real divergence — wrong taper, wrong FFT size, a
+# notch applied to the wrong band — moves samples by 1e-3 and more. So the bound on a
+# float payload is 1e-13 relative: about twenty times the observed library noise, and
+# ten million times below anything that would count as a different filter.
+FFT_TOL = 1e-13
 
 
 # --------------------------------------------------------------------------- #
@@ -64,11 +77,12 @@ def norm(text: str, workdir: Path) -> str:
     return text.replace("\\", "/")
 
 
-def read_wav_header(path: Path) -> dict:
+def read_wav_header(path: Path) -> dict[str, Any]:
     data = path.read_bytes()
     if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
         raise ValueError(f"{path}: not a RIFF/WAVE file")
-    off, chunks, fmt = 12, [], {}
+    off, chunks = 12, []
+    fmt: dict[str, Any] = {}
     while off + 8 <= len(data):
         cid = data[off : off + 4].decode("latin1")
         size = struct.unpack("<I", data[off + 4 : off + 8])[0]
@@ -101,7 +115,7 @@ def cmp_wav(py: Path, rs: Path) -> Check:
     try:
         a, _ = sf.read(py, always_2d=True, dtype="float64")
         b, _ = sf.read(rs, always_2d=True, dtype="float64")
-    except Exception as exc:  # soundfile raises several flavours depending on the file
+    except Exception as exc:  # noqa: BLE001 - soundfile raises several flavours depending on the file
         return Check(py.name, False, f"cannot decode payload: {exc}")
     if a.shape != b.shape:
         return Check(py.name, False, f"shape {a.shape} != {b.shape}")
@@ -126,15 +140,21 @@ def cmp_wav(py: Path, rs: Path) -> Check:
             )
         return Check(py.name, False, f"PCM max delta {delta / lsb:.2f} LSB")
 
+    # A float container. The DSP is f64 on both sides, but a 32-bit file quantises the
+    # result to f32, and asking two f64 pipelines that rounded identically to agree to
+    # 4e-16 relative would be asking them to agree about bits the container threw away.
+    # So the tolerance is the container's own resolution, not the math's.
     peak = float(np.abs(a).max())
     delta = float(np.abs(a - b).max())
     rel = delta / peak if peak else delta
-    ok = rel <= SAMPLE_TOL
+    # f32 has 24 bits of significand; f64 keeps the tolerance the pipeline itself needs.
+    tol = max(SAMPLE_TOL, 2.0 ** -23) if hp["bits"] == 32 else FFT_TOL
+    ok = rel <= tol
     return Check(
         py.name,
         ok,
-        f"{a.shape[0]} frames x {a.shape[1]}ch, peak {peak:.9f}, "
-        f"max delta {delta:.3e} ({rel:.2e} rel)",
+        f"{a.shape[0]} frames x {a.shape[1]}ch {hp['bits']}-bit float, peak {peak:.9f}, "
+        f"max delta {delta:.3e} ({rel:.2e} rel, tol {tol:.1e})",
     )
 
 
@@ -170,7 +190,22 @@ def cmp_json(py: Path, rs: Path) -> Check:
     return Check(py.name, False, f"keys differ: {bad}")
 
 
+# Mirrors `panel_rects()` in src/plot.rs. If the Rust layout moves, the size check below
+# fails first, which is the signal to update these numbers rather than a mystery.
+PANELS = [
+    ("level", 127, 129, 1878, 569),
+    ("error/target", 127, 736, 1878, 1176),
+    ("impulse", 127, 1343, 909, 1673),
+    ("phase", 941, 1343, 1723, 1673),
+]
+# Inset past the frame line and the tick marks, so what is counted is data.
+INK_INSET = 8
+# A flat 0 dB line already covers the panel width; anything under this is an empty panel.
+MIN_INK = 150
+
+
 def png_check(path: Path, want_wh: tuple[int, int] | None) -> Check:
+    """Decodable PNG of the right size, with plotted ink in all four panels."""
     if not path.exists():
         return Check(path.name, False, "not written")
     data = path.read_bytes()
@@ -179,7 +214,36 @@ def png_check(path: Path, want_wh: tuple[int, int] | None) -> Check:
     w, h = struct.unpack(">II", data[16:24])
     if want_wh and (w, h) != want_wh:
         return Check(path.name, False, f"{w}x{h} != {want_wh[0]}x{want_wh[1]}")
-    return Check(path.name, True, f"{w}x{h} PNG, {len(data)} bytes")
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError as exc:
+        return Check(path.name, False, f"cannot verify plotted ink without Pillow: {exc}")
+    try:
+        img = np.asarray(Image.open(path).convert("RGB")).astype(np.int16)
+    except Exception as exc:  # noqa: BLE001 - any decode failure is a bad PNG for our purposes
+        return Check(path.name, False, f"PNG will not decode: {exc}")
+    if img.shape[1] != w or img.shape[0] != h:
+        return Check(path.name, False, f"decoded {img.shape[1]}x{img.shape[0]} != {w}x{h}")
+
+    empty = []
+    counts = []
+    for name, x0, y0, x1, y1 in PANELS:
+        x0, y0 = x0 + INK_INSET, y0 + INK_INSET
+        x1, y1 = x1 - INK_INSET, y1 - INK_INSET
+        if x1 <= x0 or y1 <= y0:
+            return Check(path.name, False, f"panel {name} is outside the {w}x{h} figure")
+        block = img[y0:y1, x0:x1]
+        # The interior's own top-left pixel is background; ink is anything that differs
+        # from it by more than the encoder's rounding on a single channel.
+        bg = block[0, 0]
+        ink = int((np.abs(block - bg).max(axis=2) > 24).sum())
+        counts.append(f"{name} {ink}")
+        if ink < MIN_INK:
+            empty.append(f"{name} ({ink} ink px)")
+    if empty:
+        return Check(path.name, False, f"no plotted ink in: {', '.join(empty)}")
+    return Check(path.name, True, f"{w}x{h} PNG, {len(data)} bytes, ink px: " + ", ".join(counts))
 
 
 # --------------------------------------------------------------------------- #
@@ -201,7 +265,12 @@ def make_input_wav(path: Path, fs: int = 48000, seconds: float = 3.0) -> None:
     for start in (0, int(0.9 * fs), int(1.7 * fs)):
         ln = min(900, n - start)
         seg = np.arange(ln) - ln / 2
-        sinc = np.where(seg == 0.0, 0.84, np.sin(2 * np.pi * 0.42 * seg) / (np.pi * seg))
+        # sin(x)/x with the centre written in rather than divided by: np.where evaluates
+        # both branches, so the naive form raises a 0/0 warning on every run.
+        sinc = np.full(ln, 0.84)
+        np.divide(
+            np.sin(2 * np.pi * 0.42 * seg), np.pi * seg, out=sinc, where=seg != 0.0
+        )
         kick[start : start + ln] += 1.7 * sinc * np.hanning(ln)
     left = bed + kick
     right = 0.92 * np.roll(bed, 37) + np.roll(kick, 37)
@@ -212,12 +281,25 @@ def make_input_wav(path: Path, fs: int = 48000, seconds: float = 3.0) -> None:
 
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, timeout=1800, env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "MPLBACKEND": "Agg", "LC_ALL": "C"}
+        cmd,
+        check=False,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(Path.home()),
+            "MPLBACKEND": "Agg",
+            "LC_ALL": "C",
+        },
     )
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(
+        description="Parity harness: Rust hypreq against the Python reference in hypreq.py"
+    )
     ap.add_argument(
         "--base",
         default=None,
@@ -263,12 +345,16 @@ def main() -> int:
             ],
             png=["jbl770nc_final_verification.png"],
         ),
+        # Note the two naming rules, which are not the same and are both checked here:
+        # convolvers are written under the model's `file_prefix` ("dt770_80ohm"), the audit
+        # CSV under its key ("dt770_80"). Getting one of them wrong looks like a missing
+        # artefact on both sides, so it is spelled out.
         Scenario(
             "model-all-csv",
             ["--headphone", "all", "--export-csv", "--no-plot"],
             artifacts=[
                 "jbl770nc_f64_48k.wav",
-                "dt770_80_f64_48k.wav",
+                "dt770_80ohm_f64_48k.wav",
                 "ft1pro_f64_48k.wav",
                 "jbl770nc_audit_data.csv",
                 "dt770_80_audit_data.csv",
@@ -278,12 +364,12 @@ def main() -> int:
         Scenario(
             "notch-original",
             ["-H", "dt770_80", "--notch-mode", "original", "--taps", "8192", "--no-plot"],
-            artifacts=["dt770_80_f64_48k.wav"],
+            artifacts=["dt770_80ohm_f64_48k.wav"],
         ),
         Scenario(
             "notch-zero",
             ["-H", "dt770_80", "--notch-mode", "zero", "--taps", "8192", "--export-csv", "--no-plot"],
-            artifacts=["dt770_80_f64_48k.wav", "dt770_80_audit_data.csv"],
+            artifacts=["dt770_80ohm_f64_48k.wav", "dt770_80_audit_data.csv"],
         ),
         Scenario(
             "apodize",
@@ -306,7 +392,7 @@ def main() -> int:
                 "-H", "dt770", "--headroom-db", "-4.25", "--tp-ratio", "x32",
                 "--tp-ceiling", "-1.0", "--taps", "4096", "--no-plot",
             ],
-            artifacts=["dt770_80_f64_48k.wav"],
+            artifacts=["dt770_80ohm_f64_48k.wav"],
         ),
         Scenario(
             "audio-eq-pcm24",
@@ -319,7 +405,7 @@ def main() -> int:
                 "-H", "dt770_80ohm", "--input", "input_audio.wav",
                 "--out-bits", "32", "--trim-tail", "--taps", "8192",
             ],
-            artifacts=["input_audio_dt770_80_tp_x16.wav"],
+            artifacts=["input_audio_dt770_80ohm_tp_x16.wav"],
         ),
         Scenario(
             "audio-bypass-pcm16",
@@ -466,7 +552,10 @@ def main() -> int:
     total = sum(len(c) for _, c in rows)
     print(f"{total - failures}/{total} checks passed across {len(rows)} scenarios")
     if not args.keep:
-        shutil.rmtree(base, ignore_errors=True)
+        try:
+            shutil.rmtree(base, ignore_errors=True)
+        except OSError as exc:  # the harness's own scratch tree, never operator data
+            print(f"warning: left {base} behind: {exc}", file=sys.stderr)
     else:
         print(f"scratch tree kept in {base}")
     return 1 if failures else 0

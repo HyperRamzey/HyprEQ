@@ -70,6 +70,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(clippy::all)]
 
+pub mod accum;
 pub mod convolve;
 pub mod dither;
 pub mod error;

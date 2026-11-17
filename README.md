@@ -111,7 +111,7 @@ Cepstral folding zeroes the anti-causal half and doubles the causal components:
 
 The minimum-phase impulse response is reconstructed via forward FFT, complex exponential, and inverse FFT:
 
-$$h[n] = \operatorname{Re}\left( \mathcal{F}^{-1}\left( \exp\left( \mathcal{F}\left( c_{\mathrm{min}}[n] \right) \right) \right) \right)$$
+$$h[n] = \mathrm{Re}\left( \mathcal{F}^{-1}\left( \exp\left( \mathcal{F}\left( c_{\mathrm{min}}[n] \right) \right) \right) \right)$$
 
 This reconstruction guarantees:
 - **Causal Compact Support:** The impulse peak is anchored precisely at $t = 0.00\text{ ms}$, packing maximum energy into the earliest samples ($>99.99999999\%$ causal energy ratio).

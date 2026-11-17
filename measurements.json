@@ -14,11 +14,16 @@
       [12013.6, -4.26], [13537.2, -6.46], [15103.1, -8.08], [16518.0, -10.07], [18065.5, -13.91], [19955.5, -22.92]
     ]
   },
+  "target_fixtures": {
+    "harman_2018": "gras_45ca"
+  },
   "models": {
     "jbl770nc": {
-      "name": "JBL Live 770NC (Passive / Wired Mode)",
+      "name": "JBL Live 770NC (Passive / Wired Mode) [Clone GRAS 43AG]",
       "file_prefix": "jbl770nc",
       "rig_info": "Filk (Clone GRAS 43AG / KB006x Pinna + IEC 60318-4 711 Coupler), via AutoEq",
+      "fixture": "gras_43ag_clone",
+      "fixture_conflict_ok": "No published GRAS 43AG equivalent of this target exists to switch to, so this AutoEq-derived 43AG capture is equalised to the Harman 2018 target as the project shipped it. Recorded here so the inherited pairing is a decision on file rather than an accident nobody noticed.",
       "target": "harman_2018",
       "harm_offset": -2.45,
       "gauss_apodize": false,
@@ -73,9 +78,11 @@
       ]
     },
     "dt770_80": {
-      "name": "Beyerdynamic DT 770 Pro (80 Ω)",
+      "name": "Beyerdynamic DT 770 Pro (80 Ω) [GRAS 43AG]",
       "file_prefix": "dt770_80ohm",
       "rig_info": "Crinacle (Genuine GRAS 43AG-7: RA0402 711 Coupler + KB500X Pinna), via AutoEq",
+      "fixture": "gras_43ag",
+      "fixture_conflict_ok": "No published GRAS 43AG equivalent of this target exists to switch to, so this AutoEq-derived 43AG capture is equalised to the Harman 2018 target as the project shipped it. Recorded here so the inherited pairing is a decision on file rather than an accident nobody noticed.",
       "target": "harman_2018",
       "harm_offset": 0.00,
       "gauss_apodize": true,
@@ -158,9 +165,11 @@
       ]
     },
     "ft1pro": {
-      "name": "FiiO FT1 Pro (Open-Back Planar Magnetic)",
+      "name": "FiiO FT1 Pro (Open-Back Planar Magnetic) [GRAS 43AG]",
       "file_prefix": "ft1pro",
       "rig_info": "oratory1990 / Kuulokenurkka (GRAS 43AG / KB50xx Anthropometric Pinna + IEC 711), via AutoEq",
+      "fixture": "gras_43ag",
+      "fixture_conflict_ok": "No published GRAS 43AG equivalent of this target exists to switch to, so this AutoEq-derived 43AG capture is equalised to the Harman 2018 target as the project shipped it. Recorded here so the inherited pairing is a decision on file rather than an accident nobody noticed.",
       "target": "harman_2018",
       "harm_offset": 0.00,
       "gauss_apodize": true,

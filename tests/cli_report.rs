@@ -811,3 +811,313 @@ fn headroom_does_not_move_what_the_verifier_says_about_the_design() {
         "the design shortfall followed the headroom knob:\n{short_a}\n{short_b}"
     );
 }
+
+/// A database holding the three pairings that must come out differently.
+///
+/// The shipped database cannot show any of this. Its models record a fixture that conflicts with the
+/// Harman target's recorded fixture, and each carries a written reason for shipping that way, so
+/// every shipped run walks straight past the refusal. Testing the refusal means owning a database.
+fn fixture_db(dir: &Path) -> PathBuf {
+    let models = [
+        // A 5128 measurement against a target defined on a 45CA: the pairing the literature names as
+        // the mistake, and the one the refusal exists for.
+        (
+            "conflict",
+            "B&K Rig Set [B&K 5128]",
+            "bk5128",
+            "harman_2018",
+        ),
+        // A genuine 43AG capture against a target recorded on a 43AG clone: two units of one fixture
+        // design, which is not the difference being guarded.
+        (
+            "adjacent",
+            "Clone Set [GRAS 43AG]",
+            "gras_43ag",
+            "clone_target",
+        ),
+        // A measurement whose target records no fixture at all: unknown, so nothing to refuse.
+        (
+            "unrecorded",
+            "Unrecorded Set [GRAS 43AG]",
+            "gras_43ag",
+            "unrecorded_target",
+        ),
+    ];
+    write_fixture_db(dir, "fixtures.json", &models)
+}
+
+/// The same shape with only an unparseable fixture entry in it.
+///
+/// In a file of its own because a bad fixture name kills the whole load — which is what the test
+/// below asserts, and which would otherwise make every pairing test in this file fail for a reason
+/// unrelated to what it is checking.
+fn broken_fixture_db(dir: &Path) -> PathBuf {
+    write_fixture_db(
+        dir,
+        "broken.json",
+        &[("broken", "Broken Set", "sm7422", "harman_2018")],
+    )
+}
+
+fn write_fixture_db(dir: &Path, name: &str, models: &[(&str, &str, &str, &str)]) -> PathBuf {
+    let raw: Vec<String> = (0..500)
+        .map(|i| format!("[{:.1},0.0]", 20.0 + 20.0 * i as f64))
+        .collect();
+    let raw = raw.join(",");
+    let entries: Vec<String> = models
+        .iter()
+        .map(|(key, name, fixture, target)| {
+            format!(
+                r#""{key}": {{"name":"{name}","fixture":"{fixture}","target":"{target}","raw_pts":[{raw}],"ctrl_pts":[[20.0,0.0],[1000.0,0.0],[20000.0,0.0]]}}"#
+            )
+        })
+        .collect();
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{
+  "targets": {{
+    "harman_2018": [[20.0,0.0],[1000.0,0.0],[20000.0,0.0]],
+    "clone_target": [[20.0,0.0],[1000.0,0.0],[20000.0,0.0]],
+    "unrecorded_target": [[20.0,0.0],[1000.0,0.0],[20000.0,0.0]]
+  }},
+  "target_fixtures": {{ "harman_2018": "gras_45ca", "clone_target": "gras_43ag_clone" }},
+  "models": {{ {} }}
+}}"#,
+            entries.join(",")
+        ),
+    )
+    .expect("database");
+    path
+}
+
+/// Run against a database the test wrote, in a directory the test owns.
+fn run_db(dir: &Path, db: &Path, args: &[&str]) -> (Option<i32>, String, String) {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hypreq"))
+        .current_dir(dir)
+        .arg("--data-file")
+        .arg(db)
+        .arg("--models-dir")
+        .arg(dir.join("no-such-models-dir"))
+        .args(args)
+        .output()
+        .expect("the binary runs");
+    (
+        out.status.code(),
+        String::from_utf8(out.stdout).expect("stdout is utf-8"),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+#[test]
+fn a_target_defined_on_another_fixture_is_refused_naming_both() {
+    let dir = scratch("fixture-conflict");
+    let db = fixture_db(&dir);
+    let (code, _, stderr) = run_db(&dir, &db, &["-H", "conflict", "--no-plot"]);
+    assert_eq!(
+        code,
+        Some(2),
+        "a 5128 measurement EQ'd to a 45CA target ran:\n{stderr}"
+    );
+    for want in [
+        "B&K 5128",
+        "GRAS 45CA",
+        "bk5128",
+        "gras_45ca",
+        "harman_2018",
+    ] {
+        assert!(
+            stderr.contains(want),
+            "the refusal did not say {want}: {stderr}"
+        );
+    }
+    // Nothing on disk: a refusal that has already written two convolvers has taught the user
+    // nothing about the state of their directory.
+    let written = std::fs::read_dir(&dir)
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        })
+        .expect("scratch readable")
+        .filter(|e| e.file_name() != "fixtures.json")
+        .count();
+    assert_eq!(written, 0, "the refusal wrote files before refusing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn force_equalises_anyway_and_says_which_refusal_it_overrode() {
+    let dir = scratch("fixture-force");
+    let db = fixture_db(&dir);
+    let (code, stdout, stderr) = run_db(&dir, &db, &["-H", "conflict", "--no-plot", "--force"]);
+    assert_eq!(code, Some(0), "--force did not override: {stderr}");
+    assert!(
+        stdout.contains("[Note]") && stdout.contains("B&K 5128"),
+        "the run overrode the pairing without saying so:\n{stdout}"
+    );
+    assert!(
+        std::fs::read_dir(&dir).expect("scratch readable").any(|e| e
+            .map(|e| e.file_name().to_string_lossy().ends_with(".wav"))
+            .unwrap_or(false)),
+        "--force ran but produced no convolver"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn only_a_real_conflict_is_refused() {
+    let dir = scratch("fixture-allowed");
+    let db = fixture_db(&dir);
+    // Two units of one fixture design are not the difference the literature warns about...
+    let (code, _, stderr) = run_db(&dir, &db, &["-H", "adjacent", "--no-plot"]);
+    assert_eq!(
+        code,
+        Some(0),
+        "the 43AG/clone adjacency was refused: {stderr}"
+    );
+    // ...and a target that records no fixture is *unknown*, not universally compatible. Refusing on
+    // the absence of a claim would punish a database for being honest about what it does not know.
+    let (code, _, stderr) = run_db(&dir, &db, &["-H", "unrecorded", "--no-plot"]);
+    assert_eq!(
+        code,
+        Some(0),
+        "an unrecorded target fixture was refused: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_bad_fixture_name_kills_the_database_before_any_run() {
+    let dir = scratch("fixture-broken");
+    let db = broken_fixture_db(&dir);
+    for args in [
+        vec!["-H", "broken", "--no-plot"],
+        // Listing is not exempt: an unparseable fixture is a broken file, and `--list-models` is
+        // exactly how someone would discover it.
+        vec!["--list-models"],
+        // `--force` overrides a pairing decision, not a database that cannot be read.
+        vec!["-H", "broken", "--no-plot", "--force"],
+        // Nor is the refusal of some *other* model's pairing allowed to mask it.
+        vec!["-H", "conflict", "--no-plot"],
+    ] {
+        let (code, _, stderr) = run_db(&dir, &db, &args);
+        assert_eq!(
+            code,
+            Some(1),
+            "{args:?} treated a broken fixture as fine:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("sm7422") && stderr.contains("gras_45ca"),
+            "{args:?} did not report the bad fixture with its choices: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_that_applies_no_filter_has_no_pairing_to_refuse() {
+    let dir = scratch("fixture-bypass");
+    let db = fixture_db(&dir);
+    let seed = stereo_bytes("fixture-bypass-seed");
+    std::fs::write(dir.join("in.wav"), &seed).expect("fixture");
+    // --bypass-eq applies no EQ, so there is no target being equalised to and nothing to refuse.
+    let (code, _, stderr) = run_db(
+        &dir,
+        &db,
+        &["--input", "in.wav", "--bypass-eq", "--output", "out.wav"],
+    );
+    assert_eq!(code, Some(0), "a bypass run was refused: {stderr}");
+    // Naming one model touches only that model, so an allowed pairing stays allowed even though a
+    // conflicting model sits in the same file.
+    let (code, _, stderr) = run_db(
+        &dir,
+        &db,
+        &[
+            "--input",
+            "in.wav",
+            "-H",
+            "unrecorded",
+            "--output",
+            "out2.wav",
+        ],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "naming one model pulled in another's pairing: {stderr}"
+    );
+    // `-H all` with `--input` is the odd rule: the audio path takes the *first* model and prints a
+    // note about it. `conflict` is first in this file and `unrecorded` is last, so a refusal naming
+    // `conflict` proves the guard read the audio path's rule rather than the whole file.
+    let (code, _, stderr) = run_db(
+        &dir,
+        &db,
+        &["--input", "in.wav", "-H", "all", "--output", "out3.wav"],
+    );
+    assert_eq!(
+        code,
+        Some(2),
+        "the audio path's first-model rule changed:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("'conflict'") && !stderr.contains("'unrecorded'"),
+        "the guard refused on a model the run would never open: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_shipped_database_records_fixtures_and_the_pairing_it_inherited() {
+    // A content check on the shipped data, because the two facts it carries can go missing without
+    // any test failing elsewhere: dropping `target_fixtures` silently switches the whole comparison
+    // off, and dropping a model's reason would make its own run refuse.
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("measurements.json");
+    let text = std::fs::read_to_string(&data).expect("database");
+    for fixture in ["gras_43ag", "gras_43ag_clone", "gras_45ca"] {
+        assert!(
+            text.contains(fixture),
+            "no model or target records {fixture}"
+        );
+    }
+    assert!(
+        text.contains("\"target_fixtures\"") && text.contains("\"harman_2018\": \"gras_45ca\""),
+        "the target's fixture went unrecorded, which turns the refusal off quietly"
+    );
+    let stdout = run("shipped-fixture-list", &["--list-models"]);
+    assert_eq!(
+        stdout.matches("[GRAS 43AG]").count(),
+        2,
+        "two models are genuine 43AG captures and should say so:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("[Clone GRAS 43AG]"),
+        "the clone should not be listed as genuine:\n{stdout}"
+    );
+    let (code, stdout, stderr) = {
+        let dir = scratch("shipped-run");
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_hypreq"))
+            .current_dir(&dir)
+            .arg("--data-file")
+            .arg(&data)
+            .args(["--no-plot"])
+            .output()
+            .expect("the binary runs");
+        let r = (
+            out.status.code(),
+            String::from_utf8(out.stdout).expect("stdout"),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        r
+    };
+    assert_eq!(
+        code,
+        Some(0),
+        "the shipped pairing stopped running:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("[Note]"),
+        "a shipped pairing printed a refusal it is not supposed to have:\n{stdout}"
+    );
+}

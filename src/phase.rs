@@ -43,11 +43,6 @@ use crate::fft::{irfft, rfft, rfftfreq};
 
 /// The band edge below which group delay is flattened, in Hz.
 ///
-/// A configuration default, chosen to sit inside the bass region where a headphone correction's
-/// minimum-phase group delay is largest and where the shipped tools in this area also work; it is not
-/// a value any publication prescribes.
-pub const DEFAULT_CROSSOVER_HZ: f64 = 200.0;
-
 /// How far above the crossover the weight is tapered away, as a ratio.
 ///
 /// The taper exists because a hard edge in the weight is a discontinuity in phase derivative, which
@@ -78,12 +73,11 @@ const BAND_FLOOR_HZ: f64 = 10.0;
 /// The default is set at the published audibility scale, not at what the band could absorb. Liski,
 /// Mäkivirta & Välimäki (2021) put the threshold near 0.56 ms, and at that budget the phase the stage
 /// moves is small enough that the re-ringing it creates stays inside a few milliseconds of kernel. A
-/// A 5 ms default was tried first: on the shipped DT 770 correction it asked for 215 ms of latency, because
+/// 5 ms budget was tried first: on the shipped DT 770 correction it asked for 215 ms of latency, because
 /// a 5 ms delay change at 10 Hz is 6 radians of phase, and 6 radians at 10 Hz is most of a period of
 /// that component being relocated. That is the trade in its purest form — flattening a bass band whose
-/// minimum-phase delay spans seconds is not a free operation at any budget — so the budget is a CLI
-/// option (`--experimental-phase-budget`), and the default spends the least that still does something
-/// measurable.
+/// minimum-phase delay spans seconds is not a free operation at any budget — so the budget is kept as a
+/// conservative constant, spending the least that still does something measurable.
 pub const DEFAULT_GD_BUDGET_MS: f64 = 0.56;
 
 /// What the stage did, in the units a user can act on.
@@ -143,8 +137,6 @@ pub struct Adjustment {
     pub budget_held: bool,
     /// Largest magnitude deviation introduced by truncating the reshaped filter, dB.
     pub max_mag_error_db: f64,
-    /// Share of the reshaped filter's energy that survives truncation, %.
-    pub energy_pct: f64,
     /// Floor over the tail of the delivered filter, dBFS.
     pub floor_dbfs: f64,
 }
@@ -244,13 +236,22 @@ fn group_delay_ms(phase: &[f64], freq: &[f64]) -> Vec<f64> {
 ///
 /// Prefix sums over the array doubled on itself, so every circular window is one subtraction. A plain
 /// scan would be `O(n·w)` on a 65 536-point grid.
-fn best_window(x: &[f64], w: usize) -> usize {
+#[must_use]
+pub fn best_window(x: &[f64], w: usize) -> usize {
     let n = x.len();
     if w == 0 || w >= n {
         return 0;
     }
     let doubled: Vec<f64> = x.iter().chain(x.iter()).map(|v| v * v).collect();
     let prefix = crate::accum::prefix_sums(&doubled);
+    best_window_prefix(&prefix, n, w)
+}
+
+/// Helper that evaluates `best_window` directly on precomputed prefix sums of `doubled`.
+fn best_window_prefix(prefix: &[f64], n: usize, w: usize) -> usize {
+    if w == 0 || w >= n {
+        return 0;
+    }
     let mut best = 0usize;
     let mut best_sum = f64::NEG_INFINITY;
     for s in 0..n {
@@ -263,39 +264,137 @@ fn best_window(x: &[f64], w: usize) -> usize {
     best
 }
 
-/// Index of the largest-magnitude sample.
-fn peak_index(x: &[f64]) -> usize {
-    x.iter().enumerate().fold(
-        0usize,
-        |best, (i, v)| if v.abs() > x[best].abs() { i } else { best },
-    )
+/// Helper for stereo alignment: selects circular start index `s` maximizing joint normalized energy.
+fn best_window_joint(
+    prefix_l: &[f64],
+    prefix_r: &[f64],
+    energy_l: f64,
+    energy_r: f64,
+    n: usize,
+    w: usize,
+) -> usize {
+    if w == 0 || w >= n {
+        return 0;
+    }
+    let el = if energy_l > 0.0 { energy_l } else { 1.0 };
+    let er = if energy_r > 0.0 { energy_r } else { 1.0 };
+    let mut best = 0usize;
+    let mut best_score = f64::NEG_INFINITY;
+    for s in 0..n {
+        let score = (prefix_l[s + w] - prefix_l[s]) / el + (prefix_r[s + w] - prefix_r[s]) / er;
+        if score > best_score {
+            best_score = score;
+            best = s;
+        }
+    }
+    best
 }
 
-/// Flatten the group delay of `ir` between 10 Hz and `crossover_hz`, changing nothing
-/// above `crossover_hz · TAPER_RATIO`.
-///
-/// Returns `None` when the request cannot mean anything: no taps, a zero rate, a crossover that is
-/// not finite or not above the band floor, or a crossover at or past Nyquist.
-/// `budget_ms` bounds how far group delay may move at any single frequency; see
-/// [`DEFAULT_GD_BUDGET_MS`] for why an unbounded version of this operation is not implementable.
-#[must_use]
-pub fn linearize_band(ir: &[f64], fs: u32, crossover_hz: f64) -> Option<Adjustment> {
-    linearize_band_with_budget(ir, fs, crossover_hz, DEFAULT_GD_BUDGET_MS)
+/// Checks whether a circular window `[s..s+w]` clears the -130 dBFS tail floor and retained energy bound.
+/// Non-allocating and checks energy first to eliminate unnecessary dB floor evaluations.
+fn window_passes(
+    full: &[f64],
+    prefix: &[f64],
+    n: usize,
+    energy: f64,
+    budget_energy: f64,
+    s: usize,
+    w: usize,
+) -> (bool, bool, f64) {
+    let kept = prefix[s + w] - prefix[s];
+    if energy - kept > budget_energy {
+        return (false, false, kept);
+    }
+    let take = w.min(100);
+    let mut peak = 0.0f64;
+    for i in 0..take {
+        let v = full[(s + w - 1 - i) % n].abs();
+        if v > peak {
+            peak = v;
+        }
+    }
+    let floor_dbfs = 20.0 * (peak + 1e-25).log10();
+    (floor_dbfs <= -130.0, true, kept)
 }
 
-/// See [`linearize_band`].
-#[must_use]
-pub fn linearize_band_with_budget(
+/// Single-channel smallest shift search.
+fn smallest_shift(
+    full: &[f64],
+    prefix: &[f64],
+    n: usize,
+    energy: f64,
+    budget_energy: f64,
+    max_shift: usize,
+    w: usize,
+) -> Option<(usize, f64)> {
+    let (floor_ok, energy_ok, kept) = window_passes(full, prefix, n, energy, budget_energy, 0, w);
+    if floor_ok && energy_ok {
+        return Some((0, kept));
+    }
+    for shift in 1..=max_shift {
+        for s in [n - shift, shift] {
+            let (f, e, kept) = window_passes(full, prefix, n, energy, budget_energy, s, w);
+            if f && e {
+                return Some((s, kept));
+            }
+        }
+    }
+    None
+}
+
+/// Joint stereo smallest shift search: requires both channels to clear floor and energy simultaneously.
+fn smallest_shift_stereo(
+    rl: &Reshaped,
+    rr: &Reshaped,
+    n: usize,
+    max_shift: usize,
+    w: usize,
+) -> Option<(usize, f64, f64)> {
+    let (fl, el, kl) = window_passes(&rl.full, &rl.prefix, n, rl.energy, rl.budget_energy, 0, w);
+    if fl && el {
+        let (fr, er, kr) = window_passes(&rr.full, &rr.prefix, n, rr.energy, rr.budget_energy, 0, w);
+        if fr && er {
+            return Some((0, kl, kr));
+        }
+    }
+    for shift in 1..=max_shift {
+        for s in [n - shift, shift] {
+            let (fl, el, kl) = window_passes(&rl.full, &rl.prefix, n, rl.energy, rl.budget_energy, s, w);
+            if !fl || !el {
+                continue;
+            }
+            let (fr, er, kr) = window_passes(&rr.full, &rr.prefix, n, rr.energy, rr.budget_energy, s, w);
+            if fr && er {
+                return Some((s, kl, kr));
+            }
+        }
+    }
+    None
+}
+
+/// Intermediate state of a filter whose phase has been reshaped and integrated on transform grid `n`.
+struct Reshaped {
+    mag: Vec<f64>,
+    freq: Vec<f64>,
+    new_phase: Vec<f64>,
+    gd_now: Vec<f64>,
+    full: Vec<f64>,
+    f_taper: f64,
+    mean_gd: f64,
+    requested: f64,
+    energy: f64,
+    budget_energy: f64,
+    prefix: Vec<f64>,
+    n: usize,
+}
+
+fn reshape_filter(
     ir: &[f64],
     fs: u32,
     crossover_hz: f64,
     budget_ms: f64,
-) -> Option<Adjustment> {
-    let budget_ms = if budget_ms.is_finite() && budget_ms > 0.0 {
-        budget_ms
-    } else {
-        DEFAULT_GD_BUDGET_MS
-    };
+    n: usize,
+) -> Option<Reshaped> {
     let len = ir.len();
     if len < 2 || fs == 0 {
         return None;
@@ -305,40 +404,11 @@ pub fn linearize_band_with_budget(
         return None;
     }
     let f_taper = (crossover_hz * TAPER_RATIO).min(nyquist);
-
-    // Zero-padded to at least twice the filter, so the reshaped (and no longer compact) impulse is
-    // measured against a grid that is not folding its own tail back onto its onset. Truncation of
-    // what that leaves is exactly the error this function then measures.
-    // Eight times the filter, not twice. The reshape makes the response longer than the kernel it
-    // came from, and the grid has to hold the whole of it — pre-ringing included — with room left over,
-    // or the tail folds back onto the onset and the numbers below measure a fold instead of a filter.
-    // The project's rule is to buy accuracy with compute rather than give it up, and a bigger transform
-    // is the cheapest accuracy on the table: everything here stays f64.
-    let want = len.saturating_mul(8).max(8);
-    let n = crate::fft::shl_bit_length(want).max(8);
     let spec = rfft(ir, n);
     let freq = rfftfreq(n, f64::from(fs));
     let mag: Vec<f64> = spec.iter().map(|c| c.norm()).collect();
     let phase: Vec<f64> = spec.iter().map(|c| c.arg()).collect();
     let phase_u = unwrap(&phase);
-
-    // The fit band: the flat part of the region, not the taper. Fitting over the taper would let the
-    // line be dragged by frequencies the line is only meant to fade out of.
-    let mut fit_f: Vec<f64> = Vec::new();
-    let mut fit_p: Vec<f64> = Vec::new();
-    for (i, &f) in freq.iter().enumerate().take(freq.len()) {
-        if f >= BAND_FLOOR_HZ && f <= crossover_hz {
-            fit_f.push(f);
-            fit_p.push(phase_u[i]);
-        }
-    }
-    if fit_f.len() < 2 {
-        return None;
-    }
-    // The work is specified in group delay, because that is what the stage promises to flatten, and
-    // then integrated back into phase. Specifying it in phase (blend each bin toward a fitted line)
-    // was the first version, and it cannot state a budget: a bin's phase says nothing about how many
-    // milliseconds of delay it represents at that frequency.
     let gd_now = group_delay_ms(&phase_u, &freq);
     let band: Vec<usize> = (0..freq.len())
         .filter(|&i| (BAND_FLOOR_HZ..=crossover_hz).contains(&freq[i]))
@@ -346,16 +416,10 @@ pub fn linearize_band_with_budget(
     if band.len() < 2 {
         return None;
     }
-    // The target is the band's own mean delay: flattening to it moves delay around inside the band and
-    // invents none. Fit over the flat part only, never the taper, or the line is dragged by the
-    // frequencies whose weight is on their way to zero.
     let mean_gd = {
         let fit: Vec<f64> = band.iter().map(|&i| gd_now[i]).collect();
         fit.iter().sum::<f64>() / fit.len() as f64
     };
-    // Per-bin correction, clamped: the requested change is `mean - current`, and at most
-    // `budget` ms of it is applied at any one frequency. `want` also records the span the band
-    // actually contains, which is what the report contrasts the budget with.
     let requested: f64 = {
         let lo = band
             .iter()
@@ -379,41 +443,40 @@ pub fn linearize_band_with_budget(
             w * want.clamp(-budget_ms, budget_ms)
         })
         .collect();
-    // Make the band's total delay change integrate to zero, and this is the reason: the phase change is
-    // the integral of the delay change, so anything left over at the bottom edge of the band is a *step*
-    // in phase there. A step in phase is an infinite group-delay spike, and it is not a measurement
-    // artifact — with the shipped filter it measured 867 ms of "group delay moved" on a 5 ms budget and
-    // sent the kernel out to 524 288 taps chasing energy that step invented. The clamp is what breaks the
-    // balance: with no clamp, aiming every bin at the band mean integrates to zero by construction, and
-    // clipping the tails of that correction leaves a residue. So the residue is removed, and the clamp
-    // re-applied, until the budget holds and the integral closes.
     let band_bins: Vec<usize> = (0..freq.len())
         .filter(|&i| (BAND_FLOOR_HZ..f_taper).contains(&freq[i]))
         .collect();
     if band_bins.len() >= 2 {
-        for _ in 0..4 {
-            // Trapezoid mean of the correction across the band it is applied over.
-            let mut integral = 0.0f64;
-            for w in band_bins.windows(2) {
-                let (a, b) = (w[0], w[1]);
-                integral += (freq[b] - freq[a]) * 0.5 * (correction[a] + correction[b]);
-            }
-            let span = freq[*band_bins.last().unwrap()] - freq[band_bins[0]];
-            if span <= 0.0 {
-                break;
-            }
-            let residue = integral / span;
-            if residue.abs() < 1e-12 {
-                break;
-            }
-            for &i in &band_bins {
-                correction[i] = (correction[i] - residue).clamp(-budget_ms, budget_ms);
+        let span = freq[*band_bins.last().unwrap()] - freq[band_bins[0]];
+        if span > 0.0 {
+            let i_min = band_bins[0];
+            let i_max = *band_bins.last().unwrap();
+            let mut offset = 0.0f64;
+            for _ in 0..64 {
+                for &i in &band_bins {
+                    let f = freq[i];
+                    let w = weight(f, BAND_FLOOR_HZ, crossover_hz, f_taper);
+                    let want = mean_gd - gd_now[i];
+                    correction[i] = w * (want - offset).clamp(-budget_ms, budget_ms);
+                }
+                let mut integral = 0.0f64;
+                if i_min > 0 {
+                    integral += (freq[i_min] - freq[i_min - 1]) * 0.5 * correction[i_min];
+                }
+                for w in band_bins.windows(2) {
+                    integral += (freq[w[1]] - freq[w[0]]) * 0.5 * (correction[w[0]] + correction[w[1]]);
+                }
+                if i_max + 1 < freq.len() {
+                    integral += (freq[i_max + 1] - freq[i_max]) * 0.5 * correction[i_max];
+                }
+                let residue = integral / span;
+                if residue.abs() < 1e-8 {
+                    break;
+                }
+                offset += residue;
             }
         }
     }
-    // Integrate the delay change back into phase, anchored above the taper where the correction has
-    // already gone to zero: `phi_new(f) = phi(f) + 2pi * integral of the correction above f`, and the
-    // integral below the band is now zero too, so the join is continuous at both edges.
     let df_to_rad = |a: f64, b: f64| (b - a) * std::f64::consts::TAU / 1000.0;
     let mut new_phase = phase_u.clone();
     let mut running = 0.0f64;
@@ -422,14 +485,8 @@ pub fn linearize_band_with_budget(
         if df <= 0.0 {
             continue;
         }
-        // Trapezoid over the interval below this bin, accumulating downward in frequency.
         running += df_to_rad(freq[i - 1], freq[i]) * 0.5 * (correction[i] + correction[i - 1]);
-        if correction[i - 1] != 0.0 || correction[i] != 0.0 {
-            // Plus, and the sign is worth the sentence it costs: group delay is D = -(1/2pi) dphi/df,
-            // so dphi = -2pi D df. Integrating a *delay increase* from the anchor downwards therefore
-            // *adds* phase in this convention. The first version subtracted, and the test that measures
-            // the band's delay spread caught it: the spread went 2.13 ms -> 4.90 ms, i.e. the stage had
-            // been flattening group delay away from the mean, in the wrong direction, confidently.
+        if correction[i - 1] != 0.0 || correction[i] != 0.0 || (!band_bins.is_empty() && i <= band_bins[0]) {
             new_phase[i - 1] = phase_u[i - 1] + running;
         }
     }
@@ -440,106 +497,45 @@ pub fn linearize_band_with_budget(
         .map(|(&m, &p)| Complex64::new(m * p.cos(), m * p.sin()))
         .collect();
     let full = irfft(&shaped, n);
-
-    // How long the delivered kernel has to be, and where it starts. Cutting the reshaped response at the
-    // tap count the run asked for is what made this stage cost magnitude in the first place: 1.36 dB on
-    // a synthetic bass shelf, 0.25 dB on the shipped DT 770 correction. The response is longer than the
-    // kernel it came from, so the kernel grows to hold it — f64 throughout, more taps, more compute,
-    // which is the trade this project takes.
-    //
-    // The criterion is the one a delivered filter is already held to here: the tail must sit at or below
-    // -130 dBFS, which is what the report's "Decay @ Truncation" line prints for the shipped filters —
-    // plus a loose energy bound, so the choice is made on the artefact a user loads rather than on a
-    // fraction of an ideal. The start is the position whose window of that length keeps the most energy,
-    // read circularly, because the pre-ringing the reshape created sits at the far end of the grid.
-    //
-    // The cap is what keeps this honest. Growing without one chased a bass correction's sub-100 Hz decay
-    // out to 524 288 taps and reported 5.5 s of "added latency", which was not latency but the distance
-    // to wherever the window happened to land: a diffuse tail that is still above -130 dBFS half a
-    // second after the onset cannot be captured by any sane kernel. Four times the requested length is
-    // the most this stage takes on its own; past that it reports the number it got and `held_floor: false`
-    // rather than pretending.
     let energy = crate::accum::sum_of_squares(&full);
     let budget_energy = energy * 1e-9;
-    let cap = len.saturating_mul(4).min(n / 2).max(len);
-    let tail_at = |s: usize, w: usize| {
-        let take = w.min(100);
-        let tail: Vec<f64> = (0..take).map(|i| full[(s + w - 1 - i) % n]).collect();
-        crate::ir::db_floor(&tail, take)
-    };
-    // Which window, once a length is chosen: the *smallest shift* that meets the floor, not the densest
-    // window on the grid. Those are different answers and the dense one is wrong here — it costs 460 ms
-    // of latency on the shipped filter, because sliding a kernel is a delay, and the response of a bass
-    // correction is diffuse enough that its densest stretch of 65 536 samples starts a quarter of a
-    // second away from the onset. Latency is the one cost a listener cannot opt out of later, so it is
-    // spent last and only as far as the floor requires; the shift needed here is the few hundred samples
-    // of pre-ringing the reshape created, not a fraction of the kernel.
-    // Window energy by prefix sum over the array doubled on itself, so a shift is one subtraction. The
-    // first draft summed each window in a loop and the run took 80 seconds scanning shifts; the scan is
-    // also capped, because past a fraction of the kernel the answer is "this response cannot be held at
-    // this floor", which is a result to report, not a search to finish.
     let doubled: Vec<f64> = full.iter().chain(full.iter()).map(|v| v * v).collect();
     let prefix = crate::accum::prefix_sums(&doubled);
-    let max_shift = (n / 8).max(1);
-    let passes = |s: usize, w: usize| {
-        let kept = prefix[s + w] - prefix[s];
-        (
-            tail_at(s, w) <= -130.0,
-            energy - kept <= budget_energy,
-            kept,
-        )
-    };
-    let smallest_shift = |w: usize| -> Option<usize> {
-        let (floor_ok, energy_ok, _) = passes(0, w);
-        if floor_ok && energy_ok {
-            return Some(0);
-        }
-        // Nearest shift first, alternating sides: the pre-ringing sits just before the onset, so the
-        // answer is a small backward move far more often than a forward one.
-        for shift in 1..=max_shift {
-            for s in [n - shift, shift] {
-                let (f, e, _) = passes(s, w);
-                if f && e {
-                    return Some(s);
-                }
-            }
-        }
-        None
-    };
-    let mut taps_after = len;
-    let mut start = 0usize;
-    let mut retained = 0.0f64;
-    let mut reached_floor = false;
-    for (num, den) in [(1usize, 1), (5, 4), (3, 2), (7, 4), (2, 1), (3, 1), (4, 1)] {
-        let probe = len.saturating_mul(num) / den;
-        if probe < len || probe > cap {
-            continue;
-        }
-        taps_after = probe;
-        if let Some(s) = smallest_shift(probe) {
-            start = s;
-            retained = passes(s, probe).2;
-            reached_floor = true;
-            break;
-        }
-        // Nothing at this length clears the floor at any shift; try a longer kernel before giving up.
-        if probe >= cap {
-            start = best_window(&full, probe);
-            retained = passes(start, probe).2;
-        }
-    }
-    let out: Vec<f64> = (0..taps_after).map(|i| full[(start + i) % n]).collect();
+    Some(Reshaped {
+        mag,
+        freq,
+        new_phase,
+        gd_now,
+        full,
+        f_taper,
+        mean_gd,
+        requested,
+        energy,
+        budget_energy,
+        prefix,
+        n,
+    })
+}
+
+fn build_adjustment(
+    r: Reshaped,
+    ir_input: &[f64],
+    start: usize,
+    taps_after: usize,
+    reached_floor: bool,
+    fs: u32,
+    crossover_hz: f64,
+    budget_ms: f64,
+) -> Adjustment {
+    let out: Vec<f64> = (0..taps_after).map(|i| r.full[(start + i) % r.n]).collect();
     let out_peak = peak_index(&out);
-    let input_peak = peak_index(ir);
-    // Relative to the input filter's own onset, not to index 0: an input that already carries delay
-    // must not be charged for it twice.
+    let input_peak = peak_index(ir_input);
     let added_latency_samples = out_peak.saturating_sub(input_peak);
 
-    // What truncation cost, measured rather than assumed: the same grid, the same magnitudes.
-    let after = rfft(&out, n);
+    let after = rfft(&out, r.n);
     let mut max_mag_error_db = 0.0f64;
     for (i, c) in after.iter().enumerate() {
-        let (before, now) = (mag[i], c.norm());
+        let (before, now) = (r.mag[i], c.norm());
         if before < 1e-300 {
             continue;
         }
@@ -549,52 +545,165 @@ pub fn linearize_band_with_budget(
         }
     }
 
-    let gd_before = group_delay_ms(&phase_u, &freq);
-    let gd_after = group_delay_ms(&new_phase, &freq);
+    let gd_before = &r.gd_now;
+    let gd_after = group_delay_ms(&r.new_phase, &r.freq);
     let mut max_change = 0.0f64;
     let mut at_hz = 0.0f64;
-    for (i, &f) in freq.iter().enumerate() {
+    for (i, &f) in r.freq.iter().enumerate() {
         let d = (gd_after[i] - gd_before[i]).abs();
         if d > max_change {
             max_change = d;
             at_hz = f;
         }
     }
-    let _ = requested;
-
     let floor = crate::ir::db_floor(&out, 100);
-    let gd_span = requested;
-    let budget_held = correction.iter().all(|&c| c.abs() <= budget_ms + 1e-9);
-    Some(Adjustment {
+    let gd_span = r.requested;
+    let budget_held = max_change <= budget_ms + 1e-4;
+    let kept = r.prefix[start + taps_after] - r.prefix[start];
+    Adjustment {
         ir: out,
-        full,
+        full: r.full,
         f_lo_hz: BAND_FLOOR_HZ,
         crossover_hz,
-        f_taper_hz: f_taper,
-        line_delay_ms: mean_gd,
+        f_taper_hz: r.f_taper,
+        line_delay_ms: r.mean_gd,
         max_gd_change_ms: max_change,
         max_gd_change_hz: at_hz,
         max_mag_error_db,
         added_latency_samples,
         added_latency_ms: added_latency_samples as f64 / f64::from(fs) * 1000.0,
-        retained_energy_pct: if energy > 0.0 {
-            retained / energy * 100.0
-        } else {
-            100.0
-        },
-        energy_pct: if energy > 0.0 {
-            retained / energy * 100.0
+        retained_energy_pct: if r.energy > 0.0 {
+            kept / r.energy * 100.0
         } else {
             100.0
         },
         floor_dbfs: floor,
-        taps_before: len,
+        taps_before: ir_input.len(),
         taps_after,
         budget_ms,
         gd_span_ms: gd_span,
         held_floor: reached_floor,
         budget_held,
-    })
+    }
+}
+
+/// Index of the largest-magnitude sample.
+fn peak_index(x: &[f64]) -> usize {
+    x.iter().enumerate().fold(
+        0usize,
+        |best, (i, v)| if v.abs() > x[best].abs() { i } else { best },
+    )
+}
+
+/// Flatten the group delay of `ir` between 10 Hz and `crossover_hz`, changing nothing
+/// above `crossover_hz · TAPER_RATIO`.
+///
+/// Returns `None` when the request cannot mean anything: no taps, a zero rate, a crossover that is
+/// not finite or not above the band floor, or a crossover at or past Nyquist.
+/// `budget_ms` bounds how far group delay may move at any single frequency; see
+/// [`DEFAULT_GD_BUDGET_MS`] for why an unbounded version of this operation is not implementable.
+#[must_use]
+pub fn linearize_band(ir: &[f64], fs: u32, crossover_hz: f64) -> Option<Adjustment> {
+    linearize_band_with_budget(ir, fs, crossover_hz, DEFAULT_GD_BUDGET_MS)
+}
+
+/// Joint stereo counterpart of [`linearize_band`]: reshapes Left and Right filters jointly so both
+/// channels share identical impulse alignment (0 samples ITD skew) and identical output filter lengths.
+#[must_use]
+pub fn linearize_band_stereo(
+    ir_l: &[f64],
+    ir_r: &[f64],
+    fs: u32,
+    crossover_hz: f64,
+) -> Option<(Adjustment, Adjustment)> {
+    linearize_band_stereo_with_budget(ir_l, ir_r, fs, crossover_hz, DEFAULT_GD_BUDGET_MS)
+}
+
+/// Joint stereo counterpart of [`linearize_band_with_budget`].
+#[must_use]
+pub fn linearize_band_stereo_with_budget(
+    ir_l: &[f64],
+    ir_r: &[f64],
+    fs: u32,
+    crossover_hz: f64,
+    budget_ms: f64,
+) -> Option<(Adjustment, Adjustment)> {
+    let budget_ms = if budget_ms.is_finite() && budget_ms > 0.0 {
+        budget_ms
+    } else {
+        DEFAULT_GD_BUDGET_MS
+    };
+    let len = ir_l.len().max(ir_r.len());
+    let want = len.saturating_mul(8).max(8);
+    let n = crate::fft::shl_bit_length(want).max(8);
+    let rl = reshape_filter(ir_l, fs, crossover_hz, budget_ms, n)?;
+    let rr = reshape_filter(ir_r, fs, crossover_hz, budget_ms, n)?;
+    let cap = len.saturating_mul(4).min(n / 2).max(len);
+    let max_shift = (n / 8).max(1);
+
+    let mut taps_after = len;
+    let mut start = 0usize;
+    let mut reached_floor = false;
+    for (num, den) in [(1usize, 1), (5, 4), (3, 2), (7, 4), (2, 1), (3, 1), (4, 1)] {
+        let probe = len.saturating_mul(num) / den;
+        if probe < len || probe > cap {
+            continue;
+        }
+        taps_after = probe;
+        if let Some((s, _, _)) = smallest_shift_stereo(&rl, &rr, n, max_shift, probe) {
+            start = s;
+            reached_floor = true;
+            break;
+        }
+        if probe >= cap {
+            start = best_window_joint(&rl.prefix, &rr.prefix, rl.energy, rr.energy, n, probe);
+        }
+    }
+
+    let adj_l = build_adjustment(rl, ir_l, start, taps_after, reached_floor, fs, crossover_hz, budget_ms);
+    let adj_r = build_adjustment(rr, ir_r, start, taps_after, reached_floor, fs, crossover_hz, budget_ms);
+    Some((adj_l, adj_r))
+}
+
+/// See [`linearize_band`].
+#[must_use]
+pub fn linearize_band_with_budget(
+    ir: &[f64],
+    fs: u32,
+    crossover_hz: f64,
+    budget_ms: f64,
+) -> Option<Adjustment> {
+    let budget_ms = if budget_ms.is_finite() && budget_ms > 0.0 {
+        budget_ms
+    } else {
+        DEFAULT_GD_BUDGET_MS
+    };
+    let len = ir.len();
+    let want = len.saturating_mul(8).max(8);
+    let n = crate::fft::shl_bit_length(want).max(8);
+    let r = reshape_filter(ir, fs, crossover_hz, budget_ms, n)?;
+    let cap = len.saturating_mul(4).min(n / 2).max(len);
+    let max_shift = (n / 8).max(1);
+
+    let mut taps_after = len;
+    let mut start = 0usize;
+    let mut reached_floor = false;
+    for (num, den) in [(1usize, 1), (5, 4), (3, 2), (7, 4), (2, 1), (3, 1), (4, 1)] {
+        let probe = len.saturating_mul(num) / den;
+        if probe < len || probe > cap {
+            continue;
+        }
+        taps_after = probe;
+        if let Some((s, _)) = smallest_shift(&r.full, &r.prefix, n, r.energy, r.budget_energy, max_shift, probe) {
+            start = s;
+            reached_floor = true;
+            break;
+        }
+        if probe >= cap {
+            start = best_window_prefix(&r.prefix, n, probe);
+        }
+    }
+    Some(build_adjustment(r, ir, start, taps_after, reached_floor, fs, crossover_hz, budget_ms))
 }
 
 /// The band's group-delay span before the stage ran, ms. Kept on the adjustment by the caller-side
@@ -651,7 +760,7 @@ pub fn report_lines(a: &Adjustment) -> Vec<String> {
         ),
         format!(
             "  Energy retained : {:.10}%, tail floor {:.2} dBFS",
-            a.energy_pct, a.floor_dbfs
+            a.retained_energy_pct, a.floor_dbfs
         ),
         "  Audibility      : contested. Minimum-phase is the default; this is an experiment, not a recommendation.".to_string(),
     ]
@@ -999,6 +1108,44 @@ mod tests {
         assert!(
             all.contains("Budget") && all.contains("Kernel"),
             "the two costs the stage can incur are not both printed:\n{all}"
+        );
+    }
+
+    #[test]
+    fn best_window_finds_the_dense_stretch_and_discriminates_against_zero() {
+        let mut full = vec![0.0; 256];
+        for i in 100..120 {
+            full[i] = 1.0;
+        }
+        let w = 20;
+        let chosen = best_window(&full, w);
+        assert_eq!(chosen, 100, "best_window must select index 100");
+        let energy_at_0: f64 = full[0..w].iter().map(|v| v * v).sum();
+        let energy_at_chosen: f64 = full[chosen..chosen + w].iter().map(|v| v * v).sum();
+        assert_eq!(energy_at_0, 0.0);
+        assert_eq!(energy_at_chosen, 20.0);
+    }
+
+    #[test]
+    fn stereo_phase_alignment_shares_identical_latency_and_taps() {
+        let ir_l = shelf_ir();
+        let curve_r = [
+            (10.0, 2.5),
+            (50.0, 2.0),
+            (100.0, 0.8),
+            (200.0, 0.0),
+            (1000.0, 0.0),
+            (20000.0, 0.0),
+        ];
+        let ir_r = crate::ir::synthesize_minimum_phase_ir(&curve_r, 48000, 32768, 16384, 4096, -1.50, true, 16.0)
+            .expect("right synthesis")
+            .ir;
+        let (adj_l, adj_r) = linearize_band_stereo(&ir_l, &ir_r, 48000, 200.0).expect("stereo adjustment");
+        assert_eq!(adj_l.ir.len(), adj_r.ir.len(), "channels must share identical taps");
+        assert_eq!(adj_l.taps_after, adj_r.taps_after, "channels must share identical taps_after");
+        assert_eq!(
+            adj_l.added_latency_samples, adj_r.added_latency_samples,
+            "channels must share identical added_latency_samples (zero ITD skew)"
         );
     }
 }

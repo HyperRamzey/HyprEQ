@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 rustfft = "6.4"
-serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps `measurements.json` model order (and every object key) as written;
 # the default map sorts keys alphabetically, which would reorder `--list-models`, `--headphone
 # all` and the default model.

@@ -51,21 +51,30 @@
 //!
 //! | module | contents |
 //! |---|---|
+//! | [`accum`] | Neumaier and pairwise compensated summation and prefix sums |
+//! | [`assess`] | Content-demand third-octave spectrum assessment against headroom |
+//! | [`convolve`] | Overlap-add FFT convolution against planar FIRs |
+//! | [`dither`] | The exact NumPy PCG64 stream that the TPDF dither is drawn from |
+//! | [`error`] | The crate's single error type |
+//! | [`fft`] | NumPy-convention FFT wrappers over `rustfft` |
+//! | [`fit`] | Octave-band smoothing, deviation, quantile, and regularized curve inversion |
+//! | [`fixture`] | Measurement rig and target fixture compatibility detection |
+//! | [`ir`] | Hilbert-cepstral minimum-phase synthesis, notch modes, audit CSV |
+//! | [`limiter`] | Two-stage true-peak ceiling limiter with lookahead and linking |
+//! | [`limiter_cfg`] | CLI-facing limiter configuration over [`limiter`], default `x16` |
+//! | [`measure`] | [`measure::SignalMeasurements`], the deterministic convolver probe |
+//! | [`meter`] | Console-scale peak meters (`f32` atomics, 0.30 s release) |
 //! | [`model`] | `measurements.json` + `models/` loader, control-curve derivation, plot metadata |
 //! | [`pchip`] | Fritsch–Carlson monotone cubic in `log10(f)` |
-//! | [`ir`] | Hilbert-cepstral minimum-phase synthesis, notch modes, audit CSV |
-//! | [`fft`] | NumPy-convention FFT wrappers over `rustfft` |
-//! | [`window`] | `I0`, Kaiser `beta`, half-Kaiser IR tail |
-//! | [`wav`] | RIFF reader (PCM/float/extensible), IEEE-float and TPDF-dithered PCM writers |
-//! | [`dither`] | the exact numpy PCG64 stream that the TPDF dither is drawn from |
-//! | [`convolve`] | overlap-add FFT convolution against a mono FIR |
-//! | [`measure`] | [`measure::SignalMeasurements`], the deterministic convolver probe |
-//! | [`tp`] | ITU-R BS.1770-5 true-peak detector, 4x–32x polyphase interpolators |
-//! | [`limiter`] | two-stage true-peak ceiling limiter with lookahead and linking |
-//! | [`meter`] | console-scale peak meters (`f32` atomics, 0.30 s release) |
+//! | [`phase`] | Experimental mixed-phase band group-delay linearization |
+//! | [`plot`] | Four-panel PNG verification figure renderer |
+//! | [`pyfmt`] | Python-style format string and float printer |
 //! | [`riff`] | RIFF header writer/reader, extensible channel masks |
-//! | [`error`] | the crate's single error type |
-//! | [`limiter_cfg`] | CLI-facing limiter configuration over [`limiter`], default `x16` |
+//! | [`stereo`] | Interaural L/R mismatch analysis, balance, and per-ear trim |
+//! | [`tp`] | ITU-R BS.1770-5 true-peak detector, 4x–32x polyphase interpolators |
+//! | [`verify`] | Third-octave prediction-vs-capture acoustic verifier |
+//! | [`wav`] | RIFF reader (PCM/float/extensible), IEEE-float and TPDF-dithered PCM writers |
+//! | [`window`] | `I0`, Kaiser `beta`, half-Kaiser IR tail |
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(clippy::all)]

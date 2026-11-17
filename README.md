@@ -137,7 +137,7 @@ column and left the difference standing, which is what the listener hears afterw
 ```text
 === Ears (129 capture points measured per ear) ===
   Level difference  : +1.27 dB left vs right (the centre leans)
-  Shape mismatch    : -7.72 dB @ 15110 Hz (band 16 kHz), spread 0.15 dB
+  Shape mismatch    : -7.72 dB @ 15110 Hz (band 16 kHz), spread 1.70 dB
   Reads as          : mismatch
   Resolution        : a sixth of an octave is 2.1 capture points here (grid 0.079 oct), so one tenth
                       of an octave is one sample and the reason for the difference is not knowable
@@ -273,10 +273,10 @@ What each line is owed, and where the honesty lives:
 A frequency response is not a property of a headphone. It is a property of the headphone *on a
 fixture*, and a target curve was **defined** on one fixture and one only. The paper that made this a
 published problem for target curves puts the failure mode plainly: the Harman around-ear target was
-defined on a GRAS 45CA fixture with an RA045 ear, and is "often misused with other fixtures, leading
+defined on a GRAS 45CA fixture with an RA0045 ear, and is "often misused with other fixtures, leading
 to measurement and interpretation errors due to differing acoustic transfer impedances" (Olive &
 Clark, *A Preferred Headphone Target Curve Defined for the B&K 5128 and GRAS 45CA-10 Test Fixtures*,
-AES 2025, eLibrary `22928`). This database used to have no field in which to record any of it.
+AES 157th Convention 2024, eLibrary `23068`, Express Paper 394). This database used to have no field in which to record any of it.
 
 Three keys, all optional:
 
@@ -337,7 +337,7 @@ hypreq -H dt770_80 --experimental-phase 200
 === Experimental Phase (mixed: flat group delay below 200 Hz) ===
   Band            : 10 Hz - 200 Hz, tapered to unity by 400 Hz (nothing above it is touched)
   Delay carried   : -0.232 ms, the band's own mean - flattening moves delay, it does not add any
-  Group delay     : up to 0.888 ms moved, worst at 10 Hz - beyond the published audibility thresholds (-0.56 / +0.64 ms, Liski et al. 2021)
+  Group delay     : up to 0.560 ms moved, worst at 139 Hz - within the published audibility thresholds (-0.56 / +0.64 ms, Liski et al. 2021)
   Budget          : 0.56 ms per frequency against a band spread of 9.6 ms - the rest was left alone rather than paid for in latency
   Kernel          : 65536 -> 65536 taps, +119.6 ms latency - the reshape makes the response longer, and it is kept rather than cut
   Magnitude       : worst deviation 1.011e-2 dB - this stage replaces phase and carries the curve through
@@ -419,7 +419,7 @@ Add a new object under `"models"` in `measurements.json` using the same schema a
 
 ---
 
-## `mpv` Configuration (`FFmpeg >= 8.0` Required)
+## `mpv` Configuration (`FFmpeg >= 6.0` Required)
 
 HyprEQ prints the exact `mpv.conf` block matching your chosen `--fs` and file path at the end of every run.
 

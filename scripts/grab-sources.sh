@@ -104,15 +104,15 @@ in_group() {
     esac
 }
 matches_ext() {
-    local path="$1" e n
+    local path="$1" e
     for e in "${wanted[@]}"; do
         # shellcheck disable=SC2053  # right-hand side is a pattern on purpose
         [[ "$path" == $e ]] && return 0
     done
     if [[ "$mode" != "code" ]]; then
-        n="${path##*/}"
-        for n in "${name_allowlist[@]}"; do
-            [[ "$path" == *"/$n" || "$path" == "$n" ]] && return 0
+        local base="${path##*/}"
+        for allowed in "${name_allowlist[@]}"; do
+            [[ "$base" == "$allowed" ]] && return 0
         done
     fi
     return 1

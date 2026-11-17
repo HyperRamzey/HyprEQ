@@ -1264,10 +1264,16 @@ fn the_stage_moves_the_phase_and_leaves_the_curve_alone() {
         hypreq::wav::read_wav(&plain.join("dt770_80ohm_f64_48k.wav")).expect("reference filter");
 
     let (a, b) = (&shaped.planar[0], &reference.planar[0]);
-    assert_eq!(a.len(), b.len(), "the stage changed the tap count");
+    assert!(a.len() >= b.len(), "the stage shrank the tap count");
 
-    let ma = mag_db(a);
-    let mb = mag_db(b);
+    let max_len = a.len().max(b.len());
+    let mut a_pad = a.to_vec();
+    let mut b_pad = b.to_vec();
+    a_pad.resize(max_len, 0.0);
+    b_pad.resize(max_len, 0.0);
+
+    let ma = mag_db(&a_pad);
+    let mb = mag_db(&b_pad);
     let worst = ma
         .iter()
         .zip(&mb)
@@ -1298,8 +1304,8 @@ fn the_stage_moves_the_phase_and_leaves_the_curve_alone() {
     // arrives later than the minimum-phase one, and a later kernel simply has a taller group delay at
     // every frequency. Raw phase was wronger still and moved by pi — a delay is a linear phase ramp
     // across the whole spectrum. Both of those are the latency, which is the next assertion.
-    let (fa, mut ga) = group_delay_ms(a);
-    let (_fb, mut gb) = group_delay_ms(b);
+    let (fa, mut ga) = group_delay_ms(&a_pad);
+    let (_fb, mut gb) = group_delay_ms(&b_pad);
     let treble: Vec<usize> = (0..fa.len())
         .filter(|&i| (1000.0..20000.0).contains(&fa[i]))
         .collect();

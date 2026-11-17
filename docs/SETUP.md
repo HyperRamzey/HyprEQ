@@ -395,7 +395,7 @@ rules that decide a verdict are arithmetic, and the constants were measured rath
   well under a hertz apart and the error is nil; the floor is what keeps a `--taps 256` run from
   being quietly wrong.
 - Each band is sampled at **25** log-spaced points. That number is a measurement, not a preference:
-  on a ripple with 20 periods per decade, sampling at the IEC 61260-1 limit of 5 points per octave
+  on a ripple with 20 periods per decade, a sparse sampling of only 5 points per octave
   reads **0.00 dB** of scatter — the samples alias and land on the same phase every time, so the
   tool reports "smooth" about a curve that is anything but. Seven points recover the truth (6.78 dB
   of scatter); 25 leaves margin for narrower wiggles than the fixture.

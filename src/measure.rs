@@ -107,7 +107,11 @@ pub fn measure_signal_block(
     }
 
     let mut tp_main = TruePeak::new(ratio, nch);
-    let mut tp_itu = TruePeak::new(Ratio::X4, nch);
+    let mut tp_itu = if ratio == Ratio::X4 {
+        None
+    } else {
+        Some(TruePeak::new(Ratio::X4, nch))
+    };
     let meters = crate::meter::Meters::with_channels(nch);
 
     let mut sp_ch = Vec::with_capacity(nch);
@@ -120,19 +124,26 @@ pub fn measure_signal_block(
         let mean_sq = ch.iter().fold(0.0f64, |a, &v| a + v * v) / ch.len() as f64;
         rms_ch_lin.push(mean_sq.sqrt());
         tp_main.push_ch(c, ch);
-        tp_itu.push_ch(c, ch);
+        if let Some(tp) = &mut tp_itu {
+            tp.push_ch(c, ch);
+        }
     }
     tp_main.drain();
-    tp_itu.drain();
+    if let Some(tp) = &mut tp_itu {
+        tp.drain();
+    }
 
     // The meter model converts sample counts to time, so it needs a rate. Without one the
     // integration window is a division by zero; the peak/RMS/TP figures below are pure
     // sample statistics and stay valid, so only the meter block is skipped.
     if fs > 0 {
+        let mut views = vec![&[][..]; nch];
         for start in (0..frames).step_by(block_size.max(1)) {
             let end = (start + block_size).min(frames);
             let blk = end - start;
-            let views: Vec<&[f64]> = planar.iter().map(|c| &c[start..end]).collect();
+            for (v, c) in views.iter_mut().zip(planar.iter()) {
+                *v = &c[start..end];
+            }
             meters.set_format(fs as f32, blk);
             meters.observe_planar(&views, blk);
         }
@@ -142,7 +153,10 @@ pub fn measure_signal_block(
     let sp_db = db_from_peak(sp_lin);
     let tp_lin = tp_main.peak();
     let tp_db = tp_main.dbtp();
-    let itu_db = tp_itu.dbtp();
+    let itu_db = tp_itu.as_ref().map_or(tp_db, |tp| tp.dbtp());
+    let itu_x4_per_channel_dbtp = tp_itu
+        .as_ref()
+        .map_or_else(|| tp_main.per_channel_dbtp(), |tp| tp.per_channel_dbtp());
     let rms_all = (rms_ch_lin.iter().map(|r| r * r).sum::<f64>() / nch as f64).sqrt();
     let rms_db = db_from_peak(rms_all);
     let hold_lin = meters.peaks().iter().copied().fold(0.0f32, f32::max) as f64;
@@ -166,7 +180,7 @@ pub fn measure_signal_block(
         true_peak_dbtp: tp_db,
         per_channel_dbtp: tp_main.per_channel_dbtp(),
         itu_x4_dbtp: itu_db,
-        itu_x4_per_channel_dbtp: tp_itu.per_channel_dbtp(),
+        itu_x4_per_channel_dbtp,
         rms_dbfs: rms_db,
         per_channel_rms_dbfs: rms_ch_lin.iter().map(|&v| db_from_peak(v)).collect(),
         crest_tp_db: if tp_db.is_finite() && rms_db.is_finite() {

@@ -293,8 +293,7 @@ struct Args {
             ,"it, so the band's group delay flattens and the magnitude is carried through untouched. "
             ,"Off by default: the shipped filter stays minimum-phase. Costs latency, not magnitude, and "
             ,"whether the difference is audible is contested (Liski et al., TASLP 2021). Reports what "
-            ,"it moved. Default when combined with --experimental-phase-default: ",
-            "200 Hz"
+            ,"it moved (e.g. 200 Hz)."
         )
     )]
     experimental_phase: Option<f64>,
@@ -850,14 +849,18 @@ fn run_model(
     );
 
     // The real-time pair: a shorter filter, a gentler taper, and the f32 rounding the
-    // PipeWire/DAW convolvers actually load.
-    let n_fft_rt = 32768;
+    // PipeWire/DAW convolvers actually load. Scale taps and transform with rate to preserve
+    // duration (~341 ms) and cepstral oversampling at higher rates.
+    let rt_taps = ((16384usize * (fs as usize)) / 48000)
+        .next_power_of_two()
+        .max(16384);
+    let n_fft_rt = (rt_taps * 2).max(32768);
     let mut rt = synthesize_minimum_phase_ir(
         &active_ctrl,
         fs,
         n_fft_rt,
-        16384,
-        2048,
+        rt_taps,
+        rt_taps / 8,
         headroom_db,
         use_apodize,
         16.0,
@@ -893,9 +896,11 @@ fn run_model(
     println!();
     println!("=== [2] Real-Time PipeWire / DAW 32-Bit Float Convolvers ===");
     println!(
-        "  FFT / Taps        : 32,768 FFT ({:.4} Hz bin) -> 16,384 taps ({:.1} ms, Half-Kaiser beta=16.0)",
+        "  FFT / Taps        : {} FFT ({:.4} Hz bin) -> {} taps ({:.1} ms, Half-Kaiser beta=16.0)",
+        comma_sep(n_fft_rt as u64),
         fs as f64 / n_fft_rt as f64,
-        16384.0 / fs as f64 * 1000.0
+        comma_sep(rt.ir.len() as u64),
+        rt.ir.len() as f64 / fs as f64 * 1000.0
     );
     println!(
         "  Decay @ Truncation: {:.2} dBFS (unwindowed) | {:.2} dBFS (after half-Kaiser fade)",
@@ -937,6 +942,10 @@ fn run_model(
             // The ears trace is opt-in like the rest of the flag: an unchanged run writes the
             // unchanged figure, even for a model that happens to carry two ear columns.
             show_ears: stereo_mode(args) != hypreq::stereo::Mode::Off,
+            added_latency: phase_done
+                .iter()
+                .find(|(k, _)| *k == "real-time")
+                .map_or(0, |(_, a)| a.added_latency_samples),
         };
         let data = PlotData::build(model, &inputs);
         let path = data.render(prefix)?;
@@ -1127,12 +1136,16 @@ fn run_audio_wav_mode(
                 18.0,
             )
             .map_err(|e| Error::msg(e.0))?;
-            let phase = phase_stage(&mut mpv, fs, "applied", args)?;
+            let per_ear = ears_block.as_ref().and_then(|(_, pair)| pair.clone());
+            let phase = if per_ear.is_none() {
+                phase_stage(&mut mpv, fs, "applied", args)?
+            } else {
+                None
+            };
             applied_ir = Some((mpv.ir.clone(), mpv.preamp_db));
             // In `split` the shared curve is not what gets applied, so it is not printed as if it
             // were: the two lines below are. It is still synthesized, because the assessment below
             // is measured on the shared curve and needs that filter's own preamp to be honest.
-            let per_ear = ears_block.as_ref().and_then(|(_, pair)| pair.clone());
             if per_ear.is_none() {
                 println!(
                     "  EQ FIR ({})   : {} taps @ {} Hz | Preamp {:+.2} dB (Max boost +{:.2} dB, ||h||_1 {:+.2} dB)",
@@ -1157,44 +1170,62 @@ fn run_audio_wav_mode(
                     lim_cfg.enable,
                 );
             }
-            if let Some(a) = phase.as_ref() {
-                println!("{}", "-".repeat(100));
-                print_phase_block(&[("applied", a.clone())]);
+            if per_ear.is_none() {
+                if let Some(a) = phase.as_ref() {
+                    println!("{}", "-".repeat(100));
+                    print_phase_block(&[("applied", a.clone())]);
+                }
             }
             match per_ear {
                 Some((left_curve, right_curve)) => {
-                    let build = |curve: &hypreq::stereo::Curve| {
-                        synthesize_minimum_phase_ir(
-                            curve,
-                            fs,
-                            n_fft_mpv,
-                            taps,
-                            taps / 8,
-                            args.headroom_db,
-                            use_apodize,
-                            18.0,
-                        )
-                        .map_err(|e| Error::msg(e.0))
-                    };
-                    let (mut left, mut right) = (build(&left_curve)?, build(&right_curve)?);
-                    // Two ears, two filters, one crossover each: the stage is per-filter, so a split
-                    // run gets both kernels shaped rather than one shaped and one claimed to be.
+                    let (mut left, mut right) = hypreq::ir::synthesize_stereo_minimum_phase_ir(
+                        &left_curve,
+                        &right_curve,
+                        fs,
+                        n_fft_mpv,
+                        taps,
+                        taps / 8,
+                        args.headroom_db,
+                        use_apodize,
+                        18.0,
+                    )
+                    .map_err(|e| Error::msg(e.0))?;
+                    // Two ears, two filters: when experimental phase is enabled, both kernels are reshaped
+                    // jointly so both channels share identical impulse alignment (0 samples ITD skew)
+                    // and identical filter lengths.
                     let ear_phase: Vec<(&str, hypreq::phase::Adjustment)> =
-                        [("left", &mut left), ("right", &mut right)]
-                            .into_iter()
-                            .map(|(tag, res)| {
-                                phase_stage(res, fs, tag, args).map(|a| a.map(|a| (tag, a)))
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
-                            .into_iter()
-                            .flatten()
-                            .collect();
+                        if let Some(crossover) = args.experimental_phase {
+                            let (mut adj_l, mut adj_r) = hypreq::phase::linearize_band_stereo(
+                                &left.ir, &right.ir, fs, crossover,
+                            )
+                            .ok_or_else(|| {
+                                Error::msg(format!(
+                                    "--experimental-phase {:.1} Hz cannot run on the stereo split filters: \
+                                     the crossover has to sit above 20 Hz and below Nyquist ({} Hz at {fs} Hz)",
+                                    crossover,
+                                    f64::from(fs) / 2.0
+                                ))
+                            })?;
+                            left.ir = std::mem::take(&mut adj_l.ir);
+                            left.energy_pct = adj_l.retained_energy_pct;
+                            left.windowed_floor_dbfs = adj_l.floor_dbfs;
+                            adj_l.full = Vec::new();
+
+                            right.ir = std::mem::take(&mut adj_r.ir);
+                            right.energy_pct = adj_r.retained_energy_pct;
+                            right.windowed_floor_dbfs = adj_r.floor_dbfs;
+                            adj_r.full = Vec::new();
+
+                            vec![("left", adj_l), ("right", adj_r)]
+                        } else {
+                            Vec::new()
+                        };
                     for (tag, ir) in [("left", &left), ("right", &right)] {
                         // Padded to the width the shared line's `(prefix)   ` occupies, so the two
                         // variants of this line put their numbers in the same column.
                         println!(
                             "  EQ FIR {tag:<16}: {} taps @ {} Hz | Preamp {:+.2} dB (Max boost +{:.2} dB, ||h||_1 {:+.2} dB)",
-                            comma_sep(taps as u64),
+                            comma_sep(ir.ir.len() as u64),
                             comma_sep(u64::from(fs)),
                             ir.preamp_db,
                             ir.max_boost_db,
@@ -1203,16 +1234,32 @@ fn run_audio_wav_mode(
                     }
                     let channels = work.len();
                     print_phase_block(&ear_phase);
-                    work = convolve_planar_pair(&work, &left.ir, &right.ir, args.trim_tail)
+                    let filter_lat = ear_phase.first().map_or(0, |(_, adj)| adj.added_latency_samples);
+                    let trim_to_in = args.trim_tail && filter_lat == 0;
+                    work = convolve_planar_pair(&work, &left.ir, &right.ir, trim_to_in)
                         .ok_or_else(|| {
                             Error::msg(format!(
                                 "--stereo split hands one filter to each ear, which needs a stereo file; '{input}' has {channels} channel{}",
                                 if channels == 1 { "" } else { "s" }
                             ))
                         })?;
+                    if args.trim_tail && filter_lat > 0 {
+                        for ch in &mut work {
+                            let end = (filter_lat + orig_n).min(ch.len());
+                            *ch = ch[filter_lat.min(ch.len())..end].to_vec();
+                        }
+                    }
                 }
                 None => {
-                    work = convolve_planar_fft(&work, &mpv.ir, args.trim_tail);
+                    let filter_lat = phase.as_ref().map_or(0, |adj| adj.added_latency_samples);
+                    let trim_to_in = args.trim_tail && filter_lat == 0;
+                    work = convolve_planar_fft(&work, &mpv.ir, trim_to_in);
+                    if args.trim_tail && filter_lat > 0 {
+                        for ch in &mut work {
+                            let end = (filter_lat + orig_n).min(ch.len());
+                            *ch = ch[filter_lat.min(ch.len())..end].to_vec();
+                        }
+                    }
                 }
             }
             let m_eq = measure_signal(&work, fs, lim_cfg.ratio);
@@ -1221,65 +1268,63 @@ fn run_audio_wav_mode(
         }
     }
 
-    if args.measure_only {
-        return Ok(());
-    }
-
-    if lim_cfg.enable {
-        let mut lim = Limiter::enabled(*lim_cfg, fs, work.len());
-        {
-            let mut refs: Vec<&mut [f64]> = work.iter_mut().map(|c| c.as_mut_slice()).collect();
-            lim.process(refs.as_mut_slice());
-        }
-        let tail = lim.flush();
-        if !tail.is_empty() {
-            if args.trim_tail {
-                let lat = lim.latency_samples();
-                work = work
-                    .iter()
-                    .zip(&tail)
-                    .map(|(w, t)| {
-                        let joined: Vec<f64> = w.iter().chain(t.iter()).copied().collect();
-                        let end = (lat + orig_n).min(joined.len());
-                        joined[lat.min(joined.len())..end].to_vec()
-                    })
-                    .collect();
-            } else {
-                for (w, t) in work.iter_mut().zip(&tail) {
-                    w.extend_from_slice(t);
+    if !args.measure_only {
+        if lim_cfg.enable {
+            let mut lim = Limiter::enabled(*lim_cfg, fs, work.len());
+            {
+                let mut refs: Vec<&mut [f64]> = work.iter_mut().map(|c| c.as_mut_slice()).collect();
+                lim.process(refs.as_mut_slice());
+            }
+            let tail = lim.flush();
+            if !tail.is_empty() {
+                if args.trim_tail {
+                    let lat = lim.latency_samples();
+                    work = work
+                        .iter()
+                        .zip(&tail)
+                        .map(|(w, t)| {
+                            let joined: Vec<f64> = w.iter().chain(t.iter()).copied().collect();
+                            let end = (lat + orig_n).min(joined.len());
+                            joined[lat.min(joined.len())..end].to_vec()
+                        })
+                        .collect();
+                } else {
+                    for (w, t) in work.iter_mut().zip(&tail) {
+                        w.extend_from_slice(t);
+                    }
                 }
             }
+            let rep = lim.report();
+            let m_out = measure_signal(&work, fs, lim_cfg.ratio);
+            println!();
+            println!("=== True-Peak Limiter Report ===");
+            print_limiter_report(&rep, &m_out, lim_cfg, fs);
+            print_signal_measurements("Output Audio (Verified)", &m_out);
+        } else {
+            println!();
+            println!("  [Note] True-peak limiter disabled (--no-tp-limiter).");
+            let m_out = measure_signal(&work, fs, lim_cfg.ratio);
+            print_signal_measurements("Output Audio", &m_out);
         }
-        let rep = lim.report();
-        let m_out = measure_signal(&work, fs, lim_cfg.ratio);
-        println!();
-        println!("=== True-Peak Limiter Report ===");
-        print_limiter_report(&rep, &m_out, lim_cfg, fs);
-        print_signal_measurements("Output Audio (Verified)", &m_out);
-    } else {
-        println!();
-        println!("  [Note] True-peak limiter disabled (--no-tp-limiter).");
-        let m_out = measure_signal(&work, fs, lim_cfg.ratio);
-        print_signal_measurements("Output Audio", &m_out);
+
+        let out_path = match &args.output {
+            Some(p) => p.clone(),
+            None => default_out_path(
+                input,
+                &ir_tag,
+                lim_cfg.enable.then(|| lim_cfg.ratio.label()),
+            ),
+        };
+
+        let bits = u32::try_from(args.out_bits).unwrap_or(32);
+        let frames = write_wav_pcm_or_float(Path::new(&out_path), &work, fs, bits)?;
+        println!(
+            "  Written Output WAV  : {out_path} ({bits}-bit @ {} Hz, {}ch, {} frames)",
+            comma_sep(u64::from(fs)),
+            work.len(),
+            comma_sep(frames as u64)
+        );
     }
-
-    let out_path = match &args.output {
-        Some(p) => p.clone(),
-        None => default_out_path(
-            input,
-            &ir_tag,
-            lim_cfg.enable.then(|| lim_cfg.ratio.label()),
-        ),
-    };
-
-    let bits = u32::try_from(args.out_bits).unwrap_or(32);
-    let frames = write_wav_pcm_or_float(Path::new(&out_path), &work, fs, bits)?;
-    println!(
-        "  Written Output WAV  : {out_path} ({bits}-bit @ {} Hz, {}ch, {} frames)",
-        comma_sep(u64::from(fs)),
-        work.len(),
-        comma_sep(frames as u64)
-    );
 
     if let Some(path) = args.verify_with.as_ref() {
         // Asked and refused is better than asked and ignored: a run that never applied a filter has
@@ -1439,17 +1484,6 @@ fn corrected_curve(model: &Model, args: &Args) -> Result<CurveAndReport, Error> 
     Ok((active_ctrl, reg_lines))
 }
 
-/// Print what a correction demands of some content. Reached only behind `--assess`.
-///
-/// `preamp_db` is the number the FIR synthesis actually applied, not `--headroom-db`: the
-/// convolver bakes `headroom_db - max_boost` into every tap, so that preamp *is* the gain
-/// staging between the filter and the limiter, and quoting the requested headroom instead
-/// overstated the level after the filter by the whole max boost.
-/// The written filter's realised magnitude, in dB, on a query grid.
-///
-/// Not the design's control knots: the filter that exists has truncation ripple, and the half-Kaiser
-/// tail pulls the top octave. Verifying against the knots instead would blame the rig for the
-/// filter's own deviation, which is the one confusion this section must not produce.
 /// Apply the experimental mixed-phase stage to a finished filter, keeping the report honest.
 ///
 /// The stage replaces the delivered taps, so the two report numbers that describe those taps — the
@@ -1518,6 +1552,11 @@ fn print_phase_block(items: &[(&str, hypreq::phase::Adjustment)]) {
     println!("                        minimum-phase filter before its tail fade.");
 }
 
+/// The written filter's realised magnitude, in dB, on a query grid.
+///
+/// Not the design's control knots: the filter that exists has truncation ripple, and the half-Kaiser
+/// tail pulls the top octave. Verifying against the knots instead would blame the rig for the
+/// filter's own deviation, which is the one confusion this section must not produce.
 fn realized_gain_db(ir: &[f64], fs: u32, f_query: &[f64]) -> Vec<f64> {
     if ir.is_empty() || fs == 0 {
         return vec![0.0; f_query.len()];
@@ -1583,22 +1622,34 @@ fn run_verification(
     // constant before judging shape, so the preamp would vanish from the residual anyway, but it
     // would stay in the design shortfall, which is never offset-corrected, and that number is meant
     // to describe a spectral decision rather than a headroom choice.
-    let top = (f64::from(fs) / 2.0).min(20000.0);
-    let grid = hypreq::fft::geomspace(20.0, top, 1200);
     let f_raw: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
     let g_raw: Vec<f64> = model.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+    let f_t: Vec<f64> = model.target_pts.iter().map(|p| p.0).collect();
+    let g_t: Vec<f64> = model
+        .target_pts
+        .iter()
+        .map(|p| p.1 + model.harm_offset)
+        .collect();
+
+    let f_raw_min = f_raw.iter().cloned().fold(f64::INFINITY, f64::min);
+    let f_raw_max = f_raw.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let f_t_min = f_t.iter().cloned().fold(f64::INFINITY, f64::min);
+    let f_t_max = f_t.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+    let top = (f64::from(fs) / 2.0).min(20000.0).min(f_raw_max).min(f_t_max);
+    let bottom = 20.0f64.max(f_raw_min).max(f_t_min).min(top);
+    let grid = if bottom < top {
+        hypreq::fft::geomspace(bottom, top, 1200)
+    } else {
+        vec![bottom]
+    };
+
     let raw_db = hypreq::pchip::pchip_log_interp(&f_raw, &g_raw, &grid);
     let gain_db = realized_gain_db(ir, fs, &grid);
     let predicted: Vec<(f64, f64)> = grid
         .iter()
         .zip(raw_db.iter().zip(&gain_db))
         .map(|(&f, (&r, &g))| (f, r + g - preamp_db))
-        .collect();
-    let f_t: Vec<f64> = model.target_pts.iter().map(|p| p.0).collect();
-    let g_t: Vec<f64> = model
-        .target_pts
-        .iter()
-        .map(|p| p.1 + model.harm_offset)
         .collect();
     let target_db = hypreq::pchip::pchip_log_interp(&f_t, &g_t, &grid);
     let target: Vec<(f64, f64)> = grid.iter().copied().zip(target_db).collect();
@@ -1632,6 +1683,12 @@ fn run_verification(
     Ok(())
 }
 
+/// Print what a correction demands of some content. Reached only behind `--assess`.
+///
+/// `preamp_db` is the number the FIR synthesis actually applied, not `--headroom-db`: the
+/// convolver bakes `headroom_db - max_boost` into every tap, so that preamp *is* the gain
+/// staging between the filter and the limiter, and quoting the requested headroom instead
+/// overstated the level after the filter by the whole max boost.
 fn print_assessment(
     ctrl: &[(f64, f64)],
     planar: &[Vec<f64>],

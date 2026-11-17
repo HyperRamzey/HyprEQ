@@ -24,7 +24,7 @@ Those are different claims, and the difference is the whole content of this sect
 | **True-peak** limiting, not sample-peak: interpolating detector, two-stage slow/transient gain, lookahead and release accounting, per-channel and group meters | Post-EQ clipping is the most common way "correcting" a headphone makes it worse, and sample-peak meters do not see inter-sample overs |
 | Every run writes an **audit CSV** (raw, target, raw error, applied EQ per control knot) and a 4-panel verification figure, and both are checked against a reference implementation | The curve can be audited after the fact, which is the difference between a tool and a preset |
 | Reproducible numerical contract: NumPy-compatible FFT/PCHIP/dither semantics, TPDF dither with a fixed stream, ties-to-even rounding, and a parity harness that diffs artefacts against the reference | The port is testable rather than plausible |
-| The engine is small and legible: `model → pchip → ir → convolve → limiter → plot`, with 236 library tests, 12 CLI tests and 3 that run the built binary | A base you can read is a base you can extend |
+| The engine is small and legible: `model → pchip → ir → convolve → limiter → plot`, with 312 library tests, 22 binary tests and 24 CLI integration tests | A base you can read is a base you can extend |
 
 ### What caps it — the honest list
 
@@ -115,7 +115,7 @@ single highest-value change in this document.
 ### 3.2 Perceptual robustness beats inversion accuracy
 
 > Masiero & Fels, *Perceptually Robust Headphone Equalization for Binaural
-> Reproduction*, **130th AES Convention, London (2010; Curran 2011)**, RWTH-CONV-198599.
+> Reproduction*, **130th AES Convention, London (May 2011)**, RWTH-CONV-198599.
 
 Inverting a headphone-to-eardrum response faithfully is not the same as making it sound
 right; over-fitting narrow nulls is a known failure mode, especially where the null is a
@@ -128,11 +128,11 @@ should be chosen from evidence about the curve, not set once on the command line
 ### 3.3 A target curve belongs to a fixture
 
 > Olive & Clark, *A Preferred Headphone Target Curve Defined for the B&K 5128 and GRAS
-> 45CA-10 Test Fixtures*, **AES 2025 (Newport Beach)**, eLibrary
-> [`22928`](https://www.aes.org/publications/elibrary-page/?id=22928).
+> 45CA-10 Test Fixtures*, **AES 157th Convention, Long Beach, CA (2024)**, eLibrary
+> [`23068`](https://www.aes.org/publications/elibrary-page/?id=23068), Express Paper 394.
 
 The abstract states the problem plainly: the Harman around-/on-ear target was defined on
-a GRAS 45CA fixture with an RA045 ("711") ear simulator and a custom pinna, and is
+a GRAS 45CA fixture with an RA0045 ("711") ear simulator and a custom pinna, and is
 "often misused with other fixtures, leading to measurement and interpretation errors due
 to differing acoustic transfer impedances". The authors measured headphones on all three
 fixtures and derived per-fixture calibration and target equivalents, then ran listening
@@ -155,10 +155,10 @@ likely way this tool produces a bad filter.
 >
 > Further: Juho Liski, Aki Mäkivirta & Vesa Välimäki, *Audibility of Group-Delay
 > Equalization*, **IEEE/ACM Transactions on Audio, Speech and Language Processing, vol. 29,
-> pp. 2189–2201 (2021)**, art. [`9450008`](https://doi.org/10.1109/TASLP.2021.3094413)
-> — a peer-reviewed journal article (not a thesis), which is where the thresholds quoted in
-> PR 5 come from: about −0.56 ms of negative and +0.64 ms of positive group delay at threshold
-> for a pink-noise impulse.
+> pp. 2189–2201 (2021)**, art. [`9450008`](https://doi.org/10.1109/TASLP.2021.3087969)
+> (CC BY 4.0 Open Access) — a peer-reviewed journal article (not a thesis), which is where the
+> thresholds quoted in PR 5 come from: about −0.56 ms of negative and +0.64 ms of positive group delay
+> at threshold for a pink-noise impulse across their 500 Hz – 4 kHz test band.
 
 Minimum-phase is the sane default for headphone correction: it puts no pre-ringing in
 front of a transient and matches how loudspeaker crossovers already behave. But it is a
@@ -393,17 +393,14 @@ untouched while bypassing a notch an octave away, which is the whole behaviour.
   The largest walk-back of a *cut* on any shipped model is 0.78 dB (JBL 770NC at 8481 Hz), and
   FT1 Pro's is 0.40 dB. `--regularize off` writes the same bytes as before the flag existed.
 
-**The symmetry decision, stated.** The shrink is symmetric: a band the load discredits is moved
-toward 0 dB whether it is a boost or a cut. Nothing in the reviewed literature asks for anything
-else — Norcross, Kirkeby, pyfar's `RegularizedSpectrumInversion` and AKtools' `AKffdInverseFilter`
-are all symmetric about their reference, and the JAES paper estimates a single amount per response
-— so an asymmetric penalty would be a HyprEQ product decision, not a citation, and may not be
-described as one if it is ever added. The argument for adding it is real (the damage this flag
-manages — headroom, noise floor, true peak — is done by boosts, and a cut cannot do it), and the
-argument against is that a sharp cut is the same chase of measurement texture seen from the other
-side. The measurements decide it stays symmetric for now: at `auto`, boosts are walked back by up
-to 4.16 dB and cuts by at most 0.78 dB, so the asymmetry the literature does not require is
-already the shape the form produces.
+**The symmetry decision, stated.** The shrink is symmetric in its closed-form formulation: a band the load discredits is moved
+toward 0 dB whether it is a boost or a cut. While Gómez-Bolaños, Mäkivirta & Pulkki (JAES 64(10), 2016) explicitly motivates
+regularization by the perceptual asymmetry between peaks and notches ("inversion cannot treat peaks and notches as being perceptually
+equivalent. Notch inversion can create high-Q resonances that can be very unpleasant... limiting the inversion of notches in a
+perceptually acceptable manner"), the mathematical regularization routine estimates one amount per response. Classical formulations
+(Norcross, Kirkeby, pyfar's `RegularizedSpectrumInversion`, AKtools' `AKffdInverseFilter`) operate symmetrically on transfer function
+power. In HyprEQ, the argument for managing boosts (headroom, noise floor, true peak) is critical, while cuts do not pose headroom
+risks. The measurements show that under `auto`, boosts are walked back by up to 4.16 dB and cuts by at most 0.78 dB.
 
 **What did not ship: the figure overlay.** The acceptance list asked for a panel drawing auto and
 off together. That item was substituted, not implemented, and the reason is scope on this turn,

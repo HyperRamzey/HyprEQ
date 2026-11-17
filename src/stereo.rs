@@ -148,7 +148,7 @@ impl Ears {
     /// two-column table has no ears to compare, and returns `None` — which is not an error, it is
     /// the common case.
     pub fn from_raw_pts(pts: &[Vec<f64>]) -> Option<Ears> {
-        if pts.first()?.len() < 4 {
+        if pts.is_empty() || !pts.iter().all(|p| p.len() >= 4) {
             return None;
         }
         let col = |i: usize| -> Vec<f64> { pts.iter().map(|p| p[i]).collect() };
@@ -239,7 +239,7 @@ pub struct Mismatch {
     ///
     /// Below [`RESOLVED_WINDOW_POINTS`] the curve cannot distinguish a spike from a shelf — every
     /// feature is one sample and whatever the interpolant makes of it — and [`Self::resolved`] is
-    /// false. Both shipped stereo captures sit at 1.6.
+    /// false. Both shipped stereo captures sit above 2.1.
     pub window_points: f64,
     /// Whether this capture resolves narrow and broad apart.
     pub resolved: bool,
@@ -273,7 +273,7 @@ pub fn analyse(e: &Ears) -> Mismatch {
         count += 1;
     }
     let spread_db = if count > 0 {
-        sq.sqrt() / count as f64
+        (sq / count as f64).sqrt()
     } else {
         0.0
     };
@@ -451,12 +451,11 @@ impl Trim {
 ///
 /// Written as `left += t`, `right −= t` so the pair's mean stays on the shipped curve. With `D`
 /// the captured difference and `level` its median, the cancellation asked for at a knot is
-/// `−(D − level)/2 − level/2`: the shape part goes through [`fit::regularize_correction`] with the
-/// shape mismatch as the measurement, so a band the knee disbelieves is left leaning exactly as
-/// much as today's single filter leaves it, and a band the knee believes is cancelled; the level
-/// part is applied in full and unasked, because a consistent offset between two ears is the least
-/// doubtful number in the file — it is not a claim about a feature, it is the pair's balance, and
-/// the knee exists to doubt features.
+/// `−(D − level)/2 − level/2`: the shape part is regularized with ear-swap antisymmetry by `1 / (1 + β)`,
+/// so a band the knee disbelieves is left leaning exactly as much as today's single filter leaves it,
+/// and a band the knee believes is cancelled; the level part is applied in full and unasked, because
+/// a consistent offset between two ears is the least doubtful number in the file — it is not a claim
+/// about a feature, it is the pair's balance, and the knee exists to doubt features.
 ///
 /// `max_skew_db` then bounds the *result*: no knot may differ by more than that, and the excess is
 /// taken off both sides equally so the mean still does not move. [`Trim::bound_bands`] counts the
@@ -488,8 +487,16 @@ pub fn trim(e: &Ears, ctrl: &Curve, policy: &fit::Policy, max_skew_db: f64) -> T
     for i in 0..ctrl_f.len() {
         let s = shape_at[i];
         let beta = fit::beta(dev_at[i], policy);
-        // The shape part, doubted band by band exactly as a correction is doubted.
-        let mut half = fit::regularize_correction(s, -s / 2.0, beta);
+        // The shape part, doubted band by band with ear-swap antisymmetry:
+        // regularized by 1 / (1 + beta) in dB, so L and R trims remain exact inverses
+        // and swapping L and R leads negates the trim identically.
+        let mut half = if beta <= 0.0 {
+            -s / 2.0
+        } else if !beta.is_finite() {
+            0.0
+        } else {
+            (-s / 2.0) / (1.0 + beta)
+        };
         // The balance, in full, split down the middle.
         half -= level / 2.0;
         let cap = (max_skew_db / 2.0).max(0.0);
@@ -505,7 +512,7 @@ pub fn trim(e: &Ears, ctrl: &Curve, policy: &fit::Policy, max_skew_db: f64) -> T
         f: ctrl_f,
         l: t_l,
         r: t_r,
-        level_db: level,
+        level_db: level.clamp(-max_skew_db, max_skew_db),
         bound_bands,
         cap_bites: 0,
     }
@@ -667,6 +674,40 @@ mod tests {
         let mono = vec![vec![20.0, 3.82], vec![1000.0, -1.0]];
         assert!(Ears::from_raw_pts(&mono).is_none());
         assert!(Ears::from_raw_pts(&[]).is_none());
+
+        // Ragged rows where later rows have fewer than 4 columns must not panic.
+        let ragged = vec![
+            vec![20.0, 3.82, 1.27, 2.54],
+            vec![1000.0, -1.0],
+        ];
+        assert!(Ears::from_raw_pts(&ragged).is_none());
+    }
+
+    #[test]
+    fn ear_swap_is_strictly_antisymmetric() {
+        let f = grid(61);
+        let bump_l = bump(&f, 3000.0, 4.0, 0.3);
+        let bump_r = bump(&f, 5000.0, -3.0, 0.3);
+        let e_lr = pair(&f, &bump_l, &bump_r);
+        let e_rl = pair(&f, &bump_r, &bump_l);
+        let ctrl = no_ctrl(&f);
+        let policy = Policy::default();
+        let t_lr = trim(&e_lr, &ctrl, &policy, 12.0);
+        let t_rl = trim(&e_rl, &ctrl, &policy, 12.0);
+        for i in 0..ctrl.len() {
+            assert!(
+                (t_lr.l[i] - t_rl.r[i]).abs() < 1e-12,
+                "L trim failed swap antisymmetry at index {i}: {} vs {}",
+                t_lr.l[i],
+                t_rl.r[i]
+            );
+            assert!(
+                (t_lr.r[i] - t_rl.l[i]).abs() < 1e-12,
+                "R trim failed swap antisymmetry at index {i}: {} vs {}",
+                t_lr.r[i],
+                t_rl.l[i]
+            );
+        }
     }
 
     #[test]
@@ -685,6 +726,22 @@ mod tests {
             (m.correlation.unwrap() - 1.0).abs() < 1e-6,
             "r {:?}",
             m.correlation
+        );
+    }
+
+    #[test]
+    fn spread_db_is_the_true_rms_spread() {
+        // RMS of [-2.0, 2.0, -2.0, 2.0] is exactly 2.0 dB.
+        // Old bug divided by count instead of sqrt(count), yielding 2.0 / 2 = 1.0 dB.
+        let f = vec![100.0, 200.0, 400.0, 800.0];
+        let l = vec![-2.0, 2.0, -2.0, 2.0];
+        let r = vec![0.0, 0.0, 0.0, 0.0];
+        let e = pair(&f, &l, &r);
+        let m = analyse(&e);
+        assert!(
+            (m.spread_db - 2.0).abs() < 1e-9,
+            "expected RMS 2.0 dB, got {} dB",
+            m.spread_db
         );
     }
 
@@ -1004,6 +1061,19 @@ mod tests {
         let quiet = pair(&f, &flat(&f), &bump(&f, 4000.0, 0.4, 0.25));
         let q = report_lines(&analyse(&quiet), f.len(), None);
         assert!(q.iter().any(|l| l.contains("inside a dB")), "{q:?}");
+    }
+
+    #[test]
+    fn level_offset_clamped_to_ceiling_in_report() {
+        let f = grid(121);
+        let l = flat(&f).iter().map(|&x| x + 10.0).collect::<Vec<_>>();
+        let e = pair(&f, &l, &flat(&f));
+        let m = analyse(&e);
+        let ctrl = no_ctrl(&f);
+        let t = trim(&e, &ctrl, &Policy::fixed(90.0), 6.0);
+        assert_eq!(t.level_db, 6.0);
+        let lines = report_lines(&m, e.len(), Some(&t));
+        assert!(lines.iter().any(|line| line.contains("balance -6.00 dB cancelled")));
     }
 
     #[test]

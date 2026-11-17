@@ -374,7 +374,7 @@ pub fn assess(
         analysed_samples: 0,
         bin_hz: 0.0,
     };
-    if planar.is_empty() || fs == 0 || grid.is_empty() {
+    if planar.is_empty() || planar.iter().all(|c| c.is_empty()) || fs == 0 || grid.is_empty() {
         return d;
     }
 
@@ -1213,6 +1213,18 @@ mod tests {
             &staging(&ctrl),
         );
         assert!(d.bands.is_empty(), "no rate, no bands");
+
+        // Zero-sample channel must return empty assessment without bogus resolution line.
+        let d_empty = assess(
+            &ctrl,
+            &[vec![]],
+            48_000,
+            DEFAULT_BUDGET_DB,
+            &staging(&ctrl),
+        );
+        assert_eq!(d_empty.analysed_samples, 0);
+        assert_eq!(d_empty.bin_hz, 0.0);
+        assert!(d_empty.bands.is_empty());
 
         // One sample, and a channel of NaNs.
         let one = sine(1000.0, 48_000, 1);

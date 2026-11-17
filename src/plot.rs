@@ -250,6 +250,8 @@ pub struct PlotInputs<'a> {
     /// people compare against their own captures: this is set from `--stereo` being anything other
     /// than `off`, so nobody's unchanged run gains a curve.
     pub show_ears: bool,
+    /// Added latency samples from experimental phase linearization (0 for minimum-phase).
+    pub added_latency: usize,
 }
 
 /// A solid stroke style.
@@ -1105,15 +1107,48 @@ impl PlotData {
         // The spectrum of the IR as written, on the reference's rfft grid, with the
         // preamp taken back out so panel 1/2 show the acoustic response, not the gain
         // the file carries.
-        let spec: Vec<Complex64> = fft::rfft(in_.ir_rt, in_.n_fft_rt);
-        let freqs = fft::rfftfreq(in_.n_fft_rt, fs);
+        let n_fft = in_.n_fft_rt.max(in_.ir_rt.len().next_power_of_two());
+        let spec: Vec<Complex64> = fft::rfft(in_.ir_rt, n_fft);
+        let freqs = fft::rfftfreq(n_fft, fs);
         let mag_db: Vec<f64> = spec
             .iter()
             .map(|c| 20.0 * c.norm().max(1e-15).log10() - in_.pre_rt)
             .collect();
-        let phase_deg: Vec<f64> = spec.iter().map(|c| c.im.atan2(c.re).to_degrees()).collect();
+
+        let lat = in_.added_latency;
+        let mut unwrapped = Vec::with_capacity(spec.len());
+        let mut prev = 0.0f64;
+        for (k, c) in spec.iter().enumerate() {
+            let mut raw_rad = c.im.atan2(c.re)
+                + if lat > 0 {
+                    2.0 * std::f64::consts::PI * (k as f64) * (lat as f64) / (n_fft as f64)
+                } else {
+                    0.0
+                };
+            if k == 0 {
+                unwrapped.push(raw_rad);
+                prev = raw_rad;
+            } else {
+                let mut diff = raw_rad - prev;
+                while diff > std::f64::consts::PI {
+                    raw_rad -= 2.0 * std::f64::consts::PI;
+                    diff = raw_rad - prev;
+                }
+                while diff < -std::f64::consts::PI {
+                    raw_rad += 2.0 * std::f64::consts::PI;
+                    diff = raw_rad - prev;
+                }
+                unwrapped.push(raw_rad);
+                prev = raw_rad;
+            }
+        }
+        let unwrapped_deg: Vec<f64> = unwrapped.into_iter().map(|r| r.to_degrees()).collect();
+        let interp_unwrapped = fft::interp_grid(&f_plot, &freqs, &unwrapped_deg);
+        let wav_phase: Vec<f64> = interp_unwrapped
+            .into_iter()
+            .map(|deg| ((deg + 180.0).rem_euclid(360.0)) - 180.0)
+            .collect();
         let wav_eq = fft::interp_grid(&f_plot, &freqs, &mag_db);
-        let wav_phase = fft::interp_grid(&f_plot, &freqs, &phase_deg);
 
         let f_tar: Vec<f64> = model.target_pts.iter().map(|p| p.0).collect();
         let g_tar: Vec<f64> = model.target_pts.iter().map(|p| p.1).collect();
@@ -1168,17 +1203,27 @@ impl PlotData {
             .filter(|&(t, _)| (-1.0..=4.0).contains(&t))
             .map(|(t, i)| (t, ir_lin_centered[i] / peak_mp))
             .unzip();
-        // A run of zeros left of 0 ms, so the minimum-phase trace visibly begins at the
-        // transient instead of being interpolated across the empty half of the panel.
-        let lead_n = 48usize;
-        let mp_t_ms: Vec<f64> = (0..lead_n)
-            .map(|i| -1.0 + (1.0 - 1e3 / fs) * i as f64 / (lead_n - 1) as f64)
-            .chain((0..250.min(in_.ir_rt.len())).map(|i| i as f64 / fs * 1000.0))
-            .collect();
-        let mp_ir: Vec<f64> = vec![0.0; lead_n]
-            .into_iter()
-            .chain(in_.ir_rt.iter().take(250).map(|&v| v / peak_mp))
-            .collect();
+        let (mp_t_ms, mp_ir) = if lat == 0 {
+            let lead_n = 48usize;
+            let t_ms: Vec<f64> = (0..lead_n)
+                .map(|i| -1.0 + (1.0 - 1e3 / fs) * i as f64 / (lead_n - 1) as f64)
+                .chain((0..250.min(in_.ir_rt.len())).map(|i| i as f64 / fs * 1000.0))
+                .collect();
+            let ir: Vec<f64> = vec![0.0; lead_n]
+                .into_iter()
+                .chain(in_.ir_rt.iter().take(250).map(|&v| v / peak_mp))
+                .collect();
+            (t_ms, ir)
+        } else {
+            let lead_samples = 48usize.min(lat);
+            let start = lat - lead_samples;
+            let end = in_.ir_rt.len().min(start + 250);
+            let t_ms: Vec<f64> = (start..end)
+                .map(|i| (i as f64 - lat as f64) / fs * 1000.0)
+                .collect();
+            let ir: Vec<f64> = in_.ir_rt[start..end].iter().map(|&v| v / peak_mp).collect();
+            (t_ms, ir)
+        };
 
         let meta = &model.plot_meta;
         let str_meta = |k: &str| -> Option<String> {
@@ -1296,7 +1341,14 @@ impl PlotData {
             phase_label: "Filter Minimum-Phase Response (deg)".to_string(),
             ir_title: "Impulse Response: Minimum-Phase vs. Linear-Phase Pre-Ringing".into(),
             lin_ir_label: "Linear-Phase IR (Pre-Ringing before 0.0 ms)".to_string(),
-            mp_ir_label: "Minimum-Phase IR (0.00 ms IR Peak Delay, Zero Pre-Ringing)".to_string(),
+            mp_ir_label: if lat == 0 {
+                "Minimum-Phase IR (0.00 ms IR Peak Delay, Zero Pre-Ringing)".to_string()
+            } else {
+                format!(
+                    "Reshaped IR ({:.2} ms IR Peak Delay)",
+                    lat as f64 / fs * 1000.0
+                )
+            },
             f_plot,
             raw_l,
             raw_r,
@@ -2279,6 +2331,7 @@ mod tests {
             active_ctrl: &[(20.0, 2.0), (1000.0, 0.0), (20000.0, 4.0)],
             notch_mode: "safe",
             show_ears: false,
+            added_latency: 0,
         }
     }
 
@@ -2605,6 +2658,7 @@ mod tests {
             active_ctrl: &[(20.0, 2.0), (1000.0, 0.0), (20000.0, 4.0)],
             notch_mode: "safe",
             show_ears: false,
+            added_latency: 0,
         }
     }
 
@@ -3464,6 +3518,36 @@ mod tests {
             peak > 0 && peak + 1 < d.lin_ir.len(),
             "peak pinned to a window edge"
         );
+    }
+
+    #[test]
+    fn plot_with_added_latency_centers_impulse_and_labels_peak_delay() {
+        let mut ir = vec![0.0f64; 4096];
+        ir[0] = 1.0;
+        ir[1] = -0.5;
+        let mag: Vec<f64> = (0..2049).map(|_| 1.0).collect();
+        let lat = 500usize;
+        let mut shifted = vec![0.0f64; ir.len()];
+        shifted[lat..lat + 100].copy_from_slice(&ir[..100]);
+        let mut in_ = full_inputs_ref(&shifted, &mag);
+        in_.added_latency = lat;
+        let d = PlotData::build(&model(), &in_);
+        assert!(d.mp_ir_label.contains("Reshaped IR"));
+        assert!(d.mp_ir_label.contains("ms IR Peak Delay"));
+        assert!(!d.mp_t_ms.is_empty());
+        let peak_idx = d
+            .mp_ir
+            .iter()
+            .enumerate()
+            .fold((0usize, 0.0f64), |acc, (i, &v)| {
+                if v.abs() > acc.1 {
+                    (i, v.abs())
+                } else {
+                    acc
+                }
+            })
+            .0;
+        assert_eq!(d.mp_t_ms[peak_idx], 0.0, "peak at {} ms", d.mp_t_ms[peak_idx]);
     }
 
     /// The small fixture used by the data-level tests.

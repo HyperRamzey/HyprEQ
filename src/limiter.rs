@@ -173,7 +173,7 @@ pub const RELEASE_WINDOW_MS: f64 = 5.0;
 pub const TRANSIENT_RELEASE_MS: f64 = 25.0;
 
 /// Settings for the true-peak limiter.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Cfg {
     /// Whether the limiter runs at all.
     ///
@@ -416,7 +416,7 @@ impl Cfg {
 }
 
 /// What one file's limiter pass measured.
-#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Report {
     /// True peak at the limiter input, dBTP.
     pub pre_dbtp: f64,
@@ -441,26 +441,19 @@ pub struct Report {
     /// Frames the gain ramp takes in force.
     pub ramp_frames: usize,
     /// Slow stage attack in force, ms.
-    #[serde(default)]
     pub attack_ms: f64,
     /// Slow stage release in force, ms.
-    #[serde(default)]
     pub release_ms: f64,
     /// Transient stage channel linking in force, 0..=1.
-    #[serde(default)]
     pub link_transient: f64,
     /// Slow stage channel linking in force, 0..=1.
-    #[serde(default)]
     pub link_release: f64,
     /// Largest reduction taken by the fast stage on its own, dB.
-    #[serde(default)]
     pub transient_reduction_db: f64,
     /// Largest reduction taken by the slow stage on its own, dB.
-    #[serde(default)]
     pub release_reduction_db: f64,
     /// Frames the slow stage was holding gain below unity — the number that says how
     /// much of this file was level-managed rather than peak-protected.
-    #[serde(default)]
     pub release_frames: u64,
     /// Side-chain ratio.
     pub ratio: Ratio,
@@ -468,7 +461,6 @@ pub struct Report {
     pub engaged_frames: u64,
     /// Extra dB by which full-band content (energy above 0.45 fs) can exceed the ceiling.
     /// See [`Cfg::band_caveat_db`].
-    #[serde(default)]
     pub band_caveat_db: f64,
 }
 
@@ -510,7 +502,6 @@ impl Report {
 /// *down* toward the schedule, so it cannot break the ceiling.
 pub struct Limiter {
     cfg: Cfg,
-    rate: u32,
     /// Side-chain detector per channel.
     side: Vec<Detector>,
     /// Post-limiter measurement, same ratio as the side chain.
@@ -605,7 +596,6 @@ impl Limiter {
                 enable: false,
                 ..Cfg::default()
             },
-            rate: 48_000,
             side: Vec::new(),
             out_meter: TruePeak::new(Ratio::X4, 0),
             lines: Vec::new(),
@@ -649,7 +639,6 @@ impl Limiter {
             // signal never sees.
             let mut off = Self::disabled();
             off.cfg = cfg;
-            off.rate = rate;
             return off;
         }
         let delta = cfg.ratio.report_delay();
@@ -661,7 +650,6 @@ impl Limiter {
         let ring_len = (latency + 2 * delta + ramp + 8).max(16);
         Self {
             cfg,
-            rate,
             side: (0..channels).map(|_| Detector::new(cfg.ratio)).collect(),
             out_meter: TruePeak::new(cfg.ratio, channels),
             lines: vec![vec![0.0; latency.max(1)]; channels.max(1)],
@@ -669,7 +657,7 @@ impl Limiter {
             latency,
             delta,
             ring_len,
-            scratch: Vec::with_capacity(channels),
+            scratch: vec![0.0; channels.max(1)],
             req_ring: vec![vec![1.0; ring_len]; channels.max(1)],
             sched_ring: vec![vec![1.0; ring_len]; channels.max(1)],
             gr_ring: vec![vec![1.0; ring_len]; channels.max(1)],
@@ -721,12 +709,6 @@ impl Limiter {
                 band_caveat_db: cfg.band_caveat_db(),
             },
         }
-    }
-
-    /// Sample rate the limiter was built for.
-    #[must_use]
-    pub fn rate(&self) -> u32 {
-        self.rate
     }
 
     #[must_use]
@@ -786,23 +768,16 @@ impl Limiter {
                 // re-based. See the comment on the loop below.
                 let gr_m = self.gr_ring[c][self.slot(m)].max(f64::MIN_POSITIVE);
                 let mut ga = 1.0f64;
-                for k in lo..=(m + delta) {
-                    let kslot = self.slot(k);
-                    // A crest is not one frame. The reading at `m` is built from the samples
-                    // in `[m-delta, m+delta]`, and each of those samples is multiplied by
-                    // *its own frame's* combined gain, so a demand computed against frame `k`
-                    // only protects `k` if every neighbour is scaled no harder than `m` is.
-                    // Where the slow stage is higher than it is at `k` — earlier frames during
-                    // a fast attack, later ones during a fast release — the fast stage has to
-                    // make up the difference itself, by exactly this ratio. At the 1 ms attack
-                    // this module accepts the slow stage can travel 3.27 dB across the window,
-                    // which no guard band worth having would cover; widening the guard instead
-                    // would tax every file, including the ones where the envelope barely
-                    // moves, and this costs 0.00 dB when the ratio is 1.
+                let mut kslot = self.slot(lo);
+                for _ in lo..=(m + delta) {
                     let scale = (self.gr_ring[c][kslot] / gr_m).min(1.0);
                     let v = self.req_ring[c][kslot] * scale;
                     if v < ga {
                         ga = v;
+                    }
+                    kslot += 1;
+                    if kslot == self.ring_len {
+                        kslot = 0;
                     }
                 }
                 // This is pass 2's answer, stored as the demand for the frame. The slope
@@ -1004,15 +979,24 @@ impl Limiter {
         // stage has had it.
         let m = self.fed.saturating_sub(1 + self.delta as u64);
         let slot = self.slot(m);
+        let mut req_stack = [1.0f64; 32];
+        let mut req_heap;
+        let req_slice: &mut [f64] = if nch <= 32 {
+            &mut req_stack[..nch]
+        } else {
+            req_heap = vec![1.0f64; nch];
+            &mut req_heap[..]
+        };
         let mut group = 1.0f64;
         for c in 0..nch {
             let req = self.required(c);
+            req_slice[c] = req;
             if req < group {
                 group = req;
             }
         }
         for c in 0..nch {
-            let mut req = self.required(c);
+            let mut req = req_slice[c];
             if self.cfg.link_transient > 0.0 {
                 req = blend(req, group, self.cfg.link_transient);
             }

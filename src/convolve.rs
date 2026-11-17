@@ -50,9 +50,14 @@ pub fn convolve_planar_fft(planar: &[Vec<f64>], ir: &[f64], trim_to_input: bool)
         return vec![Vec::new(); planar.len()];
     }
 
+    let n_ir = ir.len();
+    let block_len = 16384usize.max(block_bound(n_in));
+    let n_fft = shl_bit_length(block_len + n_ir - 2);
+    let h = crate::fft::rfft(ir, n_fft);
+
     planar
         .iter()
-        .map(|ch| channel_out(ch, ir, n_in, trim_to_input))
+        .map(|ch| channel_out_h(ch, n_ir, &h, n_fft, block_len, n_in, trim_to_input))
         .collect()
 }
 
@@ -81,19 +86,33 @@ pub fn convolve_planar_pair(
     if n_in == 0 {
         return Some(vec![Vec::new(); 2]);
     }
+
+    let n_ir_l = ir_l.len();
+    let block_len_l = 16384usize.max(block_bound(n_in));
+    let n_fft_l = shl_bit_length(block_len_l + n_ir_l - 2);
+    let h_l = crate::fft::rfft(ir_l, n_fft_l);
+
+    let n_ir_r = ir_r.len();
+    let block_len_r = 16384usize.max(block_bound(n_in));
+    let n_fft_r = shl_bit_length(block_len_r + n_ir_r - 2);
+    let h_r = crate::fft::rfft(ir_r, n_fft_r);
+
     Some(vec![
-        channel_out(&planar[0], ir_l, n_in, trim_to_input),
-        channel_out(&planar[1], ir_r, n_in, trim_to_input),
+        channel_out_h(&planar[0], n_ir_l, &h_l, n_fft_l, block_len_l, n_in, trim_to_input),
+        channel_out_h(&planar[1], n_ir_r, &h_r, n_fft_r, block_len_r, n_in, trim_to_input),
     ])
 }
 
-/// One channel against one FIR, blocked on `n_in` — channel 0's length — so every channel of a
-/// planar buffer shares the block boundaries and the accumulation order.
-fn channel_out(ch: &[f64], ir: &[f64], n_in: usize, trim_to_input: bool) -> Vec<f64> {
-    let n_ir = ir.len();
-    let block_len = 16384usize.max(block_bound(n_in));
-    let n_fft = shl_bit_length(block_len + n_ir - 2);
-    let h = crate::fft::rfft(ir, n_fft);
+/// One channel against one precomputed filter spectrum `H`.
+fn channel_out_h(
+    ch: &[f64],
+    n_ir: usize,
+    h: &[Complex64],
+    n_fft: usize,
+    block_len: usize,
+    n_in: usize,
+    trim_to_input: bool,
+) -> Vec<f64> {
     let out_len = if trim_to_input { n_in } else { n_in + n_ir - 1 };
 
     let mut acc = vec![0.0f64; n_in + n_ir - 1];
@@ -105,7 +124,7 @@ fn channel_out(ch: &[f64], ir: &[f64], n_in: usize, trim_to_input: bool) -> Vec<
         let blk = &ch[start..stop];
         let seg_len = blk.len() + n_ir - 1;
         let mut spec = crate::fft::rfft(blk, n_fft);
-        apply_response(&mut spec, &h);
+        apply_response(&mut spec, h);
         let y = crate::fft::irfft(&spec, n_fft);
         let take = seg_len.min(acc.len() - start);
         for (a, &v) in acc[start..start + take].iter_mut().zip(&y[..take]) {
@@ -116,6 +135,7 @@ fn channel_out(ch: &[f64], ir: &[f64], n_in: usize, trim_to_input: bool) -> Vec<
     acc.truncate(out_len.min(acc.len()));
     acc
 }
+
 
 /// `min(65536, n_in)` — split out so the clamp reads as one idea.
 fn block_bound(n_in: usize) -> usize {
@@ -137,9 +157,15 @@ pub fn plan(n_in: usize, n_ir: usize) -> (usize, usize) {
 /// Convolve a single channel.
 #[must_use]
 pub fn convolve1(x: &[f64], ir: &[f64], trim_to_input: bool) -> Vec<f64> {
-    convolve_planar_fft(std::slice::from_ref(&x.to_vec()), ir, trim_to_input)
-        .pop()
-        .unwrap_or_default()
+    let n_in = x.len();
+    if n_in == 0 {
+        return Vec::new();
+    }
+    let n_ir = ir.len();
+    let block_len = 16384usize.max(block_bound(n_in));
+    let n_fft = shl_bit_length(block_len + n_ir - 2);
+    let h = crate::fft::rfft(ir, n_fft);
+    channel_out_h(x, n_ir, &h, n_fft, block_len, n_in, trim_to_input)
 }
 
 /// In-place complex multiply of an `rfft` spectrum by a precomputed response.

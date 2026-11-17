@@ -62,7 +62,7 @@
 //! No standard reviewed defines how far a headphone may sit from a target curve after EQ. What
 //! exists in the literature is preference data, not acceptance criteria: Fleischmann, Silzle and
 //! Plogsties (*Headphone Equalization — Measurement, Design and Psychoacoustic Evaluation*,
-//! Microelectronic Systems, Springer 2011, pp. 309–319) equalize measured headphones onto several
+//! Microelectronic Systems, Springer 2011, pp. 301–311) equalize measured headphones onto several
 //! targets and evaluate by listening test, and state in their abstract that "in the literature,
 //! there is no consensus about the optimal transfer function and equalization of headphones" —
 //! which is exactly why a shipped default cannot be cited to a document. So:
@@ -77,7 +77,7 @@
 
 use crate::assess;
 use crate::fit::median_db;
-use crate::pchip::pchip_log_interp;
+use crate::pchip::Pchip;
 
 /// Residual, in dB, beyond which a band is called a failure. A configuration default; see the
 /// module docs for why it cannot be cited to a standard.
@@ -275,10 +275,6 @@ impl Curve {
     fn covers(&self, lo: f64, hi: f64) -> bool {
         lo >= self.lo() && hi <= self.hi()
     }
-
-    fn at(&self, f: &[f64]) -> Vec<f64> {
-        pchip_log_interp(&self.f, &self.g, f)
-    }
 }
 
 /// Compensated mean, because that is how this crate adds numbers up; for 25 samples it makes no
@@ -292,14 +288,6 @@ fn mean(v: &[f64]) -> f64 {
         acc.add(x);
     }
     acc.total() / v.len() as f64
-}
-
-/// Band average and within-band spread of a curve, from the samples it was handed.
-fn band_stats(curve: &Curve, samples: &[f64]) -> (f64, f64) {
-    let v = curve.at(samples);
-    let max = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let min = v.iter().cloned().fold(f64::INFINITY, f64::min);
-    (mean(&v), max - min)
 }
 
 /// The log-spaced samples across one band's own width, both edges included.
@@ -396,40 +384,34 @@ fn measure_bands(
 ) -> (Vec<BandResult>, Vec<Vec<f64>>) {
     let mut rows: Vec<BandResult> = Vec::with_capacity(grid.len());
     let mut resid_of: Vec<Vec<f64>> = Vec::with_capacity(grid.len());
+    let p_post = Pchip::new(&post.f, &post.g);
+    let p_pred = Pchip::new(&predicted.f, &predicted.g);
+    let p_target = target.map(|t| Pchip::new(&t.f, &t.g));
+
     for b in grid {
         let samples = band_samples(b.lo_hz, b.hi_hz);
         let covered = post.covers(b.lo_hz, b.hi_hz) && predicted.covers(b.lo_hz, b.hi_hz);
-        let (measured_db, _) = if covered {
-            band_stats(post, &samples)
-        } else {
-            (f64::NAN, f64::NAN)
-        };
-        let (predicted_db, _) = if covered {
-            band_stats(predicted, &samples)
-        } else {
-            (f64::NAN, f64::NAN)
-        };
-        // The target is reported on the same samples, so the three averages describe the same piece
-        // of axis rather than three different estimators.
-        let (target_db, _) = if covered {
-            target
-                .map(|t| band_stats(t, &samples))
-                .unwrap_or((f64::NAN, f64::NAN))
-        } else {
-            (f64::NAN, f64::NAN)
-        };
-        // One interpolation of each curve over the band's samples, reused for every statistic here:
-        // the residual's spread, its mean, and its worst point.
-        let (scatter_db, resid, design_db) = if covered {
-            let m = post.at(&samples);
-            let h = predicted.at(&samples);
+        let target_covered = target.is_some_and(|t| t.covers(b.lo_hz, b.hi_hz));
+
+        let (measured_db, predicted_db, target_db, scatter_db, resid, design_db) = if covered {
+            let m = p_post.eval_grid(&samples);
+            let h = p_pred.eval_grid(&samples);
+            let m_mean = mean(&m);
+            let h_mean = mean(&h);
+
+            let t_data = if target_covered {
+                p_target.as_ref().map(|pt| pt.eval_grid(&samples))
+            } else {
+                None
+            };
+            let t_mean = t_data.as_ref().map_or(f64::NAN, |t| mean(t));
+
             let d: Vec<f64> = m.iter().zip(&h).map(|(&x, &y)| x - y).collect();
             let max = d.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let min = d.iter().cloned().fold(f64::INFINITY, f64::min);
-            // The design's own error, same samples: `target − predicted` at its worst inside the
-            // band, and NaN when no target was supplied rather than a plausible zero.
-            let design = target.map_or(f64::NAN, |tg| {
-                tg.at(&samples).iter().zip(&h).map(|(&x, &y)| x - y).fold(
+
+            let design = t_data.map_or(f64::NAN, |t| {
+                t.iter().zip(&h).map(|(&x, &y)| x - y).fold(
                     f64::NAN,
                     |worst: f64, v: f64| {
                         if !worst.is_finite() || v.abs() > worst.abs() {
@@ -440,9 +422,9 @@ fn measure_bands(
                     },
                 )
             });
-            (max - min, d, design)
+            (m_mean, h_mean, t_mean, max - min, d, design)
         } else {
-            (f64::NAN, Vec::new(), f64::NAN)
+            (f64::NAN, f64::NAN, f64::NAN, f64::NAN, Vec::new(), f64::NAN)
         };
         resid_of.push(resid);
 
@@ -453,10 +435,10 @@ fn measure_bands(
             measured_db,
             predicted_db,
             target_db,
-            residual_db: measured_db - predicted_db,
-            shape_db: f64::NAN,
             scatter_db,
             design_db,
+            residual_db: measured_db - predicted_db,
+            shape_db: f64::NAN,
             status: if covered {
                 Status::Pass
             } else {

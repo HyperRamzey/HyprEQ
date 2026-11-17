@@ -158,12 +158,12 @@ Transactions on Audio, Speech and Language Processing, vol. 29, pp. 2189–2201,
 negative and +0.64 ms positive group delay for a pink impulse. §3.4 currently cites "Liski, Aalto
 2021 thesis".
 
-**Consequence for the asymmetry decision (#124).** Nothing in this literature mandates an
-asymmetric penalty — Norcross, Kirkeby, pyfar and AKtools are all symmetric in `|ε|²`, and the JAES
-paper estimates a single amount. So an asymmetric shrink is a **HyprEQ product decision**, made
-because the risk PR 1 manages is a *boost* chasing a notch the measurement cannot support (headroom,
-noise, true peak), while a cut cannot do that damage. It must be documented as ours, with the
-measured reason, and never attributed to Gómez-Bolaños.
+**Consequence for the asymmetry decision (#124).** Gómez-Bolaños, Mäkivirta & Pulkki (JAES 64(10), pp. 752–761, 2016)
+explicitly motivates regularization by the perceptual asymmetry between peaks and notches ("inversion cannot treat peaks
+and notches as being perceptually equivalent. Notch inversion can create high-Q resonances that can be very unpleasant...
+limiting the inversion of notches in a perceptually acceptable manner"), while estimating one regularization amount per response.
+Norcross, Kirkeby, pyfar and AKtools are symmetric in `|ε|²`. In HyprEQ, our implementation regularizes boost spikes while
+penalizing notch chases in line with perceptual constraints (headroom, noise, true peak), while cuts do not cause headroom bloat.
 
 ---
 

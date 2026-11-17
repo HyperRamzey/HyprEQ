@@ -185,9 +185,12 @@ pub fn synthesize_minimum_phase_ir(
     target_db[0] = g_nodes[0];
 
     if gauss_apodize {
+        let f_nyq = fs_f / 2.0;
+        let f_start = f_nyq * (20200.0 / 24000.0);
+        let width = (f_nyq - f_start) / (3800.0 / 1650.0);
         for (f, db) in freqs.iter().zip(target_db.iter_mut()) {
-            if *f > 20200.0 {
-                let x = (f - 20200.0) / 1650.0;
+            if *f > f_start {
+                let x = (f - f_start) / width;
                 *db += -3.0103 * x * x;
             }
         }
@@ -277,6 +280,71 @@ pub fn synthesize_minimum_phase_ir(
         unwindowed_floor_dbfs,
         windowed_floor_dbfs,
     })
+}
+
+/// Synthesizes minimum-phase IRs for a stereo pair under a single shared preamp.
+///
+/// Normalizes the hotter ear to `headroom_db` and applies that exact same preamp to both ears,
+/// so the interaural level offset (balance) is preserved rather than erased by independent normalization.
+pub fn synthesize_stereo_minimum_phase_ir(
+    left_ctrl: &[(f64, f64)],
+    right_ctrl: &[(f64, f64)],
+    fs: u32,
+    n_fft: usize,
+    n_taps: usize,
+    n_tail: usize,
+    headroom_db: f64,
+    gauss_apodize: bool,
+    kaiser_beta: f64,
+) -> Result<(IrResult, IrResult), IrError> {
+    let mut left = synthesize_minimum_phase_ir(
+        left_ctrl,
+        fs,
+        n_fft,
+        n_taps,
+        n_tail,
+        headroom_db,
+        gauss_apodize,
+        kaiser_beta,
+    )?;
+    let mut right = synthesize_minimum_phase_ir(
+        right_ctrl,
+        fs,
+        n_fft,
+        n_taps,
+        n_tail,
+        headroom_db,
+        gauss_apodize,
+        kaiser_beta,
+    )?;
+    let shared_max_boost = left.max_boost_db.max(right.max_boost_db);
+    let shared_preamp = headroom_db - shared_max_boost;
+
+    if (left.preamp_db - shared_preamp).abs() > 1e-9 {
+        left = synthesize_minimum_phase_ir(
+            left_ctrl,
+            fs,
+            n_fft,
+            n_taps,
+            n_tail,
+            shared_preamp + left.max_boost_db,
+            gauss_apodize,
+            kaiser_beta,
+        )?;
+    }
+    if (right.preamp_db - shared_preamp).abs() > 1e-9 {
+        right = synthesize_minimum_phase_ir(
+            right_ctrl,
+            fs,
+            n_fft,
+            n_taps,
+            n_tail,
+            shared_preamp + right.max_boost_db,
+            gauss_apodize,
+            kaiser_beta,
+        )?;
+    }
+    Ok((left, right))
 }
 
 /// `20·log10(max|last n taps| + eps)` — the decay at the truncation point. The `eps`
@@ -552,6 +620,33 @@ mod tests {
             "{} vs {}",
             faded.windowed_floor_dbfs,
             raw.windowed_floor_dbfs
+        );
+    }
+
+    #[test]
+    fn stereo_synthesis_preserves_interaural_level_difference() {
+        let l_curve = vec![(20.0, 1.0), (1000.0, 1.0), (20000.0, 1.0)];
+        let r_curve = vec![(20.0, -1.0), (1000.0, -1.0), (20000.0, -1.0)];
+        let (l, r) = synthesize_stereo_minimum_phase_ir(
+            &l_curve,
+            &r_curve,
+            48000,
+            4096,
+            512,
+            0,
+            -1.5,
+            false,
+            18.0,
+        )
+        .unwrap();
+        assert_eq!(l.preamp_db, r.preamp_db, "preamp must be identical on both channels");
+        assert!((l.preamp_db - -2.5).abs() < 1e-9);
+        let peak_l = l.ir.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+        let peak_r = r.ir.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
+        let diff_db = 20.0 * (peak_l / peak_r).log10();
+        assert!(
+            (diff_db - 2.0).abs() < 0.05,
+            "expected 2.0 dB L/R difference, got {diff_db:.3} dB"
         );
     }
 

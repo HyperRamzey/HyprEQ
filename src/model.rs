@@ -358,7 +358,12 @@ pub fn sort_and_dedup_points(pts: &[Point]) -> Vec<Point> {
     // `1e400` or a hand-edited `inf` row is exactly the input that must not reach PCHIP.
     let mut kept: Vec<Point> = pts
         .iter()
-        .filter(|pt| pt.first().is_some_and(|f| f.is_finite() && *f > 0.0))
+        .filter(|pt| {
+            pt.len() >= 2
+                && pt[0].is_finite()
+                && pt[0] > 0.0
+                && pt[1..].iter().all(|g| g.is_finite())
+        })
         .cloned()
         .collect();
     kept.sort_by(|a, b| a[0].total_cmp(&b[0]));
@@ -468,15 +473,15 @@ fn shape_error(
         let z = (f.max(20.0) / 20.0).log2() / 0.75;
         let disc = subbass_leak_discount_db * (-z * z).exp();
         e - disc
-    } else if f <= hf_taper_start_hz {
+    } else if f >= hf_bypass_hz {
+        0.0
+    } else if f <= hf_taper_start_hz || hf_taper_start_hz >= hf_bypass_hz {
         e
-    } else if f < hf_bypass_hz {
+    } else {
         let log_ratio = (hf_bypass_hz / hf_taper_start_hz).log2();
         let w =
             0.5 * (1.0 + (std::f64::consts::PI * (f / hf_taper_start_hz).log2() / log_ratio).cos());
         e * w
-    } else {
-        0.0
     }
 }
 
@@ -1248,6 +1253,20 @@ mod tests {
             pt(&[1000.0, -2.0]),
             "later row wins, like the Python dict"
         );
+    }
+
+    #[test]
+    fn sort_and_dedup_rejects_single_column_and_non_finite_gains() {
+        let pts = vec![
+            pt(&[100.0]),               // 1-column row must be dropped
+            pt(&[200.0, f64::NAN]),     // NaN gain must be dropped
+            pt(&[300.0, f64::INFINITY]),// inf gain must be dropped
+            pt(&[400.0, 1.0, f64::NAN]),// non-finite in any gain column must be dropped
+            pt(&[500.0, 2.5]),          // valid
+        ];
+        let got = sort_and_dedup_points(&pts);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0], pt(&[500.0, 2.5]));
     }
 
     #[test]

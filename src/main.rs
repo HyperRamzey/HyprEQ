@@ -18,7 +18,7 @@ use std::process::exit;
 
 use clap::Parser;
 
-use hypreq::convolve::convolve_planar_fft;
+use hypreq::convolve::{convolve_planar_fft, convolve_planar_pair};
 use hypreq::error::Error;
 use hypreq::ir::{
     apply_notch_mode, export_audit_csv, l1_gain_db, mpv_n_fft, synthesize_minimum_phase_ir,
@@ -65,6 +65,13 @@ struct Args {
     /// +1.50 dB), 'original', or 'zero' (0.0 dB)
     #[arg(long, default_value = "safe")]
     notch_mode: String,
+    /// Per-ear correction: 'off' (default, one shared filter, silent), 'report' (same filter,
+    /// say what the two ears differ by), 'split' (one filter per ear, needs -i and a stereo WAV)
+    #[arg(long, default_value = "off")]
+    stereo: String,
+    /// Largest left/right filter difference --stereo split may apply in one band, in dB
+    #[arg(long, default_value_t = hypreq::stereo::DEFAULT_MAX_SKEW_DB, allow_negative_numbers = true)]
+    stereo_max_skew: f64,
     /// Force Gaussian Nyquist roll-off (>20.2 kHz) for legacy brickwall-ringing sources
     #[arg(long, conflicts_with = "no_apodize")]
     apodize: bool,
@@ -301,6 +308,28 @@ fn run(args: Args) -> Result<(), Error> {
         ));
     }
     validate_choice(&args.notch_mode, &NotchMode::CHOICES, "--notch-mode");
+    validate_choice(&args.stereo, &hypreq::stereo::Mode::CHOICES, "--stereo");
+    if !args.stereo_max_skew.is_finite() {
+        usage_error(format!(
+            "argument --stereo-max-skew: not a number: '{}'",
+            args.stereo_max_skew
+        ));
+    }
+    if args.stereo_max_skew < 0.0 {
+        usage_error(
+            "--stereo-max-skew cannot be negative; 0.00 means no per-ear difference at all",
+        );
+    }
+    // Asked of a run that writes convolvers, `split` has nothing to act on: a mono impulse response
+    // is loaded on both channels by definition, which is what a PipeWire `afir` takes. Refused
+    // before any work rather than quietly downgraded to `report`, because a flag that silently did
+    // something else is worse than a flag that refuses.
+    if stereo_mode(&args) == hypreq::stereo::Mode::Split && (args.input.is_none() || args.bypass_eq)
+    {
+        usage_error(
+            "--stereo split applies one filter per ear, which needs audio to apply them to: pass -i <stereo.wav> (without --bypass-eq), or use --stereo report to see what a shared filter leaves",
+        );
+    }
     validate_out_bits(args.out_bits);
     // `--regularize` takes a word or a number, so clap cannot check it; a value that is neither
     // of the documented forms is a usage error like any other bad choice.
@@ -564,6 +593,16 @@ fn run_model(
     for line in reg_lines {
         println!("{line}");
     }
+    // Same placement rule as the block above it: the ears belong to the model whose heading the
+    // reader has just read. `split` cannot mean anything here — this path writes one mono impulse
+    // response, and one impulse response is what gets loaded on both channels — so the argument
+    // phase has already refused it and only `report` can arrive.
+    if stereo_mode(args) != hypreq::stereo::Mode::Off {
+        let (lines, _) = stereo_pair(model, args, &active_ctrl, stereo_mode(args))?;
+        for line in lines {
+            println!("{line}");
+        }
+    }
     println!("=== [1] Offline / mpv 64-Bit Double Convolver ({f64_wav}) ===");
     println!(
         "  Format            : 64-bit IEEE Float (pcm_f64le) | {} Hz | Mono",
@@ -777,6 +816,17 @@ fn run_audio_wav_mode(
         _ => None,
     };
 
+    // The ears, asked about the curve the filter is about to be built from — so the block prints
+    // under the banner with the regularization lines, and so `split`'s pair is derived from exactly
+    // the curve `off` would have synthesized. Computed once, before the banner, because printing it
+    // later would put the answer above the question.
+    let ears_block = match (model_cfg, regularized.as_ref()) {
+        (Some(m), Some((ctrl, _))) if stereo_mode(args) != hypreq::stereo::Mode::Off => {
+            Some(stereo_pair(m, args, ctrl, stereo_mode(args))?)
+        }
+        _ => None,
+    };
+
     println!();
     println!("{}", "=".repeat(80));
     if args.measure_only && args.bypass_eq {
@@ -799,6 +849,11 @@ fn run_audio_wav_mode(
     }
     println!("{}", "=".repeat(80));
     if let Some((_, lines)) = regularized.as_ref() {
+        for line in lines {
+            println!("{line}");
+        }
+    }
+    if let Some((lines, _)) = ears_block.as_ref() {
         for line in lines {
             println!("{line}");
         }
@@ -835,16 +890,21 @@ fn run_audio_wav_mode(
                 18.0,
             )
             .map_err(|e| Error::msg(e.0))?;
-            let l1_gain = l1_gain_db(&mpv.ir);
-            println!(
-                "  EQ FIR ({})   : {} taps @ {} Hz | Preamp {:+.2} dB (Max boost +{:.2} dB, ||h||_1 {:+.2} dB)",
-                model.file_prefix,
-                comma_sep(taps as u64),
-                comma_sep(u64::from(fs)),
-                mpv.preamp_db,
-                mpv.max_boost_db,
-                l1_gain
-            );
+            // In `split` the shared curve is not what gets applied, so it is not printed as if it
+            // were: the two lines below are. It is still synthesized, because the assessment below
+            // is measured on the shared curve and needs that filter's own preamp to be honest.
+            let per_ear = ears_block.as_ref().and_then(|(_, pair)| pair.clone());
+            if per_ear.is_none() {
+                println!(
+                    "  EQ FIR ({})   : {} taps @ {} Hz | Preamp {:+.2} dB (Max boost +{:.2} dB, ||h||_1 {:+.2} dB)",
+                    model.file_prefix,
+                    comma_sep(taps as u64),
+                    comma_sep(u64::from(fs)),
+                    mpv.preamp_db,
+                    mpv.max_boost_db,
+                    l1_gain_db(&mpv.ir)
+                );
+            }
             if args.assess {
                 // Asked of the input, before the filter: the question is what the correction
                 // is about to demand of the content that is already there.
@@ -858,7 +918,47 @@ fn run_audio_wav_mode(
                     lim_cfg.enable,
                 );
             }
-            work = convolve_planar_fft(&work, &mpv.ir, args.trim_tail);
+            match per_ear {
+                Some((left_curve, right_curve)) => {
+                    let build = |curve: &hypreq::stereo::Curve| {
+                        synthesize_minimum_phase_ir(
+                            curve,
+                            fs,
+                            n_fft_mpv,
+                            taps,
+                            taps / 8,
+                            args.headroom_db,
+                            use_apodize,
+                            18.0,
+                        )
+                        .map_err(|e| Error::msg(e.0))
+                    };
+                    let (left, right) = (build(&left_curve)?, build(&right_curve)?);
+                    for (tag, ir) in [("left", &left), ("right", &right)] {
+                        // Padded to the width the shared line's `(prefix)   ` occupies, so the two
+                        // variants of this line put their numbers in the same column.
+                        println!(
+                            "  EQ FIR {tag:<16}: {} taps @ {} Hz | Preamp {:+.2} dB (Max boost +{:.2} dB, ||h||_1 {:+.2} dB)",
+                            comma_sep(taps as u64),
+                            comma_sep(u64::from(fs)),
+                            ir.preamp_db,
+                            ir.max_boost_db,
+                            l1_gain_db(&ir.ir)
+                        );
+                    }
+                    let channels = work.len();
+                    work = convolve_planar_pair(&work, &left.ir, &right.ir, args.trim_tail)
+                        .ok_or_else(|| {
+                            Error::msg(format!(
+                                "--stereo split hands one filter to each ear, which needs a stereo file; '{input}' has {channels} channel{}",
+                                if channels == 1 { "" } else { "s" }
+                            ))
+                        })?;
+                }
+                None => {
+                    work = convolve_planar_fft(&work, &mpv.ir, args.trim_tail);
+                }
+            }
             let m_eq = measure_signal(&work, fs, lim_cfg.ratio);
             print_signal_measurements("Post-EQ (Pre-Limiter)", &m_eq);
             ir_tag = model.file_prefix.clone();
@@ -1083,6 +1183,122 @@ fn print_assessment(
     for line in hypreq::assess::report_lines(&d, args.assess_budget, &run) {
         println!("{line}");
     }
+}
+
+/// The `--stereo` mode. [`validate_choice`] over [`hypreq::stereo::Mode::CHOICES`] has already run
+/// in the argument phase, so the fallback here is a lookup and not a message nobody would see.
+fn stereo_mode(args: &Args) -> hypreq::stereo::Mode {
+    hypreq::stereo::Mode::parse(&args.stereo).unwrap_or(hypreq::stereo::Mode::Off)
+}
+
+/// The knee the per-ear trim is judged by, and whether it is the default rather than the flag's.
+///
+/// A trim is a correction like any other, so it is doubted by the same policy `--regularize` resolved
+/// to — and that policy is derived from the model's own captured curve, not from the mismatch it is
+/// about to cancel. Deriving it from the mismatch would let a pair with one enormous narrow
+/// difference raise its own knee and negotiate its way out of being corrected, which is the failure
+/// [`hypreq::fit::Policy::auto`] was built to avoid.
+///
+/// `--regularize off` declines to regularize *the curve*. That is not a claim that a difference
+/// standing on a single capture point is trustworthy, so the trim keeps the documented default knee
+/// and the report says which one was used.
+fn trim_policy(model: &Model, args: &Args) -> (hypreq::fit::Policy, bool) {
+    let f: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
+    let g: Vec<f64> = model.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+    match regularize_arg(&args.regularize).unwrap_or(RegularizeArg::Off) {
+        RegularizeArg::Auto => (hypreq::fit::Policy::auto(&f, &g), false),
+        RegularizeArg::Fixed(knee) => (hypreq::fit::Policy::fixed(knee), false),
+        RegularizeArg::Off => (hypreq::fit::Policy::default(), true),
+    }
+}
+
+/// The ears block, and the two curves to synthesise from when `--stereo split` asked for a pair.
+///
+/// `report` computes the same analysis and applies nothing: audio for `report` is audio for `off`,
+/// which is the point of separating "look" from "do". `split` builds the pair from the curve the
+/// single filter would have been built from, so `--regularize` and the notch ceiling are already in
+/// it, and the trim is the last thing to touch the centre curve before it is split.
+fn stereo_pair(
+    model: &Model,
+    args: &Args,
+    shared: &hypreq::stereo::Curve,
+    mode: hypreq::stereo::Mode,
+) -> Result<(Vec<String>, Option<hypreq::stereo::CurvePair>), Error> {
+    use hypreq::stereo::{self as st, Mode};
+    let Some(ears) = model.ears() else {
+        if mode == Mode::Split {
+            return Err(Error::msg(format!(
+                "model '{}' was measured as a single curve, so there is no per-ear correction to make; --stereo report says what the shared filter leaves, --stereo off says nothing",
+                model.key
+            )));
+        }
+        return Ok((
+            vec![
+                "=== Ears ===".to_string(),
+                "  Single capture    : this model is one curve, so there is no pair to compare and the filter is shared".to_string(),
+            ],
+            None,
+        ));
+    };
+    let m = st::analyse(&ears);
+    if mode != Mode::Split {
+        return Ok((st::report_lines(&m, ears.len(), None), None));
+    }
+
+    let (policy, borrowed) = trim_policy(model, args);
+    let t = st::trim(&ears, shared, &policy, args.stereo_max_skew);
+    let (gl, gr) = t.curves(shared);
+    // The ceiling is still the last word, ear by ear: `safe_cap_db` says what this model's metadata
+    // allows where its concha null lives, and a trim that lifted one ear's fill past it would
+    // re-open exactly what the cap keeps shut. Where it bites the pair's middle moves, and the
+    // report says so — "the centre is held" is otherwise a sentence this code broke.
+    let (gl, cap_l) = cap_ear(&gl, args, model)?;
+    let (gr, cap_r) = cap_ear(&gr, args, model)?;
+    let t = t.with_cap_bites(cap_l + cap_r);
+
+    let mut lines = st::report_lines(&m, ears.len(), Some(&t));
+    lines.push(format!(
+        "  Trim knee         : {:.2} dB of deviation{}",
+        policy.lambda_db,
+        if borrowed {
+            " (the default: --regularize off declines to touch the curve, not to trust a one-sample difference)"
+        } else {
+            ""
+        }
+    ));
+    if cap_l + cap_r > 0 {
+        lines.push(format!(
+            "  Notch cap         : held {cap_l} left / {cap_r} right knot(s) after the trim; where it bites the centre moves"
+        ));
+    }
+    if args.assess {
+        lines.push(
+            "  Assessment        : measured on the shared curve; each ear's filter differs from it by the trim above"
+                .to_string(),
+        );
+    }
+    Ok((lines, Some((gl, gr))))
+}
+
+/// One ear's curve through the notch ceiling, and how many knots the ceiling moved.
+fn cap_ear(
+    curve: &hypreq::stereo::Curve,
+    args: &Args,
+    model: &Model,
+) -> Result<(hypreq::stereo::Curve, usize), Error> {
+    let capped = apply_notch_mode(
+        curve,
+        notch_mode(args),
+        model.safe_cap_db,
+        model.notch_range_hz,
+    )
+    .map_err(|e| Error::msg(e.0))?;
+    let moved = curve
+        .iter()
+        .zip(&capped)
+        .filter(|(before, after)| before.1 != after.1)
+        .count();
+    Ok((capped, moved))
 }
 
 /// `--apodize` / `--no-apodize` as a tri-state over the model's own default.

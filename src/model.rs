@@ -245,6 +245,18 @@ impl Model {
                 .collect(),
         )
     }
+
+    /// The model's two ears, when it was measured as two.
+    ///
+    /// `None` is the common case and not a failure: a model captured as one curve has no pair to
+    /// compare, which [`crate::stereo`] reports by refusing to speak rather than by comparing a
+    /// curve against itself. The column convention is the figure's — `[freq, left, right,
+    /// average]` — and the DSP has always fit the last column, so nothing here changes what a
+    /// shared filter is built from.
+    #[must_use]
+    pub fn ears(&self) -> Option<crate::stereo::Ears> {
+        crate::stereo::Ears::from_raw_pts(&self.raw_pts)
+    }
 }
 
 /// What `--regularize` found to act on, and the curve it produced.

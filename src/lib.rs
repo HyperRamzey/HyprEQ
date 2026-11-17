@@ -87,6 +87,7 @@ pub mod pchip;
 pub mod plot;
 pub mod pyfmt;
 pub mod riff;
+pub mod stereo;
 pub mod tp;
 pub mod wav;
 pub mod window;

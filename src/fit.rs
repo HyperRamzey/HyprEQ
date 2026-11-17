@@ -64,11 +64,16 @@ use crate::pchip::pchip_log_interp;
 /// spends its time at, and it moves by exactly the offset it is meant to remove.
 #[must_use]
 pub fn reference_db(raw: &[(f64, f64)]) -> f64 {
-    let mut v: Vec<f64> = raw
-        .iter()
-        .map(|&(_, y)| y)
-        .filter(|y| y.is_finite())
-        .collect();
+    median_db(&raw.iter().map(|&(_, y)| y).collect::<Vec<_>>())
+}
+
+/// The median of a list of levels, ignoring the ones that are not numbers.
+///
+/// The same rule [`reference_db`] documents, exposed for callers that have a plain curve rather
+/// than a `(frequency, gain)` table: the median of the left ear's gains and the median of the right
+/// ear's gains are the pair's balance, and they are the same statistic for the same reason.
+pub fn median_db(g: &[f64]) -> f64 {
+    let mut v: Vec<f64> = g.iter().copied().filter(|y| y.is_finite()).collect();
     if v.is_empty() {
         return 0.0;
     }

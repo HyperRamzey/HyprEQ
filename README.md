@@ -101,11 +101,17 @@ flowchart TD
 ### 1. Hilbert-Cepstral Minimum-Phase FIR Synthesis
 Traditional minimum-phase FIR generation often relies on discrete Hilbert transform approximations with circular convolution artifacts or parametric IIR cascades that suffer from frequency warping near Nyquist. HyprEQ computes the analytic minimum-phase impulse response directly via the real cepstrum:
 
-$$\hat{c}[n] = \mathcal{F}^{-1}\left\{ \ln |H(\omega)| \right\}$$
+$$\hat{c}[n] = \mathcal{F}^{-1}\left( \ln |H(\omega)| \right)$$
 
-$$c_{\text{min}}[n] = \begin{cases} \hat{c}[0], & n = 0 \\ 2\hat{c}[n], & 1 \le n < N/2 \\ \hat{c}[N/2], & n = N/2 \\ 0, & N/2 < n < N \end{cases}$$
+Cepstral folding zeroes the anti-causal half and doubles the causal components:
+- **$n = 0$ (DC):** $c_{\mathrm{min}}[0] = \hat{c}[0]$
+- **$1 \le n < N/2$ (Causal):** $c_{\mathrm{min}}[n] = 2\hat{c}[n]$
+- **$n = N/2$ (Nyquist):** $c_{\mathrm{min}}[N/2] = \hat{c}[N/2]$
+- **$N/2 < n < N$ (Anti-causal):** $c_{\mathrm{min}}[n] = 0$
 
-$$h[n] = \text{Re}\left( \mathcal{F}^{-1}\left\{ \exp\left( \mathcal{F}\{ c_{\text{min}}[n] \} \right) \right\} \right)$$
+The minimum-phase impulse response is reconstructed via forward FFT, complex exponential, and inverse FFT:
+
+$$h[n] = \operatorname{Re}\left( \mathcal{F}^{-1}\left( \exp\left( \mathcal{F}\left( c_{\mathrm{min}}[n] \right) \right) \right) \right)$$
 
 This reconstruction guarantees:
 - **Causal Compact Support:** The impulse peak is anchored precisely at $t = 0.00\text{ ms}$, packing maximum energy into the earliest samples ($>99.99999999\%$ causal energy ratio).
@@ -161,7 +167,7 @@ To maintain zero inter-sample clipping while preserving transient punch, HyprEQ 
   - **Lookahead & Ramp:** $2.0\text{ ms}$ lookahead buffer ($122\text{ samples}$ at $48\text{ kHz}$) with a 24-sample linear attack ramp eliminating hard-knee distortion.
 - **Non-Distorting Static Scalar IR Attenuation:** Passing an FIR impulse response itself through a dynamic time-varying envelope alters the filter's frequency response (sample 0 attenuates while subsequent taps release back toward $0\text{ dB}$). HyprEQ avoids this entirely: if an synthesized IR's true-peak exceeds the ceiling threshold, the entire FIR kernel is scaled uniformly by a static scalar:
 
-$$g_{\text{scalar}} = 10^{\frac{\text{ceiling}_{\text{dB}} - \text{IR}_{\text{dBTP}}}{20}}$$
+$$g_{\mathrm{scalar}} = 10^{\frac{\mathrm{Ceiling}_{\mathrm{dB}} - \mathrm{Peak}_{\mathrm{dBTP}}}{20}}$$
 
 This guarantees that the equalisation curve, phase response, and preamp gain accounting remain $100\%$ mathematically exact without dynamic transfer function warping.
 
@@ -194,7 +200,7 @@ Headphone drivers inevitably exhibit manufacturing tolerances, and artificial ea
 - **Per-Ear Trim:** Computes channel-specific deviations while maintaining the acoustic centre, correcting channel tilt up to `--stereo-max-skew` (default $6.00\text{ dB}$).
 - **Shared Master Preamp Normalization:** When generating stereo filters, both channels share a unified headroom formula:
 
-$$\text{preamp}_{\text{dB}} = \text{headroom}_{\text{dB}} - \max\left(\text{boost}_L, \text{boost}_R\right)$$
+$$\mathrm{Preamp}_{\mathrm{dB}} = \mathrm{Headroom}_{\mathrm{dB}} - \max\left(\mathrm{Boost}_L, \mathrm{Boost}_R\right)$$
 
 Applying identical attenuation to both channels prevents channel-independent normalization from distorting the stereo soundstage.
 - **Joint Stereo Phase Alignment:** When mixed-phase processing is combined with stereo splitting, filter latency and tap expansion are solved jointly, ensuring zero interaural time delay (ITD) skew.

@@ -237,6 +237,43 @@ struct Args {
         help = "Regularize the correction: 'off' (default), 'auto', or a lambda in dB of deviation"
     )]
     regularize: String,
+    /// Verify the filter against a measurement taken after it (CSV: freq, dB)
+    ///
+    /// Closes the loop the rest of the program leaves open: the capture is compared band by band
+    /// with what the written filter was supposed to produce, after the capture's own level offset
+    /// and noise floor are taken out. Report-only - it changes no filter and no audio, and the exit
+    /// code does not carry the verdict, because a failed verification is a finding about a
+    /// measurement rather than a program error.
+    #[arg(
+        long,
+        value_name = "CSV",
+        help_heading = "True-Peak Limiter & Measurements"
+    )]
+    verify_with: Option<std::path::PathBuf>,
+    /// Residual in dB beyond which --verify-with calls a band a failure
+    #[arg(
+        long,
+        default_value_t = hypreq::verify::DEFAULT_PASS_DB,
+        allow_negative_numbers = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = format!(
+            "Residual in dB beyond which --verify-with calls a band a failure (default: {})",
+            hypreq::verify::DEFAULT_PASS_DB
+        )
+    )]
+    verify_pass_db: f64,
+    /// How far below the capture's own median band level a band may sit before it is unmeasured
+    #[arg(
+        long,
+        default_value_t = hypreq::verify::DEFAULT_SNR_DB,
+        allow_negative_numbers = true,
+        help_heading = "True-Peak Limiter & Measurements",
+        help = format!(
+            "How far below the capture's median band level a band may sit before --verify-with calls it unmeasured (default: {} dB)",
+            hypreq::verify::DEFAULT_SNR_DB
+        )
+    )]
+    verify_snr_db: f64,
 }
 
 fn main() {
@@ -329,6 +366,45 @@ fn run(args: Args) -> Result<(), Error> {
         usage_error(
             "--stereo split applies one filter per ear, which needs audio to apply them to: pass -i <stereo.wav> (without --bypass-eq), or use --stereo report to see what a shared filter leaves",
         );
+    }
+    // Verification thresholds: a non-finite value is a typo, and a zero threshold would fail every
+    // band on the interpolation's own rounding, which is not a finding about anybody's headphones.
+    for (name, v) in [
+        ("--verify-pass-db", args.verify_pass_db),
+        ("--verify-snr-db", args.verify_snr_db),
+    ] {
+        if !v.is_finite() {
+            usage_error(format!("argument {name}: not a number: '{v}'"));
+        }
+        if v <= 0.0 {
+            usage_error(format!("{name} must be above 0.00 dB"));
+        }
+    }
+    if let Some(path) = args.verify_with.as_ref() {
+        if args.bypass_eq {
+            usage_error(concat!(
+                "--verify-with compares a later measurement against the filter that was supposed ",
+                "to change it, and --bypass-eq writes none: drop one of the two"
+            ));
+        }
+        // Two filters, one capture: the residual would be read as rig error when it is the trim.
+        if stereo_mode(&args) == hypreq::stereo::Mode::Split {
+            usage_error(concat!(
+                "--verify-with cannot be combined with --stereo split, which applies two filters ",
+                "and would leave one capture to be compared against both; use --stereo report to ",
+                "see the pair, or verify with --stereo off"
+            ));
+        }
+        // A mistyped capture path should not cost a full render. The file is read twice — once here,
+        // once where the comparison runs — and a capture CSV is a few kilobytes, so the duplicate
+        // read buys not threading a parsed curve through three call paths that mostly do not want it.
+        let rows = hypreq::model::load_csv_points(path).map_err(|e| Error::msg(e.to_string()))?;
+        if hypreq::verify::read_capture(&rows).is_none() {
+            return Err(Error::msg(format!(
+                "--verify-with: '{}' holds no usable (frequency, dB) pair to interpolate",
+                path.display()
+            )));
+        }
     }
     validate_out_bits(args.out_bits);
     // `--regularize` takes a word or a number, so clap cannot check it; a value that is neither
@@ -762,6 +838,25 @@ fn run_model(
         println!("  [Note] True-peak limiter disabled (--no-tp-limiter).");
     }
 
+    if args.verify_with.is_some() {
+        // `mpv.ir` and not the real-time filter: section [4] tells the reader to load this one, so
+        // this is the filter their post-EQ capture came from. The name says which, because a run
+        // that writes two filters and verifies against the other one is worse than no verification.
+        run_verification(
+            model,
+            &mpv.ir,
+            fs,
+            mpv.preamp_db,
+            args,
+            Some(Path::new("")),
+            &format!(
+                "predicted from the {}-tap 64-bit convolver written above, with its {:+.2} dB preamp taken back out",
+                comma_sep(taps as u64),
+                mpv.preamp_db
+            ),
+        )?;
+    }
+
     if args.assess {
         // No audio on this path: the section describes the filter, and says so.
         print_assessment(
@@ -868,6 +963,9 @@ fn run_audio_wav_mode(
     let mut work = wav_in.planar.clone();
     let orig_n = wav_in.planar.first().map_or(0, |c| c.len());
     let mut ir_tag = "bypass".to_string();
+    // The filter the output was actually made with. Verification has to run against this one rather
+    // than a re-synthesis of the design, because what the listener hears is the taps, not the knots.
+    let mut applied_ir: Option<(Vec<f64>, f64)> = None;
 
     let eq_inputs = match (model_cfg, regularized) {
         (Some(model), Some((active_ctrl, _))) => Some((model, active_ctrl)),
@@ -893,6 +991,7 @@ fn run_audio_wav_mode(
                 18.0,
             )
             .map_err(|e| Error::msg(e.0))?;
+            applied_ir = Some((mpv.ir.clone(), mpv.preamp_db));
             // In `split` the shared curve is not what gets applied, so it is not printed as if it
             // were: the two lines below are. It is still synthesized, because the assessment below
             // is measured on the shared curve and needs that filter's own preamp to be honest.
@@ -1027,6 +1126,31 @@ fn run_audio_wav_mode(
         work.len(),
         comma_sep(frames as u64)
     );
+
+    if let Some(path) = args.verify_with.as_ref() {
+        // Asked and refused is better than asked and ignored: a run that never applied a filter has
+        // nothing to verify, and printing nothing would read as a pass.
+        let (Some(model), Some((ir, preamp_db))) = (model_cfg, applied_ir.as_ref()) else {
+            return Err(Error::msg(format!(
+                "--verify-with: '{}' was given but no filter was applied to this file, so there is nothing to verify",
+                path.display()
+            )));
+        };
+        // Measure-only writes no files at all, including this one; the report still prints, because
+        // the finding is about the measurement and not about the output.
+        run_verification(
+            model,
+            ir,
+            fs,
+            *preamp_db,
+            args,
+            (!args.measure_only).then(|| Path::new("")),
+            &format!(
+                "predicted from the {}-tap filter convolved into this file, before the limiter",
+                comma_sep(taps_count(args) as u64)
+            ),
+        )?;
+    }
     Ok(())
 }
 
@@ -1167,6 +1291,125 @@ fn corrected_curve(model: &Model, args: &Args) -> Result<CurveAndReport, Error> 
 /// convolver bakes `headroom_db - max_boost` into every tap, so that preamp *is* the gain
 /// staging between the filter and the limiter, and quoting the requested headroom instead
 /// overstated the level after the filter by the whole max boost.
+/// The written filter's realised magnitude, in dB, on a query grid.
+///
+/// Not the design's control knots: the filter that exists has truncation ripple, and the half-Kaiser
+/// tail pulls the top octave. Verifying against the knots instead would blame the rig for the
+/// filter's own deviation, which is the one confusion this section must not produce.
+fn realized_gain_db(ir: &[f64], fs: u32, f_query: &[f64]) -> Vec<f64> {
+    if ir.is_empty() || fs == 0 {
+        return vec![0.0; f_query.len()];
+    }
+    // Zero-padded past 2L so the transform reads the aperiodic response rather than a circular one
+    // — and past a floor of 32,768 points, which is not the same requirement. The magnitude is
+    // interpolated *in dB* between bins, and a straight line through two dB samples is a lie
+    // wherever a null sits between them: a 2-tap average padded only to its own 2L gets four bins,
+    // one of them a null, and a query between them returns a number in the thousands of dB below
+    // unity. The convolvers here are 4,096 to 65,536 taps, where bins are well under a hertz apart
+    // and the interpolation error is nil; the floor is what stops the helper being quietly wrong
+    // for a short filter, which is exactly what a test or a `--taps 256` run hands it.
+    const MIN_POINTS: usize = 32768;
+    let n = MIN_POINTS.max(hypreq::fft::shl_bit_length(
+        ir.len().saturating_mul(2).saturating_sub(1),
+    ));
+    let mut padded = ir.to_vec();
+    padded.resize(n, 0.0);
+    let spec = hypreq::fft::rfft(&padded, n);
+    let bins = hypreq::fft::rfftfreq(n, f64::from(fs));
+    // `+ 1e-300` keeps a null bin finite instead of -inf, which would otherwise poison a band mean.
+    let mag: Vec<f64> = spec
+        .iter()
+        .map(|c| 20.0 * (c.re.hypot(c.im) + 1e-300).log10())
+        .collect();
+    hypreq::fft::interp_grid(f_query, &bins, &mag)
+}
+
+/// Compare this run's filter with a capture someone took after applying it, and say what came of it.
+///
+/// `dir` is where the per-band table goes; `None` in measure-only mode, which writes no files at
+/// all. `note` is the one thing the numbers cannot say about the run itself - which of the several
+/// filters this program can write was the one applied.
+fn run_verification(
+    model: &Model,
+    ir: &[f64],
+    fs: u32,
+    preamp_db: f64,
+    args: &Args,
+    dir: Option<&std::path::Path>,
+    note: &str,
+) -> Result<(), Error> {
+    let Some(path) = args.verify_with.as_ref() else {
+        return Ok(());
+    };
+    let rows = hypreq::model::load_csv_points(path).map_err(|e| Error::msg(e.to_string()))?;
+    let post = hypreq::verify::read_capture(&rows).ok_or_else(|| {
+        Error::msg(format!(
+            "--verify-with: '{}' holds no usable (frequency, dB) pair to interpolate",
+            path.display()
+        ))
+    })?;
+    let cfg = hypreq::verify::Config {
+        pass_db: args.verify_pass_db,
+        snr_db: args.verify_snr_db,
+    };
+
+    // The prediction is assembled on the model's own axis: the captured response plus the filter
+    // that was written, both in dB.
+    //
+    // The written IR carries this run's preamp - that is what makes it a convolver with headroom -
+    // so the constant is taken back out here. Not to be fussy: the verifier removes the *capture's*
+    // constant before judging shape, so the preamp would vanish from the residual anyway, but it
+    // would stay in the design shortfall, which is never offset-corrected, and that number is meant
+    // to describe a spectral decision rather than a headroom choice.
+    let top = (f64::from(fs) / 2.0).min(20000.0);
+    let grid = hypreq::fft::geomspace(20.0, top, 1200);
+    let f_raw: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
+    let g_raw: Vec<f64> = model.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+    let raw_db = hypreq::pchip::pchip_log_interp(&f_raw, &g_raw, &grid);
+    let gain_db = realized_gain_db(ir, fs, &grid);
+    let predicted: Vec<(f64, f64)> = grid
+        .iter()
+        .zip(raw_db.iter().zip(&gain_db))
+        .map(|(&f, (&r, &g))| (f, r + g - preamp_db))
+        .collect();
+    let f_t: Vec<f64> = model.target_pts.iter().map(|p| p.0).collect();
+    let g_t: Vec<f64> = model
+        .target_pts
+        .iter()
+        .map(|p| p.1 + model.harm_offset)
+        .collect();
+    let target_db = hypreq::pchip::pchip_log_interp(&f_t, &g_t, &grid);
+    let target: Vec<(f64, f64)> = grid.iter().copied().zip(target_db).collect();
+
+    let Some(rep) = hypreq::verify::verify(&post, &predicted, Some(&target), &cfg) else {
+        return Err(Error::msg(format!(
+            "--verify-with: '{}' does not overlap the model's measured range ({} - {} Hz), so there is nothing to compare",
+            path.display(),
+            f_raw
+                .iter()
+                .cloned()
+                .fold(f64::INFINITY, f64::min)
+                .round(),
+            f_raw
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max)
+                .round(),
+        )));
+    };
+    println!();
+    for line in hypreq::verify::report_lines(&rep, Some(note)) {
+        println!("{line}");
+    }
+    if let Some(d) = dir {
+        let out = d.join(format!("{}_verification.csv", model.file_prefix));
+        std::fs::write(&out, hypreq::verify::csv_text(&rep))
+            .map_err(|e| Error::msg(format!("cannot write '{}': {e}", out.display())))?;
+        println!("  Written Verify CSV  : {}", out.display());
+    }
+    Ok(())
+}
+
 fn print_assessment(
     ctrl: &[(f64, f64)],
     planar: &[Vec<f64>],
@@ -1865,5 +2108,118 @@ mod tests {
         assert_eq!(format_rate_tag(44100), "44.1k");
         assert_eq!(format_rate_tag(96000), "96k");
         assert_eq!(format_rate_tag(8000), "8k");
+    }
+}
+
+#[cfg(test)]
+/// The prediction half of `--verify-with`, tested on filters whose magnitude is arithmetic.
+///
+/// The integration tests cannot reach this: their model corrects nothing, so the realised
+/// magnitude and the design knots are the same number there and a mutant that returned the knots
+/// instead of `|H|` would pass every one of them. These tests are where "we verify against the
+/// filter that exists" is actually pinned.
+mod realized_tests {
+    use super::realized_gain_db;
+
+    fn at(ir: &[f64], fs: u32, freqs: &[f64]) -> Vec<f64> {
+        realized_gain_db(ir, fs, freqs)
+    }
+
+    #[test]
+    fn a_delta_is_unity_gain_at_every_frequency() {
+        let f = [20.0, 1000.0, 20000.0];
+        let g = at(&[1.0], 48000, &f);
+        for (&q, &v) in f.iter().zip(&g) {
+            assert!(
+                v.abs() < 1e-9,
+                "a delta read {v} dB at {q} Hz, expected 0.00"
+            );
+        }
+    }
+
+    #[test]
+    fn a_two_tap_average_is_the_cosine_it_should_be() {
+        // H(f) = cos(pi f / fs): exactly -3.010 dB at a quarter of the rate, -8.343 dB at
+        // three-eighths. Hand-checked arithmetic, not a golden file, so a change in the transform's
+        // scaling or bin mapping shows up as a wrong number rather than a moved curve.
+        let g = at(&[0.5, 0.5], 48000, &[12000.0, 18000.0]);
+        assert!(
+            (g[0] + 3.0103).abs() < 1e-3,
+            "fs/4 read {} dB, expected -3.010",
+            g[0]
+        );
+        assert!(
+            (g[1] + 8.3432).abs() < 1e-2,
+            "3fs/8 read {} dB, expected -8.343",
+            g[1]
+        );
+    }
+
+    #[test]
+    fn a_null_bin_is_a_huge_number_and_not_a_nan() {
+        // The two-tap average is exactly zero at Nyquist. The band means downstream add these
+        // numbers up, so one NaN would silently unscore every band that touched it.
+        let g = at(&[0.5, 0.5], 48000, &[24000.0]);
+        assert!(
+            g[0].is_finite(),
+            "a null read {}, which poisons every band mean that touches it",
+            g[0]
+        );
+        assert!(
+            g[0] < -100.0,
+            "a null read {} dB, which is not a null",
+            g[0]
+        );
+    }
+
+    #[test]
+    fn a_scale_in_the_taps_is_measured_rather_than_assumed_away() {
+        // The written convolver carries its preamp, so a filter of gain 2.0 measures +6.02 dB. This
+        // is the fact that makes `run_verification` take `preamp_db` back out; if the helper ever
+        // normalised it away the subtraction would introduce the very constant it removes.
+        let g = at(&[2.0], 48000, &[1000.0]);
+        assert!(
+            (g[0] - 6.0206).abs() < 1e-3,
+            "a gain of 2.0 read {} dB, expected +6.021",
+            g[0]
+        );
+    }
+
+    #[test]
+    fn nothing_to_measure_is_declared_rather_than_invented() {
+        // An empty filter or a zero sample rate has no magnitude. Reporting 0.00 dB keeps the
+        // comparison honest about the shape it does have, and above all stays finite.
+        assert_eq!(at(&[], 48000, &[1000.0]), vec![0.0]);
+        assert_eq!(at(&[1.0, 2.0], 0, &[1000.0, 2000.0]), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_estimate_holds_for_a_long_filter_at_every_band_centre() {
+        // A 4096-tap filter is the length the real convolvers use, and the query grid is the band
+        // centres. Interpolating a 32,768-point spectrum onto them must not drift.
+        let fs = 48000u32;
+        let taps = 4096usize;
+        // A single delayed tap: flat magnitude by construction, so any drift in the estimate is the
+        // estimate's, not the filter's. (A modulated window, which an earlier draft of this test
+        // used, has sidebands and is not flat at all.)
+        let mut ir = vec![0.0; taps];
+        ir[taps / 2] = 0.001;
+        let centres: Vec<f64> = (0..31)
+            .map(|k| 1000.0 * 10f64.powf((k as f64 - 10.0) / 10.0))
+            .collect();
+        let g = at(&ir, fs, &centres);
+        assert!(
+            g.iter().all(|v| v.is_finite()),
+            "a long filter produced a non-finite gain"
+        );
+        // A pure tone delayed is flat in magnitude: 0.001 amplitude is -60.0 dB, everywhere.
+        for (&c, &v) in centres.iter().zip(&g) {
+            if c < 23000.0 {
+                assert!(
+                    (v + 60.0).abs() < 0.05,
+                    "{c} Hz read {v} dB, expected -60.00"
+                );
+            }
+        }
     }
 }

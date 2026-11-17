@@ -407,3 +407,407 @@ fn a_notch_mode_outside_the_vocabulary_is_a_usage_error() {
         );
     }
 }
+
+/// Run the program in a directory the test has already populated, and keep it for inspection.
+///
+/// `run_keep` makes its own scratch directory, which is right for a plain run and useless here:
+/// verification needs a capture file and often a synthetic model on disk *before* the process
+/// starts. The caller cleans up.
+fn run_in(dir: &Path, args: &[&str]) -> (Option<i32>, String, String) {
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("measurements.json");
+    let out = Command::new(env!("CARGO_BIN_EXE_hypreq"))
+        .current_dir(dir)
+        .arg("--data-file")
+        .arg(&data)
+        .args(args)
+        .output()
+        .expect("the binary runs");
+    (
+        out.status.code(),
+        String::from_utf8(out.stdout).expect("stdout is utf-8"),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+fn scratch(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "hypreq-verify-{}-{}",
+        std::process::id(),
+        tag.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch directory");
+    dir
+}
+
+/// A model whose correction is 0 dB at every knot, plus two captures of its own raw curve.
+///
+/// Verification's prediction is `raw + |H|`, and a test cannot recompute `|H|` without linking an
+/// FFT of its own. So rather than guess what the filter does, hand it a filter that provably does
+/// nothing: then a capture equal to the raw curve *must* pass, and one carrying a 6 dB error at
+/// 1 kHz *must* be blamed on the 1 kHz band. Both directions of the acceptance criterion become
+/// exact instead of "within whatever the notch decided today".
+fn zero_model(dir: &Path) {
+    let models = dir.join("models");
+    std::fs::create_dir_all(&models).expect("models directory");
+    let raw: Vec<String> = (0..=60)
+        .map(|i| {
+            let f = 20.0_f64 * 1000.0_f64.powf(f64::from(i) / 60.0);
+            format!("[{f:.4},{:.4}]", -2.0 + 4.0 * f.log10() / 3.0)
+        })
+        .collect();
+    std::fs::write(
+        models.join("zero.json"),
+        format!(
+            r#"{{"name":"Zero Correction Test Set","file_prefix":"zero","target":"harman_2018","harm_offset":0.0,"hf_bypass_hz":10000.0,"safe_cap_db":6.0,"raw_pts":[{}],"ctrl_pts":[[20.0,0.0],[1000.0,0.0],[20000.0,0.0]]}}"#,
+            raw.join(",")
+        ),
+    )
+    .expect("model file");
+    let capture = |bump: f64| -> String {
+        (0..=600)
+            .map(|i| {
+                let f = 20.0_f64 * 1000.0_f64.powf(f64::from(i) / 600.0);
+                let g = -2.0 + 4.0 * f.log10() / 3.0
+                    // A narrow bump, so it belongs to one band rather than smearing over six.
+                    + bump * (-0.5 * ((f / 1000.0_f64).ln() / 0.11).powi(2)).exp();
+                format!("{f:.4},{g:.6}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    std::fs::write(dir.join("post_exact.csv"), capture(0.0)).expect("capture");
+    std::fs::write(dir.join("post_bump.csv"), capture(6.0)).expect("capture");
+}
+
+#[test]
+fn a_capture_that_matches_the_filter_passes_and_writes_its_table() {
+    let dir = scratch("pass");
+    zero_model(&dir);
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &[
+            "-H",
+            "zero",
+            "--no-plot",
+            "--models-dir",
+            "models",
+            "--verify-with",
+            "post_exact.csv",
+        ],
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.contains("Verdict         : PASS"),
+        "a capture that reproduces the filter did not pass:\n{stdout}"
+    );
+    // Nothing to blame, so nothing is blamed: a report that names a worst band while passing every
+    // band is describing a band it did not score.
+    assert!(
+        !stdout.contains("Worst band"),
+        "a clean run named a worst band it should not have:\n{stdout}"
+    );
+    let table = dir.join("zero_verification.csv");
+    assert!(table.exists(), "no per-band table was written");
+    let csv = std::fs::read_to_string(&table).expect("table");
+    let head = csv.lines().next().expect("header");
+    assert!(head.starts_with("band_index,centre_hz"), "{head}");
+    // The table and the sentence must agree about how many bands there were, or one of them is
+    // counting something the other does not.
+    let scored_line = stdout
+        .lines()
+        .find(|l| l.contains("Scored"))
+        .expect("the report says how many bands it scored");
+    let of: usize = scored_line
+        .split(" of ")
+        .nth(1)
+        .expect("N of M")
+        .split(" band")
+        .next()
+        .expect("M")
+        .parse()
+        .expect("M is a number");
+    assert_eq!(
+        csv.lines().filter(|l| !l.is_empty()).count() - 1,
+        of,
+        "the table's rows and the report's band count disagree"
+    );
+    assert!(
+        csv.lines()
+            .skip(1)
+            .all(|l| l.ends_with(",pass") || l.ends_with(",uncovered")),
+        "a scored band failed against the filter that does nothing:\n{csv}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_known_capture_error_is_named_by_band_and_by_number() {
+    let dir = scratch("bump");
+    zero_model(&dir);
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &[
+            "-H",
+            "zero",
+            "--no-plot",
+            "--models-dir",
+            "models",
+            "--verify-with",
+            "post_bump.csv",
+        ],
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert!(
+        stdout.contains("FAIL"),
+        "a 6 dB error at 1 kHz was not failed:\n{stdout}"
+    );
+    let worst = stdout
+        .lines()
+        .find(|l| l.contains("Worst band"))
+        .expect("the report names a worst band");
+    assert!(
+        worst.contains("1000 Hz") && worst.contains("band 1 kHz"),
+        "the 1 kHz error was blamed elsewhere: {worst}"
+    );
+    // The number, not just the place: the injected error is 6.00 dB.
+    let reported: f64 = worst
+        .split(':')
+        .next_back()
+        .unwrap()
+        .trim()
+        .trim_start_matches('+')
+        .split(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        (reported - 6.0).abs() < 0.5,
+        "a 6.00 dB error was reported as {reported} dB: {worst}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Stereo material for the audio tests, produced rather than committed: model mode writes the
+/// mastering test pair, and the repository keeps no WAVs in git.
+fn stereo_bytes(tag: &str) -> Vec<u8> {
+    // The tag is the caller's: these tests run in parallel, and a shared scratch name means one
+    // deletes the seed directory while another is still reading it out of.
+    let (dir, code, _, err) = run_keep(&format!("stereo-{tag}"), &["-H", "dt770_80", "--no-plot"]);
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let bytes = read_bytes(&dir.join("dt770_80ohm_mastering_stereo_48k.wav"));
+    let _ = std::fs::remove_dir_all(&dir);
+    bytes
+}
+
+#[test]
+fn verifying_changes_no_audio_and_says_what_it_compared() {
+    let seed = stereo_bytes("verify-audio");
+    // Both runs get the same model, the same `-H`, the same everything except the flag under test.
+    // An earlier version compared a default-model run with a `zero`-model run and "found" that
+    // verification changes the audio, which was the model difference talking.
+    let plain = scratch("audio-plain");
+    std::fs::write(plain.join("in.wav"), &seed).expect("fixture");
+    zero_model(&plain);
+    let (c1, o1, e1) = run_in(
+        &plain,
+        &[
+            "--input",
+            "in.wav",
+            "--no-plot",
+            "--output",
+            "a.wav",
+            "-H",
+            "zero",
+            "--models-dir",
+            "models",
+        ],
+    );
+    assert_eq!(c1, Some(0), "stderr: {e1}");
+    let before = read_bytes(&plain.join("a.wav"));
+    assert!(
+        !o1.contains("Verification (post-EQ"),
+        "a run without the flag verified something:\n{o1}"
+    );
+
+    let v = scratch("audio-verify");
+    std::fs::write(v.join("in.wav"), &seed).expect("fixture");
+    zero_model(&v);
+    let (c2, o2, e2) = run_in(
+        &v,
+        &[
+            "--input",
+            "in.wav",
+            "--no-plot",
+            "--output",
+            "a.wav",
+            "-H",
+            "zero",
+            "--models-dir",
+            "models",
+            "--verify-with",
+            "post_exact.csv",
+        ],
+    );
+    assert_eq!(c2, Some(0), "stderr: {e2}");
+    assert_eq!(
+        read_bytes(&v.join("a.wav")),
+        before,
+        "--verify-with changed the audio it only reports on"
+    );
+    assert!(
+        o2.contains("Verification (post-EQ") && o2.contains("predicted from the"),
+        "the verification block or its provenance line is missing:\n{o2}"
+    );
+    assert!(
+        v.join("zero_verification.csv").exists(),
+        "no table in audio mode"
+    );
+    let _ = std::fs::remove_dir_all(&plain);
+    let _ = std::fs::remove_dir_all(&v);
+}
+
+#[test]
+fn verification_refuses_before_writing_a_single_file() {
+    let seed = stereo_bytes("verify-refuse");
+    for (tag, args) in [
+        (
+            "bypass",
+            vec![
+                "-H",
+                "dt770_80",
+                "--no-plot",
+                "--bypass-eq",
+                "--verify-with",
+            ],
+        ),
+        (
+            "split",
+            vec![
+                "--input",
+                "in.wav",
+                "--no-plot",
+                "--stereo",
+                "split",
+                "--verify-with",
+            ],
+        ),
+    ] {
+        let dir = scratch(tag);
+        std::fs::write(dir.join("in.wav"), &seed).expect("fixture");
+        std::fs::write(dir.join("cap.csv"), "1000.0,0.0\n2000.0,0.0\n").expect("capture");
+        let mut argv = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        argv.push("cap.csv".to_string());
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let (code, stdout, stderr) = run_in(&dir, &refs);
+        assert_eq!(code, Some(2), "`{tag}` was not a usage error:\n{stdout}");
+        assert!(
+            stderr.contains("--verify-with"),
+            "`{tag}` was refused for some other reason: {stderr}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0),
+            2,
+            "`{tag}` wrote files before refusing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn a_capture_that_cannot_be_read_fails_before_any_convolver_is_written() {
+    let dir = scratch("badpath");
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &[
+            "-H",
+            "dt770_80",
+            "--no-plot",
+            "--verify-with",
+            "nowhere.csv",
+        ],
+    );
+    assert_eq!(
+        code,
+        Some(1),
+        "a missing capture is not a usage error:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("nowhere.csv"),
+        "the error did not name the file: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0),
+        0,
+        "a whole convolver set was written for a capture path that does not exist"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn verification_reports_nothing_when_it_was_not_asked_for() {
+    let stdout = run("verify-absent", &["-H", "dt770_80", "--no-plot"]);
+    assert!(
+        !stdout.contains("Verification (post-EQ"),
+        "the default report grew a verification section:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Written Verify CSV"),
+        "the default report wrote a table nobody asked for:\n{stdout}"
+    );
+}
+
+/// The preamp is a constant the written filter carries; the design shortfall is a claim about
+/// spectrum. If the constant leaked into the claim, every "the design fell short by" number would
+/// follow the headroom knob, and retargeting a convolver's level would look like the headphone's
+/// fit had changed. The default report cannot show this — the level offset absorbs any constant —
+/// so it is pinned here, at the one place the constant is visible.
+#[test]
+fn headroom_does_not_move_what_the_verifier_says_about_the_design() {
+    let lines_with = |headroom: &str| -> (String, String) {
+        let dir = scratch(&format!("headroom-{headroom}"));
+        zero_model(&dir);
+        let (code, stdout, stderr) = run_in(
+            &dir,
+            &[
+                "-H",
+                "zero",
+                "--no-plot",
+                "--models-dir",
+                "models",
+                "--verify-with",
+                "post_exact.csv",
+                "--headroom-db",
+                headroom,
+            ],
+        );
+        assert_eq!(code, Some(0), "stderr: {stderr}");
+        let grab = |needle: &str| {
+            stdout
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_default()
+                .to_string()
+        };
+        let out = (grab("Design shortfall"), grab("Total Preamp"));
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    };
+    let (short_a, pre_a) = lines_with("-1.5");
+    let (short_b, pre_b) = lines_with("-9.5");
+    // Both halves are load-bearing: a test that only compared the two shortfall lines would pass
+    // vacuously if the knob did nothing, or if the line were missing in both runs.
+    assert!(
+        short_a.contains("Design shortfall") && short_b.contains("Design shortfall"),
+        "no shortfall line was printed to compare:\n{short_a:?}\n{short_b:?}"
+    );
+    assert_ne!(
+        pre_a, pre_b,
+        "the headroom knob did not move the preamp, so this test proves nothing: {pre_a}"
+    );
+    assert_eq!(
+        short_a, short_b,
+        "the design shortfall followed the headroom knob:\n{short_a}\n{short_b}"
+    );
+}

@@ -89,6 +89,7 @@ pub mod pyfmt;
 pub mod riff;
 pub mod stereo;
 pub mod tp;
+pub mod verify;
 pub mod wav;
 pub mod window;
 

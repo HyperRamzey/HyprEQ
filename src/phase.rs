@@ -72,14 +72,13 @@ const BAND_FLOOR_HZ: f64 = 10.0;
 ///
 /// So the correction is bounded: each frequency is moved toward the flat line by at most this much,
 /// and the report prints the span it was asked to close against the budget it was allowed. The number
-/// is a HyprEQ configuration default, chosen to do something measurable while keeping the kernel's
-/// spread to a few hundred samples; it is prescribed by nobody. Liski et al. (2021) put the audible
-/// threshold near 0.6 ms, so a 5 ms budget is deliberately *past* what that study calls audible, which
-/// the report states rather than hides.
+/// is a HyprEQ configuration default, prescribed by nobody, and it is a constant rather than a CLI
+/// option on purpose: raising it is a decision about how much latency a filter may acquire, and the
+/// measurements below say what each step costs, so it should be changed by someone who has read them.
 /// The default is set at the published audibility scale, not at what the band could absorb. Liski,
 /// Mäkivirta & Välimäki (2021) put the threshold near 0.56 ms, and at that budget the phase the stage
 /// moves is small enough that the re-ringing it creates stays inside a few milliseconds of kernel. A
-/// 5 ms default was tried first: on the shipped DT 770 correction it asked for 215 ms of latency, because
+/// A 5 ms default was tried first: on the shipped DT 770 correction it asked for 215 ms of latency, because
 /// a 5 ms delay change at 10 Hz is 6 radians of phase, and 6 radians at 10 Hz is most of a period of
 /// that component being relocated. That is the trade in its purest form — flattening a bass band whose
 /// minimum-phase delay spans seconds is not a free operation at any budget — so the budget is a CLI
@@ -632,8 +631,14 @@ pub fn report_lines(a: &Adjustment) -> Vec<String> {
             a.max_gd_change_ms, a.max_gd_change_hz, threshold
         ),
         format!(
-            "  Budget          : {:.2} ms per frequency against a band spread of {:.1} ms - the rest was left alone rather than paid for in latency",
-            a.budget_ms, a.gd_span_ms
+            "  Budget          : {:.2} ms per frequency against a band spread of {:.1} ms - the rest was left alone rather than paid for in latency{}",
+            a.budget_ms,
+            a.gd_span_ms,
+            if a.budget_held {
+                String::new()
+            } else {
+                " (and the budget did NOT hold after the residue was removed)".to_string()
+            }
         ),
         format!(
             "  Kernel          : {} -> {} taps, +{:.1} ms latency - the reshape makes the response longer, and it is kept rather than cut",

@@ -177,6 +177,14 @@ pub struct PlotData {
     pub raw_l: Vec<f64>,
     /// Raw R trace.
     pub raw_r: Vec<f64>,
+    /// The two ears' difference, `left − right`, on [`PlotData::f_plot`].
+    ///
+    /// Empty unless the model was measured per ear *and* `--stereo` was asked for. Drawn on panel 2
+    /// rather than panel 1: panel 1 shows what the measurement looks like, and this is a statement
+    /// about what one shared filter cannot fix — the difference it leaves standing.
+    pub raw_lr_diff: Vec<f64>,
+    /// Panel 2 legend for [`PlotData::raw_lr_diff`]; empty when there is no trace.
+    pub lr_diff_label: String,
     /// Raw average (last column of the measurement, which is the L/R average).
     pub raw_avg: Vec<f64>,
     /// Target plus the model's harmonic offset.
@@ -236,6 +244,12 @@ pub struct PlotInputs<'a> {
     pub active_ctrl: &'a [(f64, f64)],
     /// Name of the notch policy in effect, for labels.
     pub notch_mode: &'a str,
+    /// Draw the two ears' difference on panel 2.
+    ///
+    /// Opt-in because the reference figure has no such trace and the default figure is the one
+    /// people compare against their own captures: this is set from `--stereo` being anything other
+    /// than `off`, so nobody's unchanged run gains a curve.
+    pub show_ears: bool,
 }
 
 /// A solid stroke style.
@@ -1121,6 +1135,14 @@ impl PlotData {
         } else {
             (Vec::new(), Vec::new())
         };
+        // Gated on the flag, not just on the columns: the default figure is the one a reader may be
+        // comparing against a capture of their own, and a curve appearing in it because a column
+        // happens to exist is a change nobody asked for.
+        let raw_lr_diff: Vec<f64> = if raw_l.is_empty() || !in_.show_ears {
+            Vec::new()
+        } else {
+            raw_l.iter().zip(&raw_r).map(|(&l, &r)| l - r).collect()
+        };
 
         let raw_eq_needed: Vec<f64> = harm_plot
             .iter()
@@ -1173,6 +1195,17 @@ impl PlotData {
             notch_db,
         };
         let subst = |s: String| substitute(&s, &ctx);
+        // The number in the legend is the figure's own claim about the pair, so it is read off the
+        // trace being drawn rather than quoted from a report somewhere else.
+        let lr_diff_label = if raw_lr_diff.is_empty() {
+            String::new()
+        } else {
+            let apart = raw_lr_diff.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+            subst(
+                str_meta("raw_lr_diff_label")
+                    .unwrap_or_else(|| format!("Left − Right (ears, up to {apart:.1} dB apart)")),
+            )
+        };
 
         let has_notch = model.notch_range_hz.is_some();
         let default_title = if has_notch {
@@ -1267,6 +1300,8 @@ impl PlotData {
             f_plot,
             raw_l,
             raw_r,
+            raw_lr_diff,
+            lr_diff_label,
             raw_avg,
             harm_plot,
             autoeq,
@@ -1607,7 +1642,19 @@ impl PlotData {
         // measured against the same y-scale the chart maps with.
         annotations!(&mut chart, self, plot_rect(band), win);
 
-        let items = [
+        if !self.raw_lr_diff.is_empty() {
+            // Drawn last so it reads on top of the error trace it explains, and in the ears' own
+            // blue, which panel 2 has no other use for.
+            trace!(
+                chart,
+                win,
+                &self.f_plot,
+                &self.raw_lr_diff,
+                stroke_a(RAW_LR, 2, 0.95)
+            );
+        }
+
+        let mut items = vec![
             LegendItem {
                 text: &self.raw_err_label,
                 swatch: Swatch::Line {
@@ -1633,6 +1680,16 @@ impl PlotData {
                 },
             },
         ];
+        if !self.raw_lr_diff.is_empty() {
+            items.push(LegendItem {
+                text: &self.lr_diff_label,
+                swatch: Swatch::Line {
+                    color: RAW_LR,
+                    width: 2,
+                    dash: None,
+                },
+            });
+        }
         draw_legend(band, &items, LegendPos::LowerLeft)
     }
 
@@ -2219,6 +2276,7 @@ mod tests {
             unwin_rt: -120.0,
             active_ctrl: &[(20.0, 2.0), (1000.0, 0.0), (20000.0, 4.0)],
             notch_mode: "safe",
+            show_ears: false,
         }
     }
 
@@ -2544,6 +2602,7 @@ mod tests {
             unwin_rt: -152.6,
             active_ctrl: &[(20.0, 2.0), (1000.0, 0.0), (20000.0, 4.0)],
             notch_mode: "safe",
+            show_ears: false,
         }
     }
 
@@ -2920,6 +2979,112 @@ mod tests {
         assert_eq!(phase.0, impulse.0 - (Y_LABEL_W + COL_W + COL_GAP) as i32);
         assert_eq!(phase.1, impulse.1);
         assert_eq!(impulse.2 - phase.2, (Y_LABEL_W + COL_W + COL_GAP) as i32);
+    }
+
+    /// A fixture whose two ears disagree by about 6 dB through the midrange, so the difference
+    /// made by `--stereo` has something to draw. `model()`'s own columns are identical, which is
+    /// realistic for a good pair and useless for an ink test.
+    fn ear_model() -> Model {
+        let mut m = model();
+        m.raw_pts = vec![
+            vec![20.0, 2.0, 2.0, 2.0],
+            vec![200.0, 1.0, -1.0, 0.0],
+            vec![1000.0, 0.0, -4.0, -2.0],
+            vec![4000.0, -2.0, -8.0, -5.0],
+            vec![20000.0, -6.0, -6.0, -6.0],
+        ];
+        m
+    }
+
+    #[test]
+    fn the_ear_difference_is_traced_only_when_the_flag_asks() {
+        let (ir, mag) = full_inputs();
+        let on = PlotInputs {
+            show_ears: true,
+            ..full_inputs_ref(&ir, &mag)
+        };
+        let off = full_inputs_ref(&ir, &mag);
+
+        let d_on = PlotData::build(&ear_model(), &on);
+        assert_eq!(d_on.raw_lr_diff.len(), d_on.f_plot.len());
+        let apart = d_on
+            .raw_lr_diff
+            .iter()
+            .fold(0.0_f64, |m, &v| m.max(v.abs()));
+        assert!(
+            apart > 5.0 && apart < 6.5,
+            "worst disagreement {apart:.2} dB, expected near the fixture's 6"
+        );
+        assert!(
+            d_on.lr_diff_label.contains("Left")
+                && d_on.lr_diff_label.contains(&format!("{apart:.1}")),
+            "the legend does not quote the trace's own worst band: {}",
+            d_on.lr_diff_label
+        );
+
+        // The default path is the figure people compare against their own captures.
+        let d_off = PlotData::build(&ear_model(), &off);
+        assert!(
+            d_off.raw_lr_diff.is_empty(),
+            "an unchanged run gained a curve"
+        );
+        assert!(d_off.lr_diff_label.is_empty());
+
+        // One curve has nothing to subtract, however the flag is set.
+        let mut mono = ear_model();
+        mono.raw_pts = mono
+            .raw_pts
+            .iter()
+            .map(|p| vec![p[0], *p.last().unwrap()])
+            .collect();
+        let d_mono = PlotData::build(&mono, &on);
+        assert!(
+            d_mono.raw_lr_diff.is_empty(),
+            "a single curve was subtracted from itself and reported as a difference"
+        );
+    }
+
+    #[test]
+    fn the_ear_trace_draws_ink_in_the_error_panel() {
+        let (ir, mag) = full_inputs();
+        let on = PlotInputs {
+            show_ears: true,
+            ..full_inputs_ref(&ir, &mag)
+        };
+        let dir = scratch("ears-ink");
+        let on_path = PlotData::build(&ear_model(), &on)
+            .render_to(&dir.join("on.png"))
+            .expect("render");
+        let off_path = PlotData::build(&ear_model(), &full_inputs_ref(&ir, &mag))
+            .render_to(&dir.join("off.png"))
+            .expect("render");
+        let (w, _, px_on) = decode_png(&on_path);
+        let (_, _, px_off) = decode_png(&off_path);
+
+        // Panel 2 only: panel 1 draws raw L and R in the same blue, so counting the figure would
+        // say nothing about the trace this test is about.
+        let (x0, y0, x1, y1) = PlotData::panel_rects()[1];
+        let (x0, y0, x1, y1) = (
+            x0.max(4) as usize,
+            y0.max(4) as usize,
+            x1 as usize,
+            y1 as usize,
+        );
+        let blue = |px: &[u8]| -> usize {
+            (y0 + 3..y1 - 3)
+                .flat_map(|y| (x0 + 3..x1 - 3).map(move |x| (x, y)))
+                .filter(|&(x, y)| close(at(px, w, x, y), RAW_LR, 24))
+                .count()
+        };
+        let (n_on, n_off) = (blue(&px_on), blue(&px_off));
+        assert!(
+            n_on > 400,
+            "the ears trace drew only {n_on} px in the error panel"
+        );
+        assert_eq!(
+            n_off, 0,
+            "the default figure carries the ears colour in the error panel ({n_off} px)"
+        );
     }
 
     #[test]

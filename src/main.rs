@@ -722,6 +722,9 @@ fn run_model(
             unwin_rt: rt.unwindowed_floor_dbfs,
             active_ctrl: &active_ctrl,
             notch_mode: notch_mode.as_str(),
+            // The ears trace is opt-in like the rest of the flag: an unchanged run writes the
+            // unchanged figure, even for a model that happens to carry two ear columns.
+            show_ears: stereo_mode(args) != hypreq::stereo::Mode::Off,
         };
         let data = PlotData::build(model, &inputs);
         let path = data.render(prefix)?;

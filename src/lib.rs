@@ -77,6 +77,7 @@ pub mod dither;
 pub mod error;
 pub mod fft;
 pub mod fit;
+pub mod fixture;
 pub mod ir;
 pub mod limiter;
 pub mod limiter_cfg;

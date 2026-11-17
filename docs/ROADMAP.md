@@ -420,30 +420,71 @@ fast it recovers, which is exactly the judgment "is this the fixture or the head
 the printed numbers say the flag is worth keeping, the overlay is the right next change, and it
 belongs with the decision to make `auto` the default rather than with this PR.
 
-### PR 2 — Fixture-aware targets
+### PR 2 — Fixture-aware targets — **shipped** as `fixture` + `--force`
 
-**Problem:** targets are fixture-specific and nothing records the fixture (§3.3).
+**The premise held, and the data was worse than the schema.** §3.3 quoted Olive & Clark (AES 2025):
+the Harman around-ear target was defined on a GRAS 45CA fixture with an RA045 ear and is "often
+misused with other fixtures, leading to measurement and interpretation errors due to differing
+acoustic transfer impedances". Checking what the shipped database actually says about its own rigs:
 
-**Method:** promote what `rig_info` already says into structure — a `fixture` key on the
-model and a `fixture` key on each target — and finally *use* it: print the fixture in the
-report header and the figure's title block, with `rig_info` kept as the human-readable
-caption beside it. Ship the equivalents that have a defensible published curve (the
-Harman family on GRAS 45CA/711 and the newer GRAS KB5000 and B&K 5128 translations), and
-refuse — or require `--force` — when model fixture and target fixture disagree. Where no
-equivalent is available, say so in the report instead of silently EQ-ing to a foreign
-target.
+| model | `rig_info` says | fixture | equalised to |
+|---|---|---|---|
+| `jbl770nc` | Filk, *clone* GRAS 43AG, KB006x pinna, IEC 60318-4 (711) | `gras_43ag_clone` | `harman_2018`, defined on GRAS 45CA |
+| `dt770_80` | Crinacle, *genuine* GRAS 43AG-7, RA0402 711, KB500X pinna | `gras_43ag` | the same |
+| `ft1pro` | oratory1990 / Kuulokenurkka, GRAS 43AG, KB50xx pinna, IEC 711 | `gras_43ag` | the same |
 
-**Statistics:** where a fixture has repeated measurements available, the reference curve is
-the **upper envelope** across repeats and the disagreement between seats is reported as
-`1.4826 × MAD` beside the fixture name (§3.7) — a fixture whose seats disagree by 4 dB
-around 200 Hz is telling you the target there means something different per head, and the
-report should say so rather than average it away.
+So every shipped model is a 43AG measurement against a 45CA-defined target — the exact misuse the
+paper names, in the tool that was supposed to prevent it. `rig_info` had described the rigs accurately
+all along; nothing could *read* it.
 
-**Acceptance:** the three shipped models gain the fixture their `rig_info` already
-describes and keep producing byte-identical filters; a model with `fixture: bk5128` and
-`target: harman_2018` fails with a message naming both; `--list-models` shows fixtures; the
-figure's title block names the fixture it assumed; an unknown fixture string is reported as
-a database error the way a bad target name already is.
+**What shipped.** A fixture key on models, a `target_fixtures` table beside the targets, a comparison,
+and a refusal. Six fixtures are nameable (`gras_43ag`, `gras_43ag_clone`, `gras_45ca`, `gras_kb5000`,
+`bk5128`, `iec60318_4`); a declared fixture must also appear in the model's `name`, and a name naming a
+second fixture is refused — two places to write one fact is where drift lives, and the check is
+range-based so `GRAS 43AG` inside `Clone GRAS 43AG` reads as one mention rather than two. An
+unrecognised fixture is a database error at load (exit 1, choices listed) rather than a quiet "no
+fixture", because "no fixture" switches the comparison off and a typo must not buy that. A real
+conflict exits 2, names both fixtures and both keys, and offers three remedies; it fires **before any
+file is written**, including in an `-H all` run, which is why the guard walks the models the run will
+actually use (`used_models`) — including the audio path's rule that `-H all` with `--input` means the
+*first* model, not all of them.
+
+**Three acceptance lines moved, and each move is a fact rather than a convenience.**
+
+* *"Print the fixture in the report header and the figure's title block … `--list-models` shows
+  fixtures."* Shipped — **through the data.** The banner, the figure title, `--list-models` and the
+  audio-mode header all print the model's `name`, and the reference program prints the same field, so
+  the fixture label went into `name` and appears in all four places on both programs:
+  `Beyerdynamic DT 770 Pro (80 Ω) [GRAS 43AG]`. A line added in *code* would have to be added to the
+  oracle too, and the oracle is frozen; the parity harness confirms it — 98/98 scenarios, byte-identical
+  WAVs, with the three longer names in place. What the roadmap wanted the new line to *achieve* — nobody
+  reads a curve without seeing the rig it came from — is achieved.
+* *"Ship the equivalents that have a defensible published curve (… GRAS KB5000 and B&K 5128
+  translations)."* **Not shipped, and not shippable here.** Those curves are the substance of a paywalled
+  AES paper; the numbers are not in anything readable, and inventing a target curve and citing a paper
+  for it is the one thing that would make this tool quietly wrong. What ships instead is the guard that
+  makes the substitution impossible to do by accident, and a fixture vocabulary ready for the day the
+  numbers are legitimately available.
+* *"The reference curve is the upper envelope across repeats and the disagreement between seats is
+  reported as 1.4826 × MAD" (§3.7).* **Deferred.** No model in this database has repeated seats — each
+  carries one curve, and the two models with more than one column carry two *ears*, which PR 4 already
+  handles and which are not seats. An envelope/MAD estimator with no repeats to aggregate would be dead
+  code that its own tests could not distinguish from the single-curve path, which is the standard this
+  project has applied to every other unused helper.
+
+**The shipped conflict is recorded, not waved through.** The refusal exists for the person adding a
+model and picking a target off a list. It is the wrong instrument for a pairing the database *inherited*
+and cannot fix, so a model may carry `fixture_conflict_ok` with the reason; empty is refused, since an
+acknowledgement that records no reason acknowledges nothing. All three shipped models carry it, with
+the reason in their words: no published 43AG equivalent of the Harman target exists to switch to. The
+behaviour is unchanged from the reference program — the filters are byte-identical — but the pairing is
+now a decision on file, in the database, where someone can disagree with it and edit it.
+
+**Adjacency is claimed once and only once.** Genuine 43AG ↔ 43AG clone is allowed: same fixture design,
+same ear, differing in pinna and build, and the literature's finding is about transfer impedance between
+fixture *designs*. Everything else, including 43AG against 45CA (both "a GRAS fixture with a 711 ear",
+and the single most likely pairing to get shipped by accident), is refused rather than judged — no
+published source licences judging it.
 
 ### PR 3 — Acoustic verification loop — **shipped** as `--verify-with`
 

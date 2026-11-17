@@ -427,6 +427,39 @@ rules that decide a verdict are arithmetic, and the constants were measured rath
   capture that cannot be read or interpolated exits 1, also before anything is written, so one
   mistyped path cannot leave a half-finished model behind.
 
+### What the fixture rules hold a database to
+
+A measurement belongs to the rig it was made on and a target belongs to the rig it was *defined* on;
+comparing the two is the check (`src/fixture.rs`).
+
+- Six fixtures are nameable: `gras_43ag`, `gras_43ag_clone`, `gras_45ca`, `gras_kb5000`, `bk5128`,
+  `iec60318_4`. A key or its label parses, in any case; anything else is a **database error** (exit 1),
+  not a silent "no fixture", because no-fixture switches the comparison off.
+- A declared fixture must appear in the model's `name`, and no *other* fixture label may appear there
+  uncovered by it. The check is range-based, so `GRAS 43AG` inside `Clone GRAS 43AG` is one mention of
+  one fixture rather than two — while a model declaring the genuine fixture under a name that says
+  "Clone" is refused for overstating its rig.
+- Refusal happens when **both** sides recorded a fixture and they are not the same piece of hardware:
+  exit 2, both fixtures named, three remedies offered. `--force` overrides that one refusal and prints
+  the refusal it overrode; it has no effect on a malformed database.
+- `gras_43ag` ↔ `gras_43ag_clone` is allowed: same fixture design, same ear, different pinna and build.
+  The literature's finding is about transfer impedance between fixture *designs*, which is why this is
+  the one adjacency claimed and why no numeric translation is offered for anything else.
+- A model's `fixture_conflict_ok` records a cross-fixture pairing the database *cannot* fix (no
+  published equivalent exists for its rig) together with the reason. Present and non-empty: the pairing
+  is allowed as a decision on file. Empty or non-string: refused at load, because an acknowledgement
+  that records no reason acknowledges nothing.
+- The label is shown by putting it in the model's display `name`, not by adding a report line. That is
+  deliberate: `name` is printed by the reference program too, so `--list-models`, the report banner and
+  the figure's title block gain the fixture as **data**, and the byte-for-byte parity contract with the
+  reference holds. A line added in code would have to be added to the oracle as well, and the oracle is
+  frozen.
+- The shipped pairing is recorded, not hidden: three GRAS 43AG models, a target defined on GRAS 45CA,
+  and no published 43AG equivalent of that target to switch to. Dropping the `target_fixtures` entry
+  from the database switches the whole comparison off quietly, which is what
+  `the_shipped_database_records_fixtures_and_the_pairing_it_inherited` in `tests/cli_report.rs` exists
+  to catch.
+
 ### Where the port refuses what the reference accepts
 
 Parity is the rule, and two places break it deliberately. Both are sizes, both would make

@@ -268,6 +268,59 @@ What each line is owed, and where the honesty lives:
   target, residual, shape, scatter, design, and the status word. The audit CSV is byte-compared
   against the reference program, so it cannot gain a column; this can.
 
+### Which Rig a Curve Belongs To (`fixture`)
+
+A frequency response is not a property of a headphone. It is a property of the headphone *on a
+fixture*, and a target curve was **defined** on one fixture and one only. The paper that made this a
+published problem for target curves puts the failure mode plainly: the Harman around-ear target was
+defined on a GRAS 45CA fixture with an RA045 ear, and is "often misused with other fixtures, leading
+to measurement and interpretation errors due to differing acoustic transfer impedances" (Olive &
+Clark, *A Preferred Headphone Target Curve Defined for the B&K 5128 and GRAS 45CA-10 Test Fixtures*,
+AES 2025, eLibrary `22928`). This database used to have no field in which to record any of it.
+
+Three keys, all optional:
+
+| key | where | meaning |
+|---|---|---|
+| `fixture` | a model | the rig the **measurement** was made on: `gras_43ag`, `gras_43ag_clone`, `gras_45ca`, `gras_kb5000`, `bk5128`, `iec60318_4` |
+| `target_fixtures` | top level, beside `targets` | the rig each **target curve** was defined on, e.g. `"harman_2018": "gras_45ca"` |
+| `fixture_conflict_ok` | a model | a written reason for shipping a cross-fixture pairing anyway |
+
+A pairing whose two fixtures are different pieces of hardware is refused, and says which two it means:
+
+```console
+$ hypreq --data-file fixtures.json -H bk --no-plot
+error: 'bk' was measured on B&K 5128 (fixture: bk5128), but the target 'harman_2018' was defined on
+GRAS 45CA (fixture: gras_45ca). Different fixtures present different acoustic transfer impedances, so
+this filter would be fitting one rig's curve onto another's; a target is not portable between them.
+Choose a target recorded for bk5128, record the target's real fixture in 'target_fixtures', record
+the pairing on the model with 'fixture_conflict_ok' and its reason, or pass --force to equalise
+anyway. ...
+```
+
+* **`--force` is narrower than the word suggests.** It overrides this one refusal and prints the
+  refusal it overrode. It does not let a malformed database load.
+* **Two units of one fixture design are not the difference being guarded.** A genuine GRAS 43AG and a
+  43AG clone are allowed to share a target; every other cross-fixture pairing is refused rather than
+  judged, because nobody has published a translation that would justify judging it.
+* **A target that records no fixture is unknown, not universal.** No refusal is made — refusing on the
+  absence of a claim would punish a database for being honest about what it does not know — and no
+  report claims a check happened.
+* **A fixture the program does not recognise is a database error** (exit 1), listed with its choices,
+  the way an unknown target name already is. "No fixture" switches the comparison off, so a typo must
+  not be allowed to buy that silence.
+* **The name has to say what the key says.** A model declaring `"fixture": "gras_45ca"` whose `name`
+  mentions `GRAS 43AG`, or mentions two fixtures, is refused at load: two places to write one fact is
+  where drift lives, and a name that mentions both rigs says which one the measurement was made on
+  is a coin flip.
+* **The shipped models record their rigs, and one inherited decision.** All three are AutoEq-derived
+  GRAS 43AG captures — `jbl770nc` a clone, the other two genuine — and their `name` now says so, since
+  the name is what `--list-models`, the report banner and the figure's title block all print:
+  `Beyerdynamic DT 770 Pro (80 Ω) [GRAS 43AG]`. The Harman target they are equalised to was defined on
+  a different fixture, and there is no published 43AG equivalent of it to switch to. So each model
+  carries that pairing as a reason on file rather than as an accident nobody noticed. It is the same
+  decision the reference program has always made; it is now one you can read, and disagree with.
+
 ### Generated Files
 - `jbl770nc_f64_48k.wav` / `dt770_80ohm_f64_48k.wav` / `ft1pro_f64_48k.wav`: 64-bit IEEE float (`pcm_f64le`) mono impulse responses for `mpv` / `FFmpeg` (`afir=precision=double`). When a single headphone is selected, it is also copied to `ir.wav`.
 - `*_mastering_mono_48k.wav` / `*_mastering_stereo_48k.wav`: 32-bit IEEE float (`pcm_f32le`, `16,384` taps) for real-time PipeWire `filter-chain` or DAW convolver plugins.
@@ -295,6 +348,7 @@ Create `models/<model_key>.json` (e.g. `models/hd600.json`). You can either supp
   "name": "Sennheiser HD 600",
   "file_prefix": "hd600",
   "rig_info": "GRAS 43AG / KB50xx Anthropometric Pinna + IEC 711",
+  "fixture": "gras_43ag",
   "target": "harman_2018",
   "harm_offset": 0.0,
   "gauss_apodize": true,

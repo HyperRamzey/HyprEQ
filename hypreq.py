@@ -98,7 +98,7 @@ DEFAULT_MODEL_METADATA: Dict[str, dict] = {
         "short_title": "Beyerdynamic DT 770 Pro (80 Ω)",
         "notch_ref_hz": 3703.0,
         "autoeq_offset_db": 4.55,
-        "gauss_apodize": False,
+        "gauss_apodize": True,
         "plot_meta": {
             "title_template": "VERIFICATION: Beyerdynamic DT 770 Pro (80 Ω) Convolver (Notch Mode: {notch_mode} | Preamp: {pre_rt:.2f} dB)",
             "bypass_label": "Uncorrected >8.8 kHz Coupler Null & >15.8 kHz 0.0 dB Wire Zone (Left Unmodified)",
@@ -130,7 +130,7 @@ DEFAULT_MODEL_METADATA: Dict[str, dict] = {
         "short_title": "FiiO FT1 Pro (Open-Back Planar)",
         "notch_ref_hz": 3839.0,
         "autoeq_offset_db": 4.30,
-        "gauss_apodize": False,
+        "gauss_apodize": True,
         "plot_meta": {
             "title_template": "VERIFICATION: FiiO FT1 Pro (Open-Back Planar) Convolver (Notch Mode: {notch_mode} | Preamp: {pre_rt:.2f} dB)",
             "bypass_label": "Uncorrected >9.75 kHz Coupler Null & 0.0 dB Wire Zone (Left Unmodified)",

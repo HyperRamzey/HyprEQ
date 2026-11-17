@@ -80,7 +80,7 @@ To avoid over-correcting rig-specific artifacts while still fixing audible drive
 - **Sub-bass pad/pinna leak compensation:** Discounts stiff-pinna air-leakage roll-off below `40 Hz` on the `KB006x` plate (`jbl770nc`), asymmetric velour pad leakage (`dt770_80`), and damps the `35 Hz` controlled front-volume pad-leak resonance ($f_s$) on the `ft1pro` while moderating its sub-bass Harman shelf (`+2.70 dB` at `55 Hz`, `+2.37 dB` at `20 Hz`) to prevent `1 μm` planar diaphragm excursion limits at high SPLs.
 - **Minimum-phase cup & breakup pole inversion:** Uses Hilbert-Cepstral minimum-phase reconstruction (`0.00 ms` impulse peak delay, zero pre-ringing) to invert lumped-parameter bass/cup modes (`160 Hz` / `455 Hz` on JBL; `59 Hz` / `205 Hz` on DT 770), open-back planar ear-gain recession and upper-midrange glare (`+4.07 dB` at `1.82 kHz` and `-2.64 dB` at `2.82 kHz` on FT1 Pro), and diaphragm breakup peaks (`6.88 kHz` / `8.48 kHz` on JBL; `5.34 kHz`, `6.64 kHz`, and `8.16 kHz` on DT 770; `5.75 kHz` on FT1 Pro) without letting wide `2.0-octave` treble smoothing bleed adjacent dip errors into boosting sibilance peaks.
 - **Safe concha notch bridging (`--notch-mode safe`):** Caps narrow boosts inside the DT 770's `2.8–4.4 kHz` and FT1 Pro's `3.4–4.4 kHz` non-minimum-phase concha nulls to `+1.50 dB` (`safe_cap_db * tanh(g / safe_cap_db)`) by default (preventing L/R and head-to-head upper-midrange glare), or allows `--notch-mode original` (`+4.26 dB` fill on DT 770; `+2.01 dB` fill on FT1 Pro) and `--notch-mode zero` (`0.00 dB`).
-- **Uncorrected coupler-null & HF bypass zone:** Leaves `>9.1 kHz` (`jbl770nc`), `>8.8 kHz` / `>15.8 kHz` (`dt770_80`), and `>9.75 kHz` (`ft1pro`) coupler half-wave cylinder nulls unmodified (`0.00 dB` ultrasonic wire to Nyquist, shaded on the verification plots).
+- **Uncorrected coupler-null & HF bypass zone:** Leaves `>9.1 kHz` (`jbl770nc`), `>8.8 kHz` / `>15.8 kHz` (`dt770_80`), and `>9.75 kHz` (`ft1pro`) coupler half-wave cylinder nulls unmodified (`0.00 dB` flat wire straight through Nyquist on `jbl770nc`, and a flat wire across coupler nulls up to `20.2 kHz` before Gaussian apodization to Nyquist on `dt770_80` and `ft1pro`, shaded on the verification plots).
 
 ---
 
@@ -142,23 +142,27 @@ This reconstruction guarantees:
 - **Zero Pre-Ringing:** Transients decay naturally forward in time without pre-echo smearing or transient blurring.
 - **Dual-Tier Resolution:**
   - **Mastering / Offline ($f_{64}$):** $N_{\text{fft}} = 262,144$ ($0.1831\text{ Hz}$ bin resolution) yielding $65,536\text{ taps}$ ($1365.3\text{ ms}$) in 64-bit IEEE double precision (`pcm_f64le`).
-  - **Real-Time ($f_{32}$):** $N_{\text{fft}} = 32,768$ ($1.4648\text{ Hz}$ bin resolution) yielding $16,384\text{ taps}$ ($341.3\text{ ms}$) in 32-bit float (`pcm_f32le`), scaling dynamically with sample rate ($32,768\text{ taps}$ at $96\text{ kHz}$, $64,536\text{ taps}$ at $192\text{ kHz}$).
+  - **Real-Time ($f_{32}$):** $N_{\text{fft}} = 32,768$ ($1.4648\text{ Hz}$ bin resolution) yielding $16,384\text{ taps}$ ($341.3\text{ ms}$) in 32-bit float (`pcm_f32le`), scaling dynamically with sample rate ($32,768\text{ taps}$ at $96\text{ kHz}$, $65,536\text{ taps}$ at $192\text{ kHz}$).
 
 ### 2. Monotonic Log-Frequency PCHIP Interpolation
-Standard natural cubic splines oscillate and overshoot between non-uniform acoustic measurement knots, corrupting the transfer function with spurious peaks (Runge's phenomenon). HyprEQ employs Piecewise Cubic Hermite Interpolating Polynomials (PCHIP) according to Fritsch & Carlson (1980), evaluated strictly across log-frequency:
+Standard natural cubic splines oscillate and overshoot between non-uniform acoustic measurement knots, corrupting the transfer function with spurious peaks (Runge's phenomenon). HyprEQ employs Piecewise Cubic Hermite Interpolating Polynomials (PCHIP) according to Fritsch & Carlson (1980) as implemented in SciPy, evaluated strictly across non-uniform log-frequency:
 
 $$\xi = \log_{10}(f)$$
 
-Slopes $d_k$ at knot $\xi_k$ are harmonically weighted and constrained: if adjacent secular differences change sign ($\Delta_{k-1} \cdot \Delta_k \le 0$), the slope is clamped to zero ($d_k = 0$). If signs agree, the slope is bounded:
+For interval widths $h_k = \xi_{k+1} - \xi_k$ and secant differences $\Delta_k = \frac{g_{k+1} - g_k}{h_k}$, interior slopes $d_k$ at knot $\xi_k$ ($k = 1, \dots, K-2$) are calculated via the non-equidistant weighted harmonic mean:
 
-$$d_k = \frac{3 \Delta_{k-1} \Delta_k}{\max(\Delta_{k-1}, \Delta_k) + 2\min(\Delta_{k-1}, \Delta_k)}$$
+$$w_1 = 2 h_k + h_{k-1}, \quad w_2 = h_k + 2 h_{k-1}$$
 
-This ensures strict monotonicity across intervals, completely eliminating artificial frequency ripples. Continuous evaluation over dense FFT grids utilizes a monotonic cursor, reducing search complexity from $O(M \log N)$ to $O(M)$ linear time.
+$$d_k = \begin{cases} \frac{w_1 + w_2}{\frac{w_1}{\Delta_{k-1}} + \frac{w_2}{\Delta_k}}, & \Delta_{k-1} \cdot \Delta_k > 0 \\ 0, & \Delta_{k-1} \cdot \Delta_k \le 0 \end{cases}$$
+
+with endpoint boundary derivatives set to standard one-sided differences: $d_0 = \Delta_0$ and $d_{K-1} = \Delta_{K-2}$.
+
+This guarantees strict monotonicity and eliminates overshoot across arbitrary non-uniform knot spacing. Continuous evaluation over dense FFT grids utilizes a monotonic cursor, reducing search complexity from $O(M \log N)$ to $O(M)$ linear time.
 
 ### 3. Truncation Decay Discipline & Half-Kaiser Tail Windowing
 Abruptly truncating an FIR kernel creates severe spectral leakage (Gibbs phenomenon). Conversely, windowing the entire impulse response corrupts passband magnitude and distorts transient response. HyprEQ enforces a strict tail-decay architecture:
 - Early taps ($0 \le n < N - n_{\text{tail}}$) are left completely unwindowed ($100\%$ passband transparency).
-- The final tail ($n_{\text{tail}} = 4,096$ taps offline; $n_{\text{tail}} = 2,048$ taps real-time) is tapered using the descending half of a Kaiser window:
+- The final tail ($n_{\text{tail}} = N_{\text{taps}} / 8$, yielding $8,192\text{ taps}$ for offline $65,536\text{-tap}$ filters, and $2,048\text{ taps}$ for real-time $16,384\text{-tap}$ filters) is tapered using the descending half of a Kaiser window:
 
 $$w[m] = \frac{I_0\left(\beta \sqrt{1 - \left(\frac{m}{n_{\text{tail}}}\right)^2}\right)}{I_0(\beta)}, \quad 0 \le m < n_{\text{tail}}$$
 
@@ -166,8 +170,8 @@ With $\beta = 18.0$ (offline), sidelobes are suppressed by $172.0\text{ dB}$, pl
 
 ### 4. Ultrasonic Gaussian Apodization & High-Frequency Bypass
 Headphone coupler measurements above $8\text{ kHz} - 10\text{ kHz}$ contain non-minimum-phase half-wave standing-wave nulls inherent to ear-simulator geometry. Attempting to boost these nulls produces aggressive acoustic glare.
-- **High-Frequency Bypass:** Above $f_{\text{bypass}}$ (e.g. $9.1\text{ kHz}$ on JBL Live 770NC; $8.8\text{ kHz}$ / $15.8\text{ kHz}$ on DT 770 Pro; $9.75\text{ kHz}$ on FT1 Pro), filter gain transitions smoothly via a raised cosine into a $0.00\text{ dB}$ flat wire through Nyquist.
-- **Nyquist-Adaptive Gaussian Apodizer:** Where models carry ultrasonic measurement noise, stopband energy is attenuated smoothly toward Nyquist via:
+- **High-Frequency Bypass:** Above $f_{\text{bypass}}$ (e.g. $9.1\text{ kHz}$ on JBL Live 770NC; $8.8\text{ kHz}$ / $15.8\text{ kHz}$ on DT 770 Pro; $9.75\text{ kHz}$ on FT1 Pro), filter gain transitions smoothly via a raised cosine into a $0.00\text{ dB}$ flat wire. On headphones with smooth high-frequency extension (`jbl770nc`), this $0.00\text{ dB}$ wire continues completely flat to Nyquist (`gauss_apodize: false`).
+- **Nyquist-Adaptive Gaussian Apodizer:** Where models carry ultrasonic coupler noise (`dt770_80` and `ft1pro` with `gauss_apodize: true`), stopband energy is attenuated smoothly toward Nyquist via:
 
 $$w(f) = \exp\left(-\frac{1}{2}\left(\frac{f - f_{\text{start}}}{\sigma}\right)^2\right), \quad f_{\text{start}} = \max\left(24000, f_{\text{nyq}}\right) \cdot \frac{20200}{24000}, \quad \sigma = 1650\text{ Hz}$$
 
@@ -235,11 +239,24 @@ Minimum-phase filters introduce phase shift and group delay when boosting low fr
 - Configured using the empirical psychoacoustic audibility thresholds published by Liski, Mäkivirta & Välimäki (*IEEE/ACM TASLP 2021*): $-0.56\text{ ms}$ negative and $+0.64\text{ ms}$ positive group delay across pink-noise impulse listening tests.
 
 ### 11. Fit-Aware Adaptive Regularization (Gómez-Bolaños et al., 2016)
-Inverting sharp, high-Q measurement dips creates harsh, unnatural resonances. Inspired by Gómez-Bolaños, Mäkivirta & Pulkki (*JAES 2016*), HyprEQ's `--regularize` evaluates local deviation between the measured response and a smoothed envelope:
+Inverting sharp, high-Q measurement dips creates harsh, unnatural resonances. Whereas unconstrained inversion can produce severe boost spikes, HyprEQ regularizes the correction with a closed-form penalty toward unity bypass ($\|G - 1\|^2$):
 
-$$\sigma(\omega) = \max\left(0, \tilde{H}(\omega) - |H(\omega)|\right)$$
+$$G_{\mathrm{reg}}(f) = \frac{|S(f)|^2 G(f) + \beta(f)}{|S(f)|^2 + \beta(f)}$$
 
-Where deviation exceeds the regularization knee (determined automatically or via `--regularize <DB>`), correction demand contracts smoothly toward unity ($0.00\text{ dB}$), preserving acoustic naturalness without chasing fixture artifacts.
+where $|S(f)|^2 = 10^{\text{raw}_{\mathrm{dB}}(f) / 10}$ represents normalized measured transfer function power and $G(f) = 10^{g_{\mathrm{dB}}(f) / 20}$ is the nominal linear correction factor.
+
+The regularization diagonal load $\beta(f)$ is continuous and monotonic in the local smoothed spectral deviation:
+
+$$\text{dev}(f) = \left| \text{raw}_{\mathrm{dB}}(f) - \text{smooth}_{1/2\text{-oct}}(\text{raw}_{\mathrm{dB}})(f) \right|$$
+
+$$\beta(f) = 10^{\frac{\kappa (\text{dev}(f) - \lambda)}{10}}$$
+
+with sensitivity slope $\kappa = 8.0\text{ dB}^{-1}$ and adaptive knee $\lambda = \max\left(3.0\text{ dB}, 1.3 \cdot q_{90}(\text{dev})\right)$ (or manual `--regularize <DB>`).
+- When $\text{dev}(f) \ll \lambda$, $\beta(f) \to 0$ and $G_{\mathrm{reg}} \to G$ ($g_{\mathrm{dB}}$ is preserved to the last bit).
+- When $\text{dev}(f) \gg \lambda$, $\beta(f) \to \infty$ and $G_{\mathrm{reg}} \to 1$ ($0.00\text{ dB}$ complete bypass).
+
+> [!NOTE]
+> **Symmetric Deviation Shrinkage vs. Prior Art:** While Gómez-Bolaños, Mäkivirta & Pulkki (*JAES 64(10), 752–761, 2016*) motivated regularization through perceptual notch/peak asymmetry with an asymmetric notch-only function $\sigma(\omega) = \max\left(0, \tilde{H}(\omega) - |H(\omega)|\right)$, HyprEQ intentionally implements symmetric deviation shrinkage across both boosts and cuts, referring deviation to unity rather than response peak. Because high-Q fixture notches create dangerous headroom demands and harsh glare, `--regularize auto` aggressively contracts narrow boost artifacts (e.g., walking back the DT 770 Pro's concha notch boost by $-4.16\text{ dB}$ to $+0.10\text{ dB}$), while preserving broad acoustic driver cuts (shifting at most $<0.8\text{ dB}$).
 
 ### 12. Numerical Precision & Bit-Exact TPDF Dither
 - **IEEE-754 $f64$ End-to-End:** All intermediate spectral calculations, cepstral folding, PCHIP evaluation, and convolution buffers operate in 64-bit double precision. Conversion to $f32$ occurs only at the final container serialization.

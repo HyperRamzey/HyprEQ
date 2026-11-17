@@ -121,6 +121,53 @@ The reason is the honest one: the regularizer decides which parts of a published
 measurement, and that judgment should be seen in a side-by-side comparison before it becomes the
 thing everyone gets. `docs/ROADMAP.md` §3.6 covers why the fallback is 0 dB and not silence.
 
+### What the Two Ears Disagree About (`--stereo`)
+
+The filter is one curve, and one curve is what gets loaded on both channels — that is what a mono
+impulse response *is*. Two of the three models in this database were measured per ear, and until
+now their two ears were two dashed lines on the figure and nothing else: the DSP fit the average
+column and left the difference standing, which is what the listener hears afterwards.
+
+```text
+./target/release/hypreq -H dt770_80 --stereo report          # look, change nothing
+./target/release/hypreq --input mix.wav --stereo split       # one filter per ear
+./target/release/hypreq --input mix.wav --stereo split --stereo-max-skew 3
+```
+
+```text
+=== Ears (129 capture points measured per ear) ===
+  Level difference  : +1.27 dB left vs right (the centre leans)
+  Shape mismatch    : -7.72 dB @ 15110 Hz (band 16 kHz), spread 0.15 dB
+  Reads as          : mismatch
+  Resolution        : a sixth of an octave is 2.1 capture points here (grid 0.079 oct), so one tenth
+                      of an octave is one sample and the reason for the difference is not knowable
+                      from this curve
+  Feature match     : r = +0.704 (+1 the same feature, 0 independent accidents)
+  Per-ear trim      : balance -1.27 dB cancelled, filter difference up to -5.70 dB @ 3838 Hz
+  Centre            : moved in 15 knot(s) — the notch ceiling was applied after the trim and cut one
+                      side back
+```
+
+`report` changes no audio and no bytes — it is the same filter with the truth attached. `split`
+builds one curve per ear out of the curve the shared filter would have used, applies it as `±`, and
+so leaves the **centre** of the image where the model put it while cancelling the pair's own
+difference: on the DT 770 that is a 1.27 dB lean plus up to 5.70 dB of per-band difference, and on
+the FT1 Pro 0.05 dB and 3.30 dB.
+
+Two things it says rather than hides. The **resolution** line is the honest scope note: these
+captures are spaced 0.08 of an octave apart, so a sixth-octave window covers about two samples and
+nothing in the file can tell you whether a difference is the two units or one ear sitting
+differently in a coupler — the amount to cancel is decided band by band by the same knee
+`--regularize` uses, and the label stops at "mismatch". And the **centre** line reports where
+`--notch-mode safe` cut one ear back after the trim, because the ceiling is the last word on a
+notch band and where it bites, the middle of the image moves by half of it.
+
+`split` needs a model measured per ear and a **stereo** file: a mono file has no right ear, and a
+run that writes convolvers has no channels to apply two filters to, so it refuses with exit 2
+instead of quietly becoming `report`. The per-ear difference is capped at 6 dB per band by default
+(`--stereo-max-skew`) — a ceiling on the damage the flag can do to an image, not a claim about
+perception. `off` is the default and writes exactly what it wrote before the flag existed.
+
 ### What a Correction Demands (`--assess`)
 
 The report has always printed the biggest boost in the curve, and a boost is a promise about

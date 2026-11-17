@@ -140,6 +140,13 @@ compares:
   fails. matplotlib and `plotters` are different renderers, so pixels are never compared;
   exact geometry is covered by unit tests that decode the PNG the same way.
 
+One deliberate divergence, because the honest version of "the figures match" is "the default
+figures match": with `--stereo` set to anything but `off`, the Rust figure draws a fifth trace the
+reference has no word for — `left − right` on panel 2, in the ears' own blue, with the worst
+disagreement quoted in its legend entry. It is opt-in for exactly that reason, and
+`the_ear_trace_draws_ink_in_the_error_panel` holds both halves: the trace's pixels present when the
+flag asks, and none of that colour anywhere in panel 2 when it does not.
+
 The harness exits non-zero if any comparison fails, so it is usable as a CI gate.
 
 #### One usage-error message is spelled differently by different CPythons
@@ -322,6 +329,50 @@ byte for byte. What it does is arithmetic, so the rules are numbers:
   it exists to find — measured: a 10 dB coupler notch's peak went from 3.5 dB to 1.8 dB and
   stopped being bypassed. `regularized_curve` interpolates the deviation, it does not re-filter
   it.
+
+**Per-ear correction (`--stereo`, `src/stereo.rs`).** Unreferenced by the oracle, `off` by default,
+and `report` byte-identical on both the report's filter and the audio. The quantities:
+
+- The pair's **balance** is `median(left) − median(right)` and the **shape mismatch** is the captured
+  difference with that balance removed. Median for the reason `fit::reference_db` already gives: a
+  capture saved with one ear's analyser 94 dB off has a 94 dB *difference* and no shape difference,
+  and reading it the other way turns a bookkeeping fact into a pairing defect. The balance is
+  cancelled in full and the shape is cancelled band by band — a consistent offset between two ears
+  is not a claim about a feature, and the knee exists to doubt features.
+- The trim is applied as `left += t`, `right −= t`, so **the pair's mean is the shared curve at every
+  knot** (test: 1e-9). Delivered difference after the trim is `D + 2t`, so `t = −D/2` cancels it
+  and `t = 0` leaves today's answer; the regularizer moves `t` between those two.
+- The knee that decides `t` comes from the **model's own captured curve**, never from the mismatch it
+  is about to cancel. A pair with one enormous narrow difference would otherwise raise its own knee
+  and negotiate out of being corrected, which is the failure `Policy::auto` exists to avoid. With
+  `--regularize off` the trim keeps the documented 3.00 dB default knee and the report names it,
+  because `off` declines to touch *the curve* — it is not a vote of confidence in a difference that
+  stands on one sample.
+- `--stereo-max-skew` bounds `|G_L − G_R|` per knot and takes the excess **off both sides equally**,
+  so the bound cannot move the centre. Default 6.00 dB, chosen against this database rather than out
+  of a book: it is slack everywhere on both stereo captures except the DT 770's 15.1 kHz band, where
+  the mismatch is 7.7 dB. A negative ceiling is a usage error; `0.00` means no per-ear difference at
+  all.
+- **Narrowness is not claimed below the grid's resolution.** A sixth-octave window spans
+  `1/6 ÷ grid_oct` capture points: 2.1 on the DT 770 (grid 0.079 oct) and 2.2 on the FT1 Pro (0.077).
+  Below `RESOLVED_WINDOW_POINTS = 3` the verdict stops at "mismatch" and the report prints the
+  resolution line; asking "fixture or unit" of a curve whose features are one sample wide is the
+  same category of error as attributing a third-octave band to fewer than one FFT bin, which
+  `--assess` already refuses to do.
+- The **feature match** is Pearson's coefficient between the two ears' residuals from their *own*
+  sixth-octave smoothed curves — not between the curves. Correlating the curves measures the bass
+  shelf both ears share and printed **+0.97** for a fixture pair whose two features are in different
+  octaves; correlating the leftovers reads what the report claims to read. The `+1 / 0 / −1` reading
+  is the standards-body definition (ASA/ANSI acoustical terminology, "cross correlation; interaural
+  cross correlation", annotation 2). A curve with no wiggle returns **no number**, not `0.00`, which
+  under the same definition would say "independent" about two identical ears.
+- `--stereo split` is refused at three doors: no `--input` (a run that writes convolvers loads one
+  mono impulse response on both channels), `--bypass-eq`, and a file that is not exactly two
+  channels — exit 2 for the first two (argparse's code, before any file is written) and exit 1 with
+  the channel count named for the last, because only the file knows that.
+- The ceiling is the last word **per ear, after the trim**, and where it bites the report says the
+  centre moved: on the shipped DT 770 at the default knee it cuts 6 left and 9 right knots, so the
+  claim printed is `moved in 15 knot(s)` rather than the design's promise.
 
 ### Where the port refuses what the reference accepts
 

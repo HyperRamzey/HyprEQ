@@ -460,6 +460,64 @@ comparing the two is the check (`src/fixture.rs`).
   `the_shipped_database_records_fixtures_and_the_pairing_it_inherited` in `tests/cli_report.rs` exists
   to catch.
 
+### What the experimental phase stage is held to numerically
+
+`--experimental-phase <HZ>` is opt-in, so nothing here applies to a default run, and the parity
+oracle never sees it. It is also the one place where the oracle's own figure diverges by design: the
+plots are drawn from the IR that gets written, so the phase and IR panels show the reshaped filter
+while the magnitude panel does not move.
+
+- **The magnitude is carried, never recomputed.** `|H|` comes off the input filter's own transform
+  and is recombined with the corrected phase, so the curve is preserved by construction. What the
+  stage *can* cost is truncation of a response the correction made longer, and that cost is measured
+  on the delivered taps and printed — `1.011e-2 dB` worst-case on the shipped DT 770 at the defaults,
+  against the 3 dB a verified band is judged by.
+- **The band, and why it stops where it does.** `BAND_FLOOR_HZ` is 10 Hz: bin 0 is DC, where a real
+  filter's phase is pinned to 0 or pi and there is nothing to flatten. The correction is full-strength
+  to the crossover and eased to zero by `TAPER_RATIO` (2×) above it on a raised cosine, which meets
+  both endpoints in value *and* derivative — a hard edge in the weight would be a group-delay spike,
+  the artifact the stage exists to remove.
+- **The target is the band's own mean delay.** Flattening moves delay from where the filter has more
+  of it to where it has less; the level it moves toward is printed as `Delay carried`, so a reader can
+  see that none was invented.
+- **The correction is bounded, and the bound is the interesting number.** Each frequency moves by at
+  most `DEFAULT_GD_BUDGET_MS` (0.56 ms — the audibility scale from Liski et al. 2021, chosen by
+  measurement, prescribed by nobody). An unbounded version is not implementable: on the shipped
+  correction the band spans 9.6 ms and the delay below 20 Hz runs to hundreds of ms, so a flat line
+  demands advancing energy no causal filter can advance. The measured failure was explicit —
+  **0.30 dB** of magnitude error and a kernel flung across the grid.
+- **The band's delay change integrates to zero, and a step in phase is a bug, not a rounding error.**
+  Phase is the integral of delay, so any residue at the band's lower edge is a step there, which is an
+  infinite group-delay spike. Clamping the correction creates exactly that residue; it is removed and
+  the clamp re-applied until the integral closes. Before that, the stage reported **867 ms** of "group
+  delay moved" on a 5 ms budget, and the number was arithmetically consistent with what it had built.
+- **Sign convention, because this is where the quiet wrong answer lives.** Group delay is
+  `D = -(1/2π)·dφ/df`, so integrating a delay *increase* downward in frequency *adds* phase in this
+  convention. Subtracting instead flattens group delay away from the target, and the only thing that
+  caught it was the test that measures the band's delay spread: 2.13 ms → 4.90 ms, i.e. worse.
+- **Grid: eight times the filter, in f64, no contraction anywhere.** The response after the correction
+  is not compact, and a grid that is merely twice the filter folds its own tail back onto its onset,
+  which makes every downstream number measure a fold. Size follows the same `bit_length` convention as
+  the rest of the crate.
+- **Kernel growth is capped, and the floor is the project's own.** The delivered kernel is the shortest
+  window on a ladder (1, 1.25, 1.5, 1.75, 2, 3, 4× the requested length, never past 4× or half the
+  grid) whose tail sits at or below **-130 dBFS** — the same floor the `Decay @ Truncation` line reports
+  for the shipped filters — while leaving at most 1e-9 of the response's energy outside it. Growing
+  without a cap reached **524 288 taps and 5.5 s** chasing a bass decay that never gets that quiet, so
+  an uncapped search is not thoroughness, it is a runaway.
+- **The window's start is chosen for least latency, not most energy.** Sliding a kernel *is* a delay.
+  The densest window on the grid costs **460 ms** on the shipped filter because a bass correction's
+  response is diffuse enough for its densest stretch to start a quarter of a second from the onset; the
+  smallest shift meeting the floor is taken instead, and the latency is printed.
+- **Report numbers follow the taps.** `energy_pct` and the post-fade `Decay @ Truncation` figure are
+  recomputed from the delivered taps. `unwindowed_floor_dbfs` deliberately still describes the
+  minimum-phase filter before its tail fade — there is no post-correction equivalent of "before the
+  fade" — and the phase block says which lines it replaced, because a stale number that reads
+  plausibly is worse than a missing one.
+- **Refusals.** `--experimental-phase` that is not finite or not above 0 Hz is a usage error (exit 2).
+  A crossover at or above Nyquist, or at or below 20 Hz, cannot describe a band and stops the run
+  (exit 1) before any file is written.
+
 ### Where the port refuses what the reference accepts
 
 Parity is the rule, and two places break it deliberately. Both are sizes, both would make

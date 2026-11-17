@@ -667,22 +667,87 @@ in words instead of comparing a curve against itself and printing a flattering z
 invocation per model, for a chain that can split the channels. The CLI refuses that case rather than
 half-doing it, and the WAV path is where a two-filter chain can actually be built.
 
-### PR 5 — Experimental phase correction *(behind `--experimental`, documented as such)*
+### PR 5 — Experimental phase correction — **shipped** as `--experimental-phase <HZ>`
 
-**Problem:** minimum-phase is assumed (§3.4).
+**Problem, as scoped:** minimum-phase was assumed (§3.4) with no way to ask the question.
 
-**Method:** keep the minimum-phase core, and add a mixed-phase option: minimum-phase
-magnitude above a crossover plus a linear-phase (or selectively all-pass-equalized) low
-end, which is the shape CamillaFIR and the group-delay literature converge on.
+**What shipped.** `src/phase.rs`. The finished filter's spectrum is read, its **group delay**
+is corrected inside a band, and the magnitude is carried through untouched; the stage never
+re-derives `|H|`. Costs are printed rather than assumed: the group delay moved, the delay the
+band was flattened onto, the kernel growth, the latency, the magnitude deviation and the
+tail floor. Off by default, and the default report is the parity-pinned one (98/98 with the
+flag absent).
 
-**Envelope first:** a mixed-phase stage that chases a raw magnitude will invent steep
-skirts that no headphone has. Constrain the target log-magnitude's continuity *before* the
-minimum-phase conversion — the order DRC-FIR made its name on — so the all-pass section
-handles departure from minimum phase rather than fighting an over-detailed target.
+**Three findings, all measured, none of them visible in the plan:**
 
-**Acceptance:** the flag must produce a filter whose magnitude matches the minimum-phase
-one within a stated tolerance (so phase is the only thing that moved); the figure's phase
-and IR panels must show the difference; the README states that audibility is contested.
+1. *Flattening a bass band is not a cheap operation, and the plan assumed it was.* On the
+   shipped DT 770 correction the minimum-phase group delay spans **9.6 ms across 10–200 Hz**,
+   and the delay below 20 Hz is enormous because a steep low shelf hides it inside a decay.
+   A truly flat line therefore has to either advance ~220 ms of deep-bass energy — which is
+   not a causal operation: the energy leaves the front of the kernel, wraps on the padded
+   grid, and came out as an absurd latency plus a **0.30 dB** magnitude error — or add the
+   same as latency. So the correction is bounded per frequency
+   (`DEFAULT_GD_BUDGET_MS`, 0.56 ms, the audibility scale rather than what the band could
+   absorb), and the report prints the budget against the band's real span so the reader sees
+   how much was closed and how much was left alone on purpose. Published designs take
+   *permitted delay* as an input for this reason; here the budget is the same quantity.
+2. *The band's delay change must integrate to zero.* The phase change is the integral of the
+   delay change, so any residue at the bottom edge of the band is a **step in phase**, and a
+   step is an infinite group-delay spike. With the clamp in place and no residue removal this
+   measured **867 ms** of "group delay moved" on a 5 ms budget. The residue is now removed and
+   the clamp re-applied until the integral closes.
+3. *Where the kernel is cut is a latency decision, not an energy one.* The reshape spreads
+   the response, so the delivered window has to start somewhere. Taking the densest stretch of
+   the grid — the obvious choice — cost **460 ms** of latency on the shipped filter, because
+   sliding a kernel *is* a delay and a bass correction's response is diffuse enough that its
+   densest stretch starts a quarter of a second from the onset. The smallest shift that meets
+   the floor is used instead. Uncapped growth was also tried: it reached **524 288 taps and
+   5.5 s** chasing a tail that never reaches −130 dBFS, so the kernel now grows on a capped
+   ladder (≤ 4× the requested length) and prints `held_floor: false` when the floor is not met
+   rather than pretending.
+
+**Prior art, read rather than described.** Budde's DAGA 2012 mixed-phase method (its own
+implementation notes report that interpolating between minimum and linear phase puts energy
+outside the causal support and that truncating it changes the magnitude — which is why HyprEQ
+never re-derives `|H|` instead of factorising it, and why the alternating loop's divergence
+risk does not exist here). The CamillaFIR manual, whose posture this copies: group-delay work
+is a bass-focused guard, not a wideband phase shaper. NYU's minimum-phase FIR design notes,
+quoted: "the delay of a linear-phase filter is equal to (N − 1)/2", and a narrow transition
+band with high stop-band attenuation "requires making the filter long" — the trade this stage
+lives inside, and the reason accuracy here is bought with taps and an 8× padded transform
+rather than given up. Liski, Mäkivirta & Välimäki (TASLP 29, 2189–2201, 2021) supplies the
+threshold the budget is set against; that paper's own abstract records that the ear tolerates
+**more** phase processing in the low frequencies, which argues for treating a bass
+GD-flattening stage as experimental rather than as a recommendation, and that is how it ships.
+The full text was behind a paywall at the time of writing, so no per-frequency threshold
+numbers are quoted that could not be read.
+
+**Acceptance, and how it was met:**
+- `the_magnitude_survives_within_rounding`, and end to end in
+  `the_stage_moves_the_phase_and_leaves_the_curve_alone`: the written filter's magnitude
+  against the default run's, **< 0.1 dB** across the band, measured on the artefact.
+- `the_bass_group_delay_actually_flattens`, plus the same spread reduction measured on the
+  delivered WAV: the band's delay spread goes down, not merely somewhere else.
+- `nothing_above_the_taper_is_touched`: magnitude exact to 1e-12 relative before truncation,
+  and zero weight above the taper.
+- `a_filter_that_is_already_flat_in_the_band_comes_back_unchanged`,
+  `nonsense_requests_are_declined_rather_than_attempted`,
+  `the_taper_weight_is_continuous_and_ends_where_it_says`,
+  `keeping_the_window_with_the_most_energy_is_what_buys_the_magnitude`,
+  `the_unwrapper_removes_wraps_a_fit_cannot_tolerate`, `the_report_says_what_moved_and_what_it_does_not_claim`.
+- Figure: no panel was added, because none was needed — the plots are drawn from the IR that
+  gets written, so the phase and IR panels show the difference on their own.
+
+**Two measurements that were wrong before they were fixed, recorded because both passed at
+the time.** An energy centroid cannot see bass phase: it read 1.2 samples before *and* after a
+correct stage, because the untouched treble dominates the average. Absolute group delay cannot
+see a delay: it moves by π everywhere by definition. Both assertions now compare *shape* with
+each filter's own median removed.
+
+**Not claimed:** that this sounds better, or that it is audible — see §6 and the README, which
+say the audibility of phase correction is contested. The budget is a HyprEQ configuration
+constant, not a compliance limit, and the stage's latency (about 120 ms on the shipped DT 770
+filter at the default budget) makes it wrong for anything live.
 
 ### PR 6 — Distortion-aware assessment — **shipped** as `--assess`
 

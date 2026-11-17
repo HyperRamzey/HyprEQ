@@ -321,6 +321,53 @@ anyway. ...
   carries that pairing as a reason on file rather than as an accident nobody noticed. It is the same
   decision the reference program has always made; it is now one you can read, and disagree with.
 
+### Experimental: Moving the Phase, Leaving the Curve (`--experimental-phase`)
+
+The shipped filter is **minimum-phase**, and that stays the default. Minimum-phase is the right
+default: it puts no pre-ringing in front of a transient, and it matches what loudspeaker crossovers
+already do. But it is a choice, and it is not free — the group delay it implies across a boosted
+bass region is real delay, just hidden inside a decay instead of spread symmetrically. This flag
+lets you ask what that costs, and it prints what it moved.
+
+```bash
+hypreq -H dt770_80 --experimental-phase 200
+```
+
+```text
+=== Experimental Phase (mixed: flat group delay below 200 Hz) ===
+  Band            : 10 Hz - 200 Hz, tapered to unity by 400 Hz (nothing above it is touched)
+  Delay carried   : -0.232 ms, the band's own mean - flattening moves delay, it does not add any
+  Group delay     : up to 0.888 ms moved, worst at 10 Hz - beyond the published audibility thresholds (-0.56 / +0.64 ms, Liski et al. 2021)
+  Budget          : 0.56 ms per frequency against a band spread of 9.6 ms - the rest was left alone rather than paid for in latency
+  Kernel          : 65536 -> 65536 taps, +119.6 ms latency - the reshape makes the response longer, and it is kept rather than cut
+  Magnitude       : worst deviation 1.011e-2 dB - this stage replaces phase and carries the curve through
+  Energy retained : 99.9999999003%, tail floor -165.88 dBFS
+  Audibility      : contested. Minimum-phase is the default; this is an experiment, not a recommendation.
+```
+
+* **The curve is the thing that must not move.** The stage reads the finished filter's spectrum,
+  corrects its group delay inside the band, and carries the magnitude through — `|H|` is never
+  re-derived. What is left is the cost of holding a longer response in a finite kernel: **0.010 dB**
+  on the DT 770 above, against the 3 dB a verification band is judged by.
+* **It costs latency, and that is the honest price, not a defect.** Flattening a band's delay makes
+  delay the filter already had in the bass *explicit* instead of hidden in a decay. About 120 ms on
+  the DT 770 at the default settings, printed every time. Do not use this for gaming, monitoring or
+  anything a human is playing along to.
+* **The band is bounded on purpose, and the report says by how much.** Group delay below 200 Hz on a
+  real correction spans roughly a decade of values, and closing all of it would mean advancing
+  hundreds of milliseconds of deep-bass energy, which no causal filter can do. The per-frequency
+  budget (0.56 ms, the audibility scale from Liski et al., TASLP 29, 2189–2201 (2021)) is a HyprEQ
+  configuration default that nobody prescribed; the block prints it next to the band's real spread so
+  you can see how much was closed and how much was left alone.
+* **Audibility is genuinely contested, including in the study the budget comes from.** That paper
+  finds the ear tolerates *more* phase processing in the low frequencies — which is an argument for
+  treating a bass phase stage as an experiment, not as an upgrade. Nothing here says this sounds
+  better. A/B it with your own ears or leave it off.
+* **Off means off.** The default run is byte-for-byte the shipped one; the plots, the convolvers and
+  the report are untouched. When the flag is given, the stage runs on the filter that actually gets
+  written (both kernels of a `--stereo split` too), and the two report numbers that describe those
+  taps — causal energy and the decay floor — are recomputed from them rather than inherited.
+
 ### Generated Files
 - `jbl770nc_f64_48k.wav` / `dt770_80ohm_f64_48k.wav` / `ft1pro_f64_48k.wav`: 64-bit IEEE float (`pcm_f64le`) mono impulse responses for `mpv` / `FFmpeg` (`afir=precision=double`). When a single headphone is selected, it is also copied to `ir.wav`.
 - `*_mastering_mono_48k.wav` / `*_mastering_stereo_48k.wav`: 32-bit IEEE float (`pcm_f32le`, `16,384` taps) for real-time PipeWire `filter-chain` or DAW convolver plugins.

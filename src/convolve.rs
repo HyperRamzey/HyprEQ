@@ -44,42 +44,77 @@ pub fn convolve_planar_fft(planar: &[Vec<f64>], ir: &[f64], trim_to_input: bool)
         return Vec::new();
     };
     let n_in = first.len();
-    let n_ir = ir.len();
     if n_in == 0 {
         // The Python returns one empty channel per input channel here, not an
         // empty list, and the caller zips the result against the channel names.
         return vec![Vec::new(); planar.len()];
     }
 
+    planar
+        .iter()
+        .map(|ch| channel_out(ch, ir, n_in, trim_to_input))
+        .collect()
+}
+
+/// Convolve a left/right pair, one filter per channel.
+///
+/// Channel 0 is the left ear's filter and channel 1 the right's. `None` for anything that is not
+/// exactly two channels, which is not fussiness: a mono file has no right ear to hand a filter to,
+/// and a 5.1 file has five things that are not ears, and quietly filtering channel 2 with the right
+/// ear's correction is the kind of thing a report cannot see afterwards.
+///
+/// The block schedule comes from the input exactly as [`convolve_planar_fft`] takes it, so giving
+/// this function the same filter twice reproduces that function's bytes. That is what makes
+/// `--stereo split` on a model whose ears are identical sound exactly like the shared filter: two
+/// ways of saying the same thing must not produce two different files.
+#[must_use]
+pub fn convolve_planar_pair(
+    planar: &[Vec<f64>],
+    ir_l: &[f64],
+    ir_r: &[f64],
+    trim_to_input: bool,
+) -> Option<Vec<Vec<f64>>> {
+    if planar.len() != 2 {
+        return None;
+    }
+    let n_in = planar.first()?.len();
+    if n_in == 0 {
+        return Some(vec![Vec::new(); 2]);
+    }
+    Some(vec![
+        channel_out(&planar[0], ir_l, n_in, trim_to_input),
+        channel_out(&planar[1], ir_r, n_in, trim_to_input),
+    ])
+}
+
+/// One channel against one FIR, blocked on `n_in` — channel 0's length — so every channel of a
+/// planar buffer shares the block boundaries and the accumulation order.
+fn channel_out(ch: &[f64], ir: &[f64], n_in: usize, trim_to_input: bool) -> Vec<f64> {
+    let n_ir = ir.len();
     let block_len = 16384usize.max(block_bound(n_in));
     let n_fft = shl_bit_length(block_len + n_ir - 2);
     let h = crate::fft::rfft(ir, n_fft);
     let out_len = if trim_to_input { n_in } else { n_in + n_ir - 1 };
 
-    planar
-        .iter()
-        .map(|ch| {
-            let mut acc = vec![0.0f64; n_in + n_ir - 1];
-            let mut start = 0usize;
-            // `n_in` is channel 0's length. A shorter channel simply stops early: slicing
-            // `start..stop` past its end would panic, and no audio path wants a panic.
-            while start < n_in && start < ch.len() {
-                let stop = (start + block_len).min(n_in).min(ch.len());
-                let blk = &ch[start..stop];
-                let seg_len = blk.len() + n_ir - 1;
-                let mut spec = crate::fft::rfft(blk, n_fft);
-                apply_response(&mut spec, &h);
-                let y = crate::fft::irfft(&spec, n_fft);
-                let take = seg_len.min(acc.len() - start);
-                for (a, &v) in acc[start..start + take].iter_mut().zip(&y[..take]) {
-                    *a += v;
-                }
-                start += block_len;
-            }
-            acc.truncate(out_len.min(acc.len()));
-            acc
-        })
-        .collect()
+    let mut acc = vec![0.0f64; n_in + n_ir - 1];
+    let mut start = 0usize;
+    // `n_in` is channel 0's length. A shorter channel simply stops early: slicing
+    // `start..stop` past its end would panic, and no audio path wants a panic.
+    while start < n_in && start < ch.len() {
+        let stop = (start + block_len).min(n_in).min(ch.len());
+        let blk = &ch[start..stop];
+        let seg_len = blk.len() + n_ir - 1;
+        let mut spec = crate::fft::rfft(blk, n_fft);
+        apply_response(&mut spec, &h);
+        let y = crate::fft::irfft(&spec, n_fft);
+        let take = seg_len.min(acc.len() - start);
+        for (a, &v) in acc[start..start + take].iter_mut().zip(&y[..take]) {
+            *a += v;
+        }
+        start += block_len;
+    }
+    acc.truncate(out_len.min(acc.len()));
+    acc
 }
 
 /// `min(65536, n_in)` — split out so the clamp reads as one idea.
@@ -205,6 +240,87 @@ mod tests {
         for i in 0..300 {
             assert!((r[0][i] - sa[i]).abs() < 1e-12);
         }
+    }
+
+    /// Two channels, one filter each — the shape `--stereo split` writes audio with.
+    fn pair_input() -> (Vec<f64>, Vec<f64>) {
+        let l: Vec<f64> = (0..500).map(|i| (i as f64 * 0.031).sin()).collect();
+        let r: Vec<f64> = (0..500)
+            .map(|i| ((i as f64 * 0.017).sin() + (i as f64 * 0.21).cos() * 0.3) / 1.3)
+            .collect();
+        (l, r)
+    }
+
+    fn fir(kind: usize) -> Vec<f64> {
+        (0..48)
+            .map(|i| match kind {
+                0 => (i as f64 / 48.0 * std::f64::consts::PI).sin(),
+                _ => 1.0 / 48.0 + (i as f64 * 0.7).cos() * 0.004,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_filter_handed_to_both_channels_is_the_shared_filter() {
+        // `--stereo split` on a model whose two ears measured identically has nothing to say, and
+        // it must therefore produce the same bytes as the single filter it replaced. Two ways of
+        // saying one thing producing two files is the kind of difference a listener finds by
+        // accident and a report cannot explain.
+        let (l, r) = pair_input();
+        let h = fir(0);
+        for trim in [true, false] {
+            let shared = convolve_planar_fft(&[l.clone(), r.clone()], &h, trim);
+            let paired = convolve_planar_pair(&[l.clone(), r.clone()], &h, &h, trim)
+                .expect("two channels is a pair");
+            assert_eq!(paired.len(), 2);
+            for ch in 0..2 {
+                assert_eq!(paired[ch].len(), shared[ch].len(), "trim {trim} ch {ch}");
+                for i in 0..shared[ch].len() {
+                    assert_eq!(
+                        paired[ch][i].to_bits(),
+                        shared[ch][i].to_bits(),
+                        "trim {trim} channel {ch} sample {i}: the pair path is not the shared path"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_channel_gets_its_own_filter_and_nothing_else() {
+        let (l, r) = pair_input();
+        let (hl, hr) = (fir(0), fir(1));
+        let paired = convolve_planar_pair(&[l.clone(), r.clone()], &hl, &hr, true).unwrap();
+        // Each channel alone, against its own filter: the reference for what "per ear" means.
+        let only_l = convolve_planar_fft(std::slice::from_ref(&l), &hl, true);
+        let only_r = convolve_planar_fft(std::slice::from_ref(&r), &hr, true);
+        for i in 0..only_l[0].len() {
+            assert_eq!(paired[0][i].to_bits(), only_l[0][i].to_bits(), "left {i}");
+        }
+        for i in 0..only_r[0].len() {
+            assert_eq!(paired[1][i].to_bits(), only_r[0][i].to_bits(), "right {i}");
+        }
+        // And the right ear's filter is not the left ear's, so the assertions above say something.
+        let crossed = convolve_planar_pair(&[l, r], &hr, &hl, true).unwrap();
+        assert_ne!(
+            crossed[1], paired[1],
+            "swapping the pair changed nothing: the filters were not both in use"
+        );
+    }
+
+    #[test]
+    fn a_pair_refuses_anything_that_is_not_two_channels() {
+        // A mono file has no right ear; a five-channel file has five things that are not ears, and
+        // filtering channel 2 with a right-ear correction is invisible in every report afterwards.
+        let (l, r) = pair_input();
+        let h = fir(0);
+        assert!(convolve_planar_pair(std::slice::from_ref(&l), &h, &h, true).is_none());
+        assert!(convolve_planar_pair(&[l.clone(), r.clone(), l.clone()], &h, &h, true).is_none());
+        assert!(convolve_planar_pair(&[], &h, &h, true).is_none());
+        // Two empty channels is a pair of nothing, which is what the caller handed over.
+        let empty = convolve_planar_pair(&[Vec::new(), Vec::new()], &h, &h, true).unwrap();
+        assert_eq!(empty.len(), 2);
+        assert!(empty[0].is_empty() && empty[1].is_empty());
     }
 
     /// Parity against the Python, using the recorded NumPy artefacts.

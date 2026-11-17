@@ -29,25 +29,49 @@ cargo build --release
 1. **JBL Live 770NC (Passive / Wired Mode)** — `--headphone jbl770nc`
    - **Measurement Source:** **Filk** (Clone GRAS 43AG fixture with `KB006x` KEMAR pinna + clone IEC 60318-4 `711` occluded-ear simulator), via the [AutoEq](https://github.com/jaakkopasanen/AutoEq) database.
    - **Target:** Harman Over-Ear 2018.
-     <img width="1950" height="1725" alt="jbl770nc_final_verification" src="docs/plots/jbl770nc_final_verification.png" />
+
+   **Baseline Verification (Unregularized / Shipped Default):**
+   <img width="1950" height="1725" alt="jbl770nc_final_verification" src="docs/plots/jbl770nc_final_verification.png" />
+
+   **PR 1 Adaptive Regularized Verification (`--regularize auto`):**
+   <img width="1950" height="1725" alt="jbl770nc_regularized_verification" src="docs/plots/jbl770nc_regularized_verification.png" />
+
+   > **What PR 1 Regularization Gives:** Evaluates local spectral deviation against a half-octave smoothed envelope with an adaptive knee at $4.29\text{ dB}$. Moves 20 of 128 knots, softening the aggressive $-3.16\text{ dB}$ cut at $8.48\text{ kHz}$ to $-2.37\text{ dB}$ (a $+0.79\text{ dB}$ shift toward bypass) where the narrow dip is partly an artificial pinna coupling artifact, while completely preserving the fundamental acoustic driver corrections: the $-7.04\text{ dB}$ at $160\text{ Hz}$ cup mode, the $+2.60\text{ dB}$ at $455\text{ Hz}$ boost, and the $-2.45\text{ dB}$ nasal cut at $1.05\text{ kHz}$.
 
 2. **Beyerdynamic DT 770 Pro (80 Ω)** — `--headphone dt770_80`
    - **Measurement Source:** **Crinacle** (Genuine `GRAS 43AG-7` fixture: `RA0402` high-frequency 711 coupler + `KB500X` anthropometric pinna), via AutoEq.
    - **Target:** Harman Over-Ear 2018.
-     <img width="1950" height="1725" alt="dt770_80ohm_final_verification" src="docs/plots/dt770_80ohm_final_verification.png" />
+
+   **Baseline Verification (Unregularized / Shipped Default):**
+   <img width="1950" height="1725" alt="dt770_80ohm_final_verification" src="docs/plots/dt770_80ohm_final_verification.png" />
+
+   **PR 1 Adaptive Regularized Verification (`--regularize auto`):**
+   <img width="1950" height="1725" alt="dt770_80ohm_regularized_verification" src="docs/plots/dt770_80ohm_regularized_verification.png" />
+
+   > **What PR 1 Regularization Gives:** Identifies that the narrow $3.76\text{ kHz}$ concha reflection null is a non-minimum-phase fixture artifact, with an adaptive knee at $4.27\text{ dB}$ moving 33 of 128 knots. It walks the narrow $+4.26\text{ dB}$ boost back to $+0.10\text{ dB}$ (a $-4.16\text{ dB}$ adjustment, effectively bypassing the null and eliminating harsh treble glare), while keeping genuine driver resonances intact: the $-4.05\text{ dB}$ cup suckout at $59\text{ Hz}$, the $+4.10\text{ dB}$ boost at $205\text{ Hz}$, and surgical cuts on the three Beyer breakup spikes ($5.3\text{ kHz}$, $6.6\text{ kHz}$, and $8.16\text{ kHz}$). Total preamp moves from $-5.60\text{ dB}$ to $-5.56\text{ dB}$.
 
 3. **FiiO FT1 Pro (Open-Back Planar Magnetic)** — `--headphone ft1pro`
    - **Measurement Source:** **oratory1990 / Kuulokenurkka** (Genuine `GRAS 43AG` fixture with `KB50xx` anthropometric pinna + IEC 60318-4 `711` occluded-ear simulator), via AutoEq.
    - **Target:** Harman Over-Ear 2018.
-     <img width="1950" height="1725" alt="ft1pro_final_verification" src="docs/plots/ft1pro_final_verification.png" />
+
+   **Baseline Verification (Unregularized / Shipped Default):**
+   <img width="1950" height="1725" alt="ft1pro_final_verification" src="docs/plots/ft1pro_final_verification.png" />
+
+   **PR 1 Adaptive Regularized Verification (`--regularize auto`):**
+   <img width="1950" height="1725" alt="ft1pro_regularized_verification" src="docs/plots/ft1pro_regularized_verification.png" />
+
+   > **What PR 1 Regularization Gives:** Operates with a baseline knee floor at $3.00\text{ dB}$, moving 62 of 127 knots to smoothly contract narrow high-frequency ripples near the coupler boundary (moderating the $+1.63\text{ dB}$ boost at $9.18\text{ kHz}$ to $+1.22\text{ dB}$). Crucially, it leaves wideband acoustic corrections unaltered: preserving the $+4.07\text{ dB}$ ear-gain restoration at $1.82\text{ kHz}$, the $-2.64\text{ dB}$ glare cut at $2.82\text{ kHz}$, and planar diaphragm excursion protection in the sub-bass ($+2.70\text{ dB}$ at $55\text{ Hz}$, $+2.37\text{ dB}$ at $20\text{ Hz}$). Total preamp moves from $-5.57\text{ dB}$ to $-5.53\text{ dB}$.
 
 ### Reference Model Profiles & Convolver Metrics
 
-| Model Key | Fixture & Pinna | Target | Max Boost | Preamp | Truncation Floor ($f_{64}$) | Causal Energy | HF Taper | Generated Convolvers |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`jbl770nc`** | Clone GRAS 43AG (`KB006x` + `711`) | Harman Over-Ear 2018 | $+5.00\text{ dB}$ | $-6.50\text{ dB}$ | $-311.18\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | `jbl770nc_f64_48k.wav`<br>`jbl770nc_mastering_mono_48k.wav`<br>`jbl770nc_mastering_stereo_48k.wav` |
-| **`dt770_80`** | Genuine GRAS 43AG-7 (`KB500X` + `RA0402`) | Harman Over-Ear 2018 | $+4.10\text{ dB}$ | $-5.60\text{ dB}$ | $-294.53\text{ dBFS}$ | $99.9999999983\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `dt770_80ohm_f64_48k.wav`<br>`dt770_80ohm_mastering_mono_48k.wav`<br>`dt770_80ohm_mastering_stereo_48k.wav` |
-| **`ft1pro`** | Genuine GRAS 43AG (`KB50xx` + `711`) | Harman Over-Ear 2018 | $+4.07\text{ dB}$ | $-5.57\text{ dB}$ | $-309.00\text{ dBFS}$ | $99.9999999999\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `ft1pro_f64_48k.wav`<br>`ft1pro_mastering_mono_48k.wav`<br>`ft1pro_mastering_stereo_48k.wav` |
+| Model Key | Mode | Max Boost | Preamp | Truncation Floor ($f_{64}$) | Causal Energy | HF Taper | Generated Convolvers |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **`jbl770nc`** | Baseline | $+5.00\text{ dB}$ | $-6.50\text{ dB}$ | $-311.18\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | `jbl770nc_f64_48k.wav`<br>`jbl770nc_mastering_mono_48k.wav`<br>`jbl770nc_mastering_stereo_48k.wav` |
+| **`jbl770nc`** | **PR 1 Auto** | $+5.00\text{ dB}$ | $-6.50\text{ dB}$ | $-311.18\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$, 20 knots moved ($8.48\text{k}$ softened) |
+| **`dt770_80`** | Baseline | $+4.10\text{ dB}$ | $-5.60\text{ dB}$ | $-294.53\text{ dBFS}$ | $99.9999999983\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `dt770_80ohm_f64_48k.wav`<br>`dt770_80ohm_mastering_mono_48k.wav`<br>`dt770_80ohm_mastering_stereo_48k.wav` |
+| **`dt770_80`** | **PR 1 Auto** | $+4.06\text{ dB}$ | $-5.56\text{ dB}$ | $-294.50\text{ dBFS}$ | $99.9999999983\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $4.27\text{ dB}$, $3.7\text{k}$ concha null bypassed ($+0.10\text{ dB}$) |
+| **`ft1pro`** | Baseline | $+4.07\text{ dB}$ | $-5.57\text{ dB}$ | $-309.00\text{ dBFS}$ | $99.9999999999\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `ft1pro_f64_48k.wav`<br>`ft1pro_mastering_mono_48k.wav`<br>`ft1pro_mastering_stereo_48k.wav` |
+| **`ft1pro`** | **PR 1 Auto** | $+4.03\text{ dB}$ | $-5.53\text{ dB}$ | $-308.92\text{ dBFS}$ | $99.9999999999\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 62 knots moved ($9.18\text{k}$ moderated) |
 
 ### Acoustic Scope & Limitations
 A coupler measurement captures one unit on one artificial pinna/ear simulator. Pad wear, seal leakage, and individual pinna geometry shift sub-bass (`<60 Hz`) and high-frequency pinna interference notches (`>3 kHz`) by several dB from ear to ear. For example, even between the Left and Right earcups of the measured DT 770 Pro 80 Ω unit on Crinacle's GRAS 43AG-7 rig, the `~3.76 kHz` concha reflection null shifts by `135 Hz` and `6.6 dB` (`-2.16 dBr` Left vs. `-8.78 dBr` Right at `3,838 Hz`), while the FiiO FT1 Pro exhibits a `4.05 dB` L/R channel split across its `~3.84–4.05 kHz` concha/driver notch (`+4.32 dBr` Left vs. `+8.37 dBr` Right at `3,839 Hz`).

@@ -445,22 +445,80 @@ describes and keep producing byte-identical filters; a model with `fixture: bk51
 figure's title block names the fixture it assumed; an unknown fixture string is reported as
 a database error the way a bad target name already is.
 
-### PR 3 — Acoustic verification loop
+### PR 3 — Acoustic verification loop — **shipped** as `--verify-with`
 
-**Problem:** the loop is open (§3.5).
+**Problem:** the loop is open (§3.5). The program goes from a capture to a filter and stops. Nothing
+ever asks what the headphone did after the filter went in.
 
-**Method:** accept a post-EQ measurement (`--verify-with post_eq.csv`), align it to the
-predicted response (same smoothing, same frequency grid, delay/gain-insensitive), and
-report the residual per band with pass/fail thresholds, in the audit CSV and as a fifth
-panel or overlay.
+**The specification asked for two things that had to be separated.** "Align it to the predicted
+response" and "report the residual" describe one error, and the obvious single number conflates two
+that a user acts on differently:
 
-**Implementation shape:** reuse `model::load_csv_points` and `pchip` for alignment; reuse
-`measure.rs` for the statistics; a new `verify.rs` for the band residual and thresholds.
+* **residual** = measured − predicted: the rig, the fit, the unit. *"your filter is not doing what it
+  was told."*
+* **design shortfall** = target − predicted: the filter never asked for what the target wanted,
+  because regularization, the notch ceiling, or the refusal above `hf_bypass_hz` decided so.
+  *"even a perfect rig cannot hit the target here."*
 
-**Acceptance:** a synthetic test where the post-EQ curve is the predicted curve convolved
-with a known residual — the tool must name the band and the dB error; a test that an
-unrelated curve fails loudly; the report distinguishes "measurement is quiet/noisy" from
-"the fit is wrong".
+A verifier that reports only the residual calls the second a pass — which is precisely the case where
+the user should be told the design gave up. Both are in the report, and the shortfall is scored on
+band means, not worst points, because it describes a curve rather than a measurement.
+
+**Predicted is `raw + |H(f)|`, not the control knots.** The written FIR carries the half-Kaiser
+apodizer and its own truncation ripple; predicting from the design books the filter's deviation as a
+rig error. The run's preamp is subtracted back out — it is a headroom constant baked into the taps,
+and letting it through moves every band's shortfall by whatever `--headroom-db` says. A test moves
+that knob by 8 dB and requires the shortfall line to be byte-identical.
+
+**The acceptance criterion moved, and the moved line is still met.** The original said "a synthetic
+test where the post-EQ curve is the predicted curve convolved with a known residual". That cannot be
+computed in a test without an FFT, so instead the integration tests use a model whose correction is
+provably zero — then `predicted = raw` exactly, and a capture equal to the raw curve must pass while
+one carrying **6 dB at 1 kHz** must be blamed on the 1 kHz band. It is named, and the reported number
+is within 0.5 dB of the 6.00 dB that was injected:
+
+```text
+  Worst band      : +5.99 dB @ 1000 Hz (band 1 kHz)
+  Verdict         : FAIL - 3 of 29 band(s) outside +/-3.00 dB, 2 of them noise-limited
+```
+
+The rest of the acceptance list is met as written: an unrelated curve fails loudly (a raw curve
+against a corrected prediction: 18 of 29 bands); "the measurement is quiet" arrives as `uncovered`
+bands and a `NOTHING TO CHECK` verdict that is not a pass, while "the measurement is noisy" arrives
+as a per-band scatter flag; the two never collapse into one another. And because pass/fail uses the
+**worst** point in a band, the injected 6 dB comes back as 6 dB instead of a third-octave average of
+it — the mutation that swapped in the band mean was killed by a fixture built to discriminate it.
+
+**No prior art defines the tolerance, so the thresholds are defaults, not compliance.** The searches
+found measurement methods (IEC 60268-7 for headphone measurement, IEC 61260-1 for the band grid,
+ITU-T P.34 for a transmission-quality mask) and one 2022 study of *fit to a target* with an
+intelligibility model, but no published acceptance region for post-EQ headphone response — consistent
+with the one qualitative source available (Fleischmann, Silzle & Plogsties, *Headphone Equalization*:
+"no consensus can be found in literature" on an ideal transfer function, and a listening study finding
+no significant preference between two automatic EQ methods). So `DEFAULT_PASS_DB = 3.0` is wired as a
+default, chosen to sit above a normal repeat-measurement difference and well under the 10–12 dB the
+shipped database corrects, and **the report always prints the threshold it used**. The one constant
+that *is* derived is the quiet gate: additive noise 20 dB below a signal biases a level reading by up
+to **0.83 dB**, which is under a third of the threshold; by 6 dB of SNR the bias is 0.97 dB and the
+noise *is* the failure.
+
+**Where it refuses, and what it will not claim.** `--verify-with` with `--bypass-eq` (no filter) and
+with `--stereo split` (two filters, one capture) exit 2 before a file is written, as does a
+non-positive threshold; an unreadable capture exits 1 before the convolvers, so a mistyped path
+cannot leave half a model behind. It is report-only — the same input with and without the flag writes
+byte-identical audio and convolvers, tested — and the table is its own `<prefix>_verification.csv`,
+because the audit CSV is byte-compared against the reference program and cannot gain a column.
+A `FAIL` exits 0: the run did what it was asked, and the verdict is a finding about a measurement.
+
+**Two claims were dropped as unreachable rather than fudged.** Alignment in *time* is meaningless for
+a frequency-domain capture, and a post-EQ measurement's phase is mostly the filter's; and no residual
+can separate "this unit deviates" from "this rig deviates" — the report says so in the line the user
+reads.
+
+**Not done on purpose:** no fifth figure panel. The residual is 31 numbers with four columns each and
+the table is the right shape for them; a panel would be an ink test and nothing else. If one is ever
+wanted, `--stereo`'s trace is the pattern to follow: opt-in, and the default figure must stay
+comparable with the reference.
 
 ### PR 4 — Stereo-aware correction — **shipped** as `--stereo`
 

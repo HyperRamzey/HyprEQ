@@ -374,6 +374,59 @@ and `report` byte-identical on both the report's filter and the audio. The quant
   centre moved: on the shipped DT 770 at the default knee it cuts 6 left and 9 right knots, so the
   claim printed is `moved in 15 knot(s)` rather than the design's promise.
 
+### What verification is held to numerically
+
+`--verify-with` compares a later capture against the response the written filter predicts. The
+rules that decide a verdict are arithmetic, and the constants were measured rather than chosen.
+
+- The grid is [`hypreq::assess::bands_below`], the same IEC 61260-1 third-octave grid `--assess`
+  builds, clamped to the range **both** files cover. Bands are named `1 kHz`, not `997.0 Hz`: the
+  same measurement must not be called by two names in two sections of one report. A band is scored
+  only if the whole band is inside the compared range; the rest are counted as `uncovered`.
+- The prediction is `raw(f) + |H(f)| - preamp`, where `|H|` is the realised magnitude of the impulse
+  response that was actually written or convolved — not the control knots. A FIR built with the
+  half-Kaiser apodizer has its own truncation ripple, and predicting from the design would book that
+  ripple as a rig error. The preamp comes out because it is a headroom constant the taps carry; a
+  test moves `--headroom-db` by 8 dB and requires the design-shortfall line to be byte-identical.
+- That transform is padded to at least **32,768** points, not merely to 2·taps. The magnitude is
+  interpolated *in dB* between bins, and a straight line between two dB samples is a lie across a
+  null: a 2-tap average padded only to its own 2·taps gets four bins, one of them a null at Nyquist,
+  and a query between them returns −3,001 dB instead of −8.34 dB. At 4,096–65,536 taps the bins are
+  well under a hertz apart and the error is nil; the floor is what keeps a `--taps 256` run from
+  being quietly wrong.
+- Each band is sampled at **25** log-spaced points. That number is a measurement, not a preference:
+  on a ripple with 20 periods per decade, sampling at the IEC 61260-1 limit of 5 points per octave
+  reads **0.00 dB** of scatter — the samples alias and land on the same phase every time, so the
+  tool reports "smooth" about a curve that is anything but. Seven points recover the truth (6.78 dB
+  of scatter); 25 leaves margin for narrower wiggles than the fixture.
+- Pass/fail is judged on the **worst** point in a band, never the band mean, for the same reason as
+  the sample count: a band whose mean is 0.2 dB while its centre sits 6 dB off is a 6 dB error, and
+  an averaging verifier under-reports. Means are still in the table (`measured_db`, `predicted_db`)
+  because mean-plus-worst is what distinguishes a shifted band from a ripply one.
+- The capture's level offset is the **median** of the band-mean residuals — median because a capture
+  with one enormous band should not have that band's size subtracted from all the others — removed
+  before any band is judged, and printed afterwards.
+- `noise_limited` is scatter **of the residual** inside a band exceeding the threshold, not the
+  capture's own ripple. A capture whose ripple the filter reproduces is not noisy, and calling it so
+  would send the user off to fix a rig that is working.
+- Two constants are wired but not claimed as standards. `DEFAULT_PASS_DB = 3.0` is a default chosen
+  to sit above a normal repeat-measurement difference and well below the 10–12 dB errors the shipped
+  database corrects; no published acceptance region for post-EQ headphone response could be found,
+  so the report always prints the threshold it used. `DEFAULT_SNR_DB = 20.0` is the one that is
+  derived: additive noise `N` dB below a signal `S` biases a level reading by up to
+  `20·log10(1 + N/S)` — **0.83 dB** at 20 dB of SNR, 1.58 dB at 14, 2.39 dB at 10, 3.53 dB at 6.
+  At 20 dB the noise is under a third of the threshold; by 6 dB it *is* the failure.
+- A band below the capture's own median band level by `snr_db` is `too_quiet`, not passed and not
+  failed. The gate is relative because a CSV carries no units — and the blind spot that creates (a
+  capture that is noise floor everywhere is uniformly quiet) is printed as `Capture level` instead of
+  being hidden.
+- **Nothing to check is not a pass**: `Report::ok()` is false when no band was scored, and the report
+  says `NOTHING TO CHECK` rather than showing a zero count.
+- A `FAIL` verdict still exits 0: the run did what it was asked. Usage refusals (`--bypass-eq`,
+  `--stereo split`, a non-positive or non-finite threshold) exit 2 before anything is written; a
+  capture that cannot be read or interpolated exits 1, also before anything is written, so one
+  mistyped path cannot leave a half-finished model behind.
+
 ### Where the port refuses what the reference accepts
 
 Parity is the rule, and two places break it deliberately. Both are sizes, both would make

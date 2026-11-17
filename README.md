@@ -195,11 +195,85 @@ as one.
 `hypreq.py` accepts the same options and is kept only as the parity oracle for
 `scripts/parity.py`.
 
+### Checking the Correction Against What Actually Happened (`--verify-with`)
+
+Everything above runs from a capture to a filter and stops. The filter gets loaded, and nobody looks
+again — the loop is open. This closes it: measure the headphone *after* the correction, hand over the
+CSV, and the program compares the two, band by band, on the same IEC 61260-1 third-octave grid
+`--assess` uses.
+
+```text
+./target/release/hypreq -H dt770_80 --verify-with post_eq.csv
+./target/release/hypreq --input mix.wav --verify-with post_eq.csv --verify-pass-db 2
+```
+
+The output below is a synthetic capture — the filter's own predicted response with **6 dB injected
+at 1 kHz** — so that the numbers can be checked against the thing that was done to them:
+
+```text
+=== Verification (post-EQ capture: 400 points, 20 Hz - 20 kHz) ===
+  Scored          : 29 of 31 band(s); 2 outside the compared range
+  Level offset    : -0.00 dB removed before judging shape (the capture is not calibrated, so its absolute level says nothing about the filter)
+  Capture level   : median band 2.1 dB, gate at -17.9 dB (its own units; a capture that is nothing but noise floor is uniformly quiet and this section cannot see that - check this number against your rig)
+  Threshold       : +/-3.00 dB of residual after the offset
+  Worst band      : +5.99 dB @ 1000 Hz (band 1 kHz)
+  Verdict         : FAIL - 3 of 29 band(s) outside +/-3.00 dB, 2 of them noise-limited
+  Noise-limited   : the residual moves up to 4.0 dB inside those bands, so the number there is scatter across the band, not a bias
+  Design shortfall: +12.79 dB @ 3981 Hz (band 4 kHz) - the filter itself does not reach the target here, so a rig that reproduces it exactly still misses by this much
+  Note            : predicted from the 65,536-tap 64-bit convolver written above, with its -5.60 dB preamp taken back out
+  Written Verify CSV  : dt770_80ohm_verification.csv
+```
+
+What each line is owed, and where the honesty lives:
+
+* **The prediction is the filter, not the design.** `raw + |H(f)|`, the realised magnitude of the
+  impulse response that was written — including its truncation ripple and its apodizer. Verifying
+  against the control knots would blame the rig for the filter's own deviation. The run's preamp is
+  taken back out, because it is a headroom choice and not a spectral one; `--headroom-db` therefore
+  moves no number in this section.
+* **The 6 dB error comes back as 6 dB, at the band it was put in.** Pass/fail is judged on the
+  *worst* point inside each band, not the band's average: averaging a third of an octave is how a
+  narrow error gets reported as a small one. The mean is in the table too, and the two together are
+  what separate a bias from a ripple.
+* **`Level offset` is subtracted, then printed.** A capture's absolute level is a fact about the
+  interface gain. The median residual is removed before any band is judged, and reported, because it
+  is still worth knowing.
+* **`Design shortfall` is a different question, and it survives a perfect rig.** Where regularization,
+  the notch ceiling or the deliberate refusal to correct above `hf_bypass_hz` got in the way, the
+  filter never asked for what the target wanted — and a verifier that only reported the residual
+  would call those bands fine.
+* **Quiet bands are called unmeasured, not wrong.** A band sitting `--verify-snr-db` (default 20 dB)
+  below the capture's own median band level is mostly the rig's noise floor, and a noise floor
+  reproduces itself beautifully: scored, it yields a stable, reproducible, meaningless failure. It is
+  excluded and counted. The trade is in the report — a real null that deep is also read as
+  unmeasured, because at that level the file genuinely cannot tell them apart.
+* **Noise-limited says *scatter*, not *bias*.** Each band is sampled 25 times across its own width.
+  A band that sits inside the threshold on average while moving more than the threshold *inside
+  itself* is flagged, so "the measurement is noisy" and "the fit is wrong" arrive as different
+  findings. A ripply capture the filter matched is **not** flagged — the residual is what is
+  scattered, not the curve.
+* **The gate is relative, and the blind spot is printed.** A CSV carries no units: one measurer writes
+  dBFS off a soundcard, another writes dB SPL off a calibrated HATS. So there is no absolute floor,
+  and a capture that is nothing but noise floor everywhere is uniformly quiet — invisible to relative
+  gating. `Capture level` is the anchor to check against your own rig.
+* **Refused, before a single file is written:** `--verify-with` with `--bypass-eq` (no filter to
+  verify) and with `--stereo split` (two filters, one capture — the residual would be read as rig
+  error when it is the trim). A capture path that cannot be read fails immediately, not after the
+  convolvers. Both refusals exit `2`, as every usage error does.
+* **It changes nothing else.** `report`-like: the same input with and without the flag writes
+  byte-identical audio and byte-identical convolvers (a test compares them). The verdict is a finding
+  about a measurement, so it does not become the exit code — `PASS` and `FAIL` both exit `0`, and
+  `FAIL` is spelled out in the report.
+* **The table is its own file** (`<prefix>_verification.csv`), one row per band: measured, predicted,
+  target, residual, shape, scatter, design, and the status word. The audit CSV is byte-compared
+  against the reference program, so it cannot gain a column; this can.
+
 ### Generated Files
 - `jbl770nc_f64_48k.wav` / `dt770_80ohm_f64_48k.wav` / `ft1pro_f64_48k.wav`: 64-bit IEEE float (`pcm_f64le`) mono impulse responses for `mpv` / `FFmpeg` (`afir=precision=double`). When a single headphone is selected, it is also copied to `ir.wav`.
 - `*_mastering_mono_48k.wav` / `*_mastering_stereo_48k.wav`: 32-bit IEEE float (`pcm_f32le`, `16,384` taps) for real-time PipeWire `filter-chain` or DAW convolver plugins.
 - `jbl770nc_final_verification.png` / `dt770_80ohm_final_verification.png` / `ft1pro_final_verification.png`: 4-panel before/after frequency, filter gain, minimum-phase angle, and time-domain impulse response plots.
 - `*_audit_data.csv`: Auditable CSV tables (when `--export-csv` is passed) listing frequency, raw measurement, Harman target, raw error, and applied EQ.
+- `*_verification.csv`: Per-band verification table (only when `--verify-with` is passed) with measured, predicted, target, residual, in-band scatter, design shortfall, and the pass/fail/uncovered status for every third-octave band.
 
 ---
 

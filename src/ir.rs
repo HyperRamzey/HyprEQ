@@ -283,7 +283,7 @@ pub fn synthesize_minimum_phase_ir(
 /// is what keeps a perfectly-zero tail at a finite (very negative) number instead of
 /// `-inf`, exactly as the Python's `+ 1e-25` / `+ 1e-25` does.
 #[must_use]
-fn db_floor(ir: &[f64], n: usize) -> f64 {
+pub(crate) fn db_floor(ir: &[f64], n: usize) -> f64 {
     let k = n.min(ir.len());
     let peak = ir[ir.len() - k..]
         .iter()

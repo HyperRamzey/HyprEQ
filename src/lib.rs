@@ -85,6 +85,7 @@ pub mod measure;
 pub mod meter;
 pub mod model;
 pub mod pchip;
+pub mod phase;
 pub mod plot;
 pub mod pyfmt;
 pub mod riff;

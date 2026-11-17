@@ -123,8 +123,8 @@ pub const LEVEL_FLOOR_DB: f64 = 1.0;
 /// This is the same scope note [`crate::assess`] prints for a short recording, in the frequency
 /// domain: a third-octave band below about 8.7 FFT bins is attributed rather than measured, and a
 /// sixth-octave window over fewer than three samples smooths nothing — it reads one capture point
-/// and calls the result a feature. The shipped captures are spaced 0.104 of an octave apart, so
-/// their window covers **1.6 points** and the question is not asked of them.
+/// and calls the result a feature. The shipped captures are spaced ~0.078 of an octave apart, so
+/// their window covers **~2.1 points** and the question is not asked of them.
 pub const RESOLVED_WINDOW_POINTS: f64 = 3.0;
 
 /// A pair of ears, on the grid the model was captured at.
@@ -313,8 +313,8 @@ pub fn analyse(e: &Ears) -> Mismatch {
 ///
 /// It stops short of the interesting question on purpose. Distinguishing "the two units are
 /// different" from "one ear sat differently in the coupler" needs a feature's width, and a width
-/// needs a grid that can see one: at the shipped 0.104-octave spacing a sixth-octave window covers
-/// 1.6 samples, so the measurement says *how much* the ears differ and *where*, and not *why*. The
+/// needs a grid that can see one: at the shipped ~0.078-octave spacing a sixth-octave window covers
+/// ~2.1 samples, so the measurement says *how much* the ears differ and *where*, and not *why*. The
 /// amount that gets cancelled is still decided band by band, by [`crate::fit`]'s knee exactly as it
 /// is for a single curve.
 fn classify(peak_db: f64, level_db: f64) -> Verdict {
@@ -508,11 +508,19 @@ pub fn trim(e: &Ears, ctrl: &Curve, policy: &fit::Policy, max_skew_db: f64) -> T
         t_r[i] = -half;
     }
 
+    let lim = if max_skew_db.is_finite() {
+        max_skew_db.max(0.0)
+    } else if max_skew_db.is_sign_positive() {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+
     Trim {
         f: ctrl_f,
         l: t_l,
         r: t_r,
-        level_db: level.clamp(-max_skew_db, max_skew_db),
+        level_db: level.clamp(-lim, lim),
         bound_bands,
         cap_bites: 0,
     }
@@ -535,13 +543,20 @@ pub fn report_lines(m: &Mismatch, points: usize, t: Option<&Trim>) -> Vec<String
             "inside a dB"
         }
     ));
-    lines.push(format!(
-        "  Shape mismatch    : {:+.2} dB @ {:.0} Hz (band {}), spread {:.2} dB",
-        m.peak_db,
-        m.peak_hz,
-        assess::band_name(m.nominal_hz),
-        m.spread_db
-    ));
+    if m.peak_db.abs() == 0.0 || m.peak_hz <= 0.0 {
+        lines.push(format!(
+            "  Shape mismatch    : none (identical L/R response), spread {:.2} dB",
+            m.spread_db
+        ));
+    } else {
+        lines.push(format!(
+            "  Shape mismatch    : {:+.2} dB @ {:.0} Hz (band {}), spread {:.2} dB",
+            m.peak_db,
+            m.peak_hz,
+            assess::band_name(m.nominal_hz),
+            m.spread_db
+        ));
+    }
     lines.push(format!("  Reads as          : {}", m.verdict.label()));
     if !m.resolved {
         lines.push(format!(
@@ -559,10 +574,17 @@ pub fn report_lines(m: &Mismatch, points: usize, t: Option<&Trim>) -> Vec<String
     }
     if let Some(t) = t {
         let (worst, hz) = t.worst();
-        lines.push(format!(
-            "  Per-ear trim      : balance {:+.2} dB cancelled, filter difference up to {:+.2} dB @ {:.0} Hz",
-            -t.level_db, worst, hz
-        ));
+        if worst.abs() == 0.0 || hz <= 0.0 {
+            lines.push(format!(
+                "  Per-ear trim      : balance {:+.2} dB cancelled, no per-band filter difference",
+                -t.level_db
+            ));
+        } else {
+            lines.push(format!(
+                "  Per-ear trim      : balance {:+.2} dB cancelled, filter difference up to {:+.2} dB @ {:.0} Hz",
+                -t.level_db, worst, hz
+            ));
+        }
         if t.bound_bands > 0 {
             lines.push(format!(
                 "  Bound             : {} knot(s) held to the skew ceiling instead of cancelling what was measured",
@@ -820,7 +842,7 @@ mod tests {
     fn narrowness_is_only_claimed_when_the_grid_can_see_it() {
         // The claim is tied to the grid, not to a taste for a threshold: a sixth-octave window has
         // to land on at least three capture points before "narrow" means anything, and that is a
-        // spacing of a twentieth of an octave. The shipped captures are at 0.104.
+        // spacing of a twentieth of an octave. The shipped captures are at ~0.078.
         let coarse = grid(121);
         let m_coarse = analyse(&pair(&coarse, &flat(&coarse), &flat(&coarse)));
         assert!(

@@ -45,6 +45,11 @@ impl RunningSum {
             return;
         }
         let next = self.sum + v;
+        if !next.is_finite() {
+            self.sum = next;
+            self.comp = 0.0;
+            return;
+        }
         self.comp += if self.sum.abs() >= v.abs() {
             (self.sum - next) + v
         } else {
@@ -90,6 +95,9 @@ pub fn sum_of_squares(x: &[f64]) -> f64 {
             return x.iter().map(|&w| w * w).fold(0.0f64, |acc, w| acc + w);
         }
         let next = sum + t;
+        if !next.is_finite() {
+            return x.iter().map(|&w| w * w).fold(0.0f64, |acc, w| acc + w);
+        }
         // Whichever operand is larger keeps its high bits; the other one's contribution
         // is what the subtraction below recovers exactly.
         comp += if sum.abs() >= t.abs() {
@@ -143,6 +151,12 @@ mod tests {
         assert!(sum_of_squares(&[f64::NAN, 1.0]).is_nan());
         // Inf first and inf later both have to read the same way round.
         assert!(sum_of_squares(&[1e200, 1.0]).is_infinite());
+        // Addition overflow of finite squares must yield +inf, never NaN:
+        assert_eq!(sum_of_squares(&[1e154, 1e154]), f64::INFINITY);
+        let mut r = RunningSum::new();
+        r.add(1e308);
+        r.add(1e308);
+        assert_eq!(r.total(), f64::INFINITY);
     }
 
     #[test]

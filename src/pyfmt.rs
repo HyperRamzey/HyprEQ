@@ -42,10 +42,15 @@ pub fn py_repr(value: &str) -> String {
 /// Rust's `Display` drops the `.0` that Python keeps (`-24` vs `-24.0`), so a domain
 /// error read back from the terminal would name a different number than the reference
 /// did. Rust's `Debug` for `f64` is the shortest form that round-trips — the same rule
-/// CPython uses — so it agrees on `-24.0`, `0.0`, `0.75`, `inf` and `NaN`.
+/// CPython uses — so it agrees on `-24.0`, `0.0`, `0.75`, and `inf`. Python formats
+/// NaN as lowercase `nan`.
 #[must_use]
 pub fn py_float(value: f64) -> String {
-    format!("{value:?}")
+    if value.is_nan() {
+        "nan".to_string()
+    } else {
+        format!("{value:?}")
+    }
 }
 
 #[cfg(test)]
@@ -65,7 +70,7 @@ mod tests {
         for v in [-1.0_f64, -0.0, 1e-3, 1234.5, f64::INFINITY] {
             assert_eq!(py_float(v).parse::<f64>().unwrap_or(v), v, "{v}");
         }
-        assert_eq!(py_float(f64::NAN), "NaN", "Python spells it NaN too");
+        assert_eq!(py_float(f64::NAN), "nan", "Python spells it nan too");
     }
 
     #[test]

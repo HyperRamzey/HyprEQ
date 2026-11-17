@@ -1085,7 +1085,7 @@ mod tests {
     /// over frequency and phase must not be worse than `20·log10(cos(pi·f_norm/n))`.
     ///
     /// Frequency step 0.02 and 12 phase offsets. `#[ignore]` runs the full-resolution
-    /// sweep (step 0.005, 48 offsets) used to write the numbers in `docs/true-peak.md`.
+    /// sweep (step 0.01, 24 offsets) used to verify the numbers cited in `docs/SETUP.md`.
     #[test]
     fn worst_case_underread_meets_the_bs1770_bound() {
         sweep_underread(0.02, 12);

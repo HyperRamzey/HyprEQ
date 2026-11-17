@@ -185,7 +185,7 @@ pub fn synthesize_minimum_phase_ir(
     target_db[0] = g_nodes[0];
 
     if gauss_apodize {
-        let f_nyq = fs_f / 2.0;
+        let f_nyq = (fs_f / 2.0).max(24000.0);
         let f_start = f_nyq * (20200.0 / 24000.0);
         let width = (f_nyq - f_start) / (3800.0 / 1650.0);
         for (f, db) in freqs.iter().zip(target_db.iter_mut()) {

@@ -1203,21 +1203,22 @@ impl PlotData {
             .filter(|&(t, _)| (-1.0..=4.0).contains(&t))
             .map(|(t, i)| (t, ir_lin_centered[i] / peak_mp))
             .unzip();
+        let span_samples = ((fs as f64 * (250.0 / 48000.0)).round() as usize).max(1);
         let (mp_t_ms, mp_ir) = if lat == 0 {
-            let lead_n = 48usize;
+            let lead_n = ((fs as f64 * 0.001).round() as usize).max(2);
             let t_ms: Vec<f64> = (0..lead_n)
                 .map(|i| -1.0 + (1.0 - 1e3 / fs) * i as f64 / (lead_n - 1) as f64)
-                .chain((0..250.min(in_.ir_rt.len())).map(|i| i as f64 / fs * 1000.0))
+                .chain((0..span_samples.min(in_.ir_rt.len())).map(|i| i as f64 / fs * 1000.0))
                 .collect();
             let ir: Vec<f64> = vec![0.0; lead_n]
                 .into_iter()
-                .chain(in_.ir_rt.iter().take(250).map(|&v| v / peak_mp))
+                .chain(in_.ir_rt.iter().take(span_samples).map(|&v| v / peak_mp))
                 .collect();
             (t_ms, ir)
         } else {
-            let lead_samples = 48usize.min(lat);
+            let lead_samples = (((fs as f64 * 0.001).round() as usize).max(1)).min(lat);
             let start = lat - lead_samples;
-            let end = in_.ir_rt.len().min(start + 250);
+            let end = in_.ir_rt.len().min(start + span_samples);
             let t_ms: Vec<f64> = (start..end)
                 .map(|i| (i as f64 - lat as f64) / fs * 1000.0)
                 .collect();
@@ -1337,8 +1338,16 @@ impl PlotData {
                 "Final WAV Convolver EQ Curve (Peak +{:.2} dB -> Normalized w/ {:.2} dB Preamp)",
                 in_.boost_rt, in_.pre_rt
             ),
-            phase_title: "Filter Minimum-Phase Response (Hilbert-Cepstral Phase Angle)".into(),
-            phase_label: "Filter Minimum-Phase Response (deg)".to_string(),
+            phase_title: if lat == 0 {
+                "Filter Minimum-Phase Response (Hilbert-Cepstral Phase Angle)".into()
+            } else {
+                "Filter Mixed-Phase Response (Low-Frequency Group-Delay Reshape)".into()
+            },
+            phase_label: if lat == 0 {
+                "Filter Minimum-Phase Response (deg)".to_string()
+            } else {
+                "Filter Mixed-Phase Response (deg)".to_string()
+            },
             ir_title: "Impulse Response: Minimum-Phase vs. Linear-Phase Pre-Ringing".into(),
             lin_ir_label: "Linear-Phase IR (Pre-Ringing before 0.0 ms)".to_string(),
             mp_ir_label: if lat == 0 {
@@ -1380,8 +1389,9 @@ impl PlotData {
     /// These mirror the band splits `render_to` performs; `plotters` keeps `Rect`'s own
     /// splitting private, so the geometry is spelled out here and the rendered figure is
     /// checked against it by a test (the axis frame has to land exactly on these edges).
+    #[cfg(test)]
     #[must_use]
-    pub fn panel_rects() -> [(i32, i32, i32, i32); 4] {
+    pub(crate) fn panel_rects() -> [(i32, i32, i32, i32); 4] {
         let row_h = |h: u32| TITLE_H + h + X_LABEL_H;
         let band1_y = M_TOP;
         let band2_y = band1_y + row_h(ROW1_H) + ROW_GAP;

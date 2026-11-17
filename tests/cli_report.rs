@@ -1403,3 +1403,73 @@ fn an_impossible_crossover_is_refused_before_a_single_file_is_written() {
     assert_eq!(code2, Some(2), "zero Hz was accepted as a crossover");
     assert!(stderr2.contains("--experimental-phase"), "{stderr2}");
 }
+
+#[test]
+fn model_run_applies_true_peak_limiter_to_written_ir_when_enabled() {
+    let dir = scratch("limit-ir");
+    let (code, _, stderr) = run_in(
+        &dir,
+        &[
+            "-H",
+            "dt770_80",
+            "--taps",
+            "4096",
+            "--headroom-db",
+            "-10.0",
+            "--tp-ceiling",
+            "-10.0",
+            "--no-plot",
+        ],
+    );
+    assert_eq!(code, Some(0), "run failed: {stderr}");
+    let wav_path = dir.join("dt770_80ohm_f64_48k.wav");
+    assert!(wav_path.exists(), "IR wav was not written");
+    let wav = hypreq::wav::read_wav(&wav_path).expect("read wav");
+    let m = hypreq::measure::measure_signal(&wav.planar, 48000, hypreq::tp::Ratio::X16);
+    assert!(
+        m.true_peak_dbtp <= -10.0 + 1e-4,
+        "written IR true peak was not limited to ceiling: got {} dBTP",
+        m.true_peak_dbtp
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn bypass_eq_applies_true_peak_limiter_to_music_before_writing() {
+    let dir = scratch("bypass-limit-music");
+    let in_wav = dir.join("hot_input.wav");
+    // Generate a 0 dBFS square/sine signal with peak above -3 dBTP
+    let fs = 48000;
+    let n = 4800;
+    let mut ch0 = vec![0.0f64; n];
+    let mut ch1 = vec![0.0f64; n];
+    for i in 0..n {
+        let s = (i as f64 * 440.0 * std::f64::consts::TAU / fs as f64).sin();
+        ch0[i] = s * 0.99;
+        ch1[i] = s * 0.99;
+    }
+    hypreq::wav::write_wav_ieee_float(&in_wav, &[ch0, ch1], fs, 32).expect("write input");
+    let out_wav = dir.join("out.wav");
+    let (code, _, stderr) = run_in(
+        &dir,
+        &[
+            "--input",
+            "hot_input.wav",
+            "--bypass-eq",
+            "--output",
+            "out.wav",
+            "--tp-ceiling",
+            "-4.0",
+        ],
+    );
+    assert_eq!(code, Some(0), "run failed: {stderr}");
+    assert!(out_wav.exists(), "output audio was not written");
+    let wav = hypreq::wav::read_wav(&out_wav).expect("read wav");
+    let m = hypreq::measure::measure_signal(&wav.planar, fs, hypreq::tp::Ratio::X16);
+    assert!(
+        m.true_peak_dbtp <= -4.0 + 1e-4,
+        "written passthrough music was not limited to ceiling: got {} dBTP",
+        m.true_peak_dbtp
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

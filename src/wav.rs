@@ -310,7 +310,9 @@ fn decode(payload: &[u8], fmt: &Format, name: &str) -> Result<(Vec<f64>, &'stati
 /// is silently truncated at the wrap. The reference shares that arithmetic, so this is
 /// the one place the port is deliberately stricter than it (see `docs/SETUP.md`).
 fn riff_guard(name: &str, data_size: usize, hdr_len: usize) -> Result<()> {
-    let riff = 36usize + data_size;
+    let riff = data_size.checked_add(36).ok_or_else(|| {
+        Error::msg(format!("WAV output '{name}' exceeds 4 GiB RIFF limit"))
+    })?;
     if u64::try_from(riff).expect("usize fits in u64") > u64::from(u32::MAX) {
         return Err(Error::msg(format!(
             "WAV output '{name}' exceeds 4 GiB RIFF limit ({riff} bytes)"
@@ -359,7 +361,10 @@ pub fn write_wav_ieee_float(path: &Path, planar: &[Vec<f64>], fs: u32, bits: u32
     let channels = planar.len();
     let frames = planar.iter().map(|c| c.len()).min().unwrap_or(0);
     let bps = (bits / 8) as usize;
-    let data_size = frames * channels * bps;
+    let data_size = frames
+        .checked_mul(channels)
+        .and_then(|fc| fc.checked_mul(bps))
+        .ok_or_else(|| Error::msg(format!("WAV output '{name}' exceeds addressable size")))?;
     riff_guard(&name, data_size, header_len_for(channels, bits, true))?;
 
     let mut w = writer(path, fs, channels, bits, true)?;
@@ -414,7 +419,10 @@ pub fn write_wav_pcm_or_float(
     let channels = planar.len();
     let frames = planar.iter().map(|c| c.len()).min().unwrap_or(0);
     let bps = (bits / 8) as usize;
-    let data_size = frames * channels * bps;
+    let data_size = frames
+        .checked_mul(channels)
+        .and_then(|fc| fc.checked_mul(bps))
+        .ok_or_else(|| Error::msg(format!("WAV output '{name}' exceeds addressable size")))?;
     riff_guard(&name, data_size, header_len_for(channels, bits, false))?;
 
     let (scale, vmin, vmax) = if bits == 16 {

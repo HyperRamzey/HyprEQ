@@ -48,12 +48,13 @@ pub fn guess_mask(channels: u16) -> u32 {
         0x40,   // FLC
         0x80,   // FRC
         0x100,  // BC
-        0x800,  // FLC(SLc?)
-        0x1000, // FRC
-        0x2000, // LTR
-        0x4000, // LTR
-        0x8000, // RSL
-        0x10000, 0x20000,
+        0x800,  // TOP_CENTER
+        0x1000, // TOP_FRONT_LEFT
+        0x2000, // TOP_FRONT_CENTER
+        0x4000, // TOP_FRONT_RIGHT
+        0x8000, // TOP_BACK_LEFT
+        0x10000, // TOP_BACK_CENTER
+        0x20000, // TOP_BACK_RIGHT
     ];
     BITS.iter()
         .take(channels.min(BITS.len() as u16) as usize)
@@ -63,9 +64,9 @@ pub fn guess_mask(channels: u16) -> u32 {
 /// Classic 44-byte header when the file is 1–2 channels and needs no mask,
 /// otherwise the extensible header.
 pub fn header(rate: u32, channels: u16, bits: u32, float: bool, mask: Option<u32>) -> Vec<u8> {
-    let block = channels as u32 * bits / 8;
+    let block = (channels as u32).saturating_mul(bits / 8);
     let extensible = channels > 2 || mask.is_some_and(|m| m != guess_mask(channels));
-    let mut h = Vec::with_capacity(58);
+    let mut h = Vec::with_capacity(68);
     let tag = if float {
         WAVE_FORMAT_IEEE_FLOAT
     } else {
@@ -86,8 +87,8 @@ pub fn header(rate: u32, channels: u16, bits: u32, float: bool, mask: Option<u32
     h.extend_from_slice(&fmt_tag.to_le_bytes());
     h.extend_from_slice(&channels.to_le_bytes());
     h.extend_from_slice(&rate.to_le_bytes());
-    h.extend_from_slice(&(rate * block).to_le_bytes());
-    h.extend_from_slice(&(block as u16).to_le_bytes());
+    h.extend_from_slice(&(rate.saturating_mul(block)).to_le_bytes());
+    h.extend_from_slice(&(u16::try_from(block).unwrap_or(u16::MAX)).to_le_bytes());
     h.extend_from_slice(&(bits as u16).to_le_bytes());
     if extensible {
         // wValidBitsPerSample: the container and the payload have the same width

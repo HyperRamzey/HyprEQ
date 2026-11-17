@@ -711,11 +711,6 @@ impl Limiter {
         }
     }
 
-    #[must_use]
-    pub fn is_enabled(&self) -> bool {
-        self.cfg.enable
-    }
-
     /// Added latency in samples, for the report and the GUI.
     #[must_use]
     pub fn latency_samples(&self) -> usize {
@@ -801,8 +796,6 @@ impl Limiter {
         self.scheduled = limit;
     }
 
-    /// The release follower: fall instantly onto the schedule (which is itself
-    /// slope-limited, so this is not a step), rise one-pole toward unity.
     /// Pass 3: the ramped schedule target for the frame about to be emitted.
     ///
     /// The gain at frame `j` may not fall faster than `slope` per frame, and the only values
@@ -841,6 +834,9 @@ impl Limiter {
         }
     }
 
+    /// The release follower: fall instantly onto the schedule (which is itself
+    /// slope-limited, so this is not a step), rise one-pole toward unity.
+    ///
     /// Move one channel's gain toward `target`: instantly down, exponentially back up.
     ///
     /// A limiter may never clamp a gain up slowly and let it drop slowly either — the deepening
@@ -1837,7 +1833,6 @@ mod tests {
         assert_eq!(x, before, "disabled limiter changed samples");
         assert_eq!(lim.flush().len(), 0, "disabled limiter added frames");
         assert_eq!(lim.latency_samples(), 0);
-        assert!(!lim.is_enabled());
     }
 
     #[test]

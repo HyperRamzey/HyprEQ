@@ -106,8 +106,8 @@ env -u RUSTC_WORKSPACE_WRAPPER \
 ```
 
 `cargo test` runs a few deliberately expensive tests (full-length convolutions and
-figure renders); two are `#[ignore]`d because they take minutes and are covered by the
-parity harness instead:
+figure renders); two are `#[ignore]`d because they are full-resolution BS.1770 accuracy
+sweeps that take minutes:
 
 ```bash
 cargo test -- --include-ignored
@@ -395,7 +395,7 @@ rules that decide a verdict are arithmetic, and the constants were measured rath
   well under a hertz apart and the error is nil; the floor is what keeps a `--taps 256` run from
   being quietly wrong.
 - Each band is sampled at **25** log-spaced points. That number is a measurement, not a preference:
-  on a ripple with 20 periods per decade, a sparse sampling of only 5 points per octave
+  on a ripple with 20 periods per decade, a sparse sampling of only 5 points per band (15 points per octave)
   reads **0.00 dB** of scatter — the samples alias and land on the same phase every time, so the
   tool reports "smooth" about a curve that is anything but. Seven points recover the truth (6.78 dB
   of scatter); 25 leaves margin for narrower wiggles than the fixture.
@@ -555,7 +555,7 @@ Three ways, none of which touch the DSP:
 
 Useful keys: `name`, `file_prefix`, `rig_info`, `target`, `harm_offset`, `gauss_apodize`,
 `hf_bypass_hz`, `notch_range_hz`, `safe_cap_db`, `subbass_leak_discount_db`,
-`autoeq_geq_str`, `plot_meta`, `plot_annotations`.
+`autoeq_geq_str`, `plot_meta`, `annotations`.
 
 `--upgrade-json` writes the built-in `plot_meta` and callout annotations back into the
 database in place, which is the easiest way to see what a model can carry.

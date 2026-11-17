@@ -128,7 +128,7 @@ should be chosen from evidence about the curve, not set once on the command line
 ### 3.3 A target curve belongs to a fixture
 
 > Olive & Clark, *A Preferred Headphone Target Curve Defined for the B&K 5128 and GRAS
-> 45CA-10 Test Fixtures*, **AES 157th Convention, Long Beach, CA (2024)**, eLibrary
+> 45CA-10 Test Fixtures*, **AES 159th Convention, Long Beach, CA (October 2025)**, eLibrary
 > [`23068`](https://www.aes.org/publications/elibrary-page/?id=23068), Express Paper 394.
 
 The abstract states the problem plainly: the Harman around-/on-ear target was defined on
@@ -397,9 +397,11 @@ untouched while bypassing a notch an octave away, which is the whole behaviour.
 toward 0 dB whether it is a boost or a cut. While Gómez-Bolaños, Mäkivirta & Pulkki (JAES 64(10), 2016) explicitly motivates
 regularization by the perceptual asymmetry between peaks and notches ("inversion cannot treat peaks and notches as being perceptually
 equivalent. Notch inversion can create high-Q resonances that can be very unpleasant... limiting the inversion of notches in a
-perceptually acceptable manner"), the mathematical regularization routine estimates one amount per response. Classical formulations
+perceptually acceptable manner"), their published formulation defines a frequency-dependent notch-only regularization
+$\sigma(\omega) = \max(0, \tilde{H}(\omega) - |H(\omega)|)$. Classical formulations
 (Norcross, Kirkeby, pyfar's `RegularizedSpectrumInversion`, AKtools' `AKffdInverseFilter`) operate symmetrically on transfer function
-power. In HyprEQ, the argument for managing boosts (headroom, noise floor, true peak) is critical, while cuts do not pose headroom
+power. In HyprEQ, symmetric deviation shrinkage is an intentional design choice for headphone EQ: the argument for managing
+boosts (headroom, noise floor, true peak) is critical, while cuts do not pose headroom
 risks. The measurements show that under `auto`, boosts are walked back by up to 4.16 dB and cuts by at most 0.78 dB.
 
 **What did not ship: the figure overlay.** The acceptance list asked for a panel drawing auto and
@@ -785,14 +787,13 @@ input through both paths writes byte-identical WAVs.
 
 ## 5. What this crate links
 
-Six crates, no build-script code generation, and no C library except the ones `plotters`
+Five crates (plus dev-dependency `png`), no build-script code generation, and no C library except the ones `plotters`
 pulls through `font-kit`. Every one of them is MIT or Apache-2.0, so the whole tree stays
 inside the MIT licence this project ships under. Versions are the ones `Cargo.lock` pins.
 
 | Crate | Locked version | Licence | What it does here |
 | --- | --- | --- | --- |
 | [`rustfft`](https://crates.io/crates/rustfft) | 6.4.1 | MIT OR Apache-2.0 | The transforms behind the NumPy-convention wrappers in `src/fft.rs` (`ifft` scaling, `n/2+1` bins, positive Nyquist). It is reached only through those wrappers, so rustfft never gets to decide a convention |
-| [`serde`](https://crates.io/crates/serde) | 1.0.229 | MIT OR Apache-2.0 | Two `derive` implementations: the measurement database and a model entry |
 | [`serde_json`](https://crates.io/crates/serde_json) | 1.0.154 | MIT OR Apache-2.0 | Loads `measurements.json` with `preserve_order` on. Model order is load-bearing — it is the order `--list-models`, `--headphone all` and the default model come out in — and the default map would sort it alphabetically |
 | [`clap`](https://crates.io/crates/clap) | 4.6.7 | MIT OR Apache-2.0 | Argument parsing. The argparse-shaped domain validation, exit code `2` and message wording are layered on top of it, not delegated to it |
 | [`plotters`](https://crates.io/crates/plotters) | 0.3.7 | MIT | The verification figure's bitmap and TrueType text backend, with `default-features = false`. Axes, ticks, clipping, legends and callouts are hand-drawn on purpose, to match the reference's matplotlib geometry |

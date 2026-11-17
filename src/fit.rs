@@ -316,7 +316,7 @@ pub fn smooth_octave(f: &[f64], g: &[f64], fraction: f64) -> Vec<f64> {
         let mut weight = pw[full_hi] - pw[full_lo];
         let mut wsum = pwg[full_hi] - pwg[full_lo];
         if full_lo > 0 && edge[full_lo] > lo2 {
-            let over = edge[full_lo] - lo2;
+            let over = edge[full_lo].min(hi2) - lo2;
             weight += over;
             wsum += over * val[full_lo - 1];
             first = full_lo - 1;

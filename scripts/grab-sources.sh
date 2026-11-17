@@ -60,17 +60,17 @@ name_allowlist=(LICENSE THIRD-PARTY-NOTICES NOTICE)
 wanted=()
 case "$mode" in
     code)
-        for e in "${code_exts[@]}"; do wanted+=("*$e"); done
+        for e in "${code_exts[@]}"; do wanted+=("*.$e"); done
         ;;
     docs)
-        for e in "${doc_exts[@]}"; do wanted+=("*$e"); done
+        for e in "${doc_exts[@]}"; do wanted+=("*.$e"); done
         ;;
     *)
-        for e in "${code_exts[@]}" "${doc_exts[@]}"; do wanted+=("*$e"); done
+        for e in "${code_exts[@]}" "${doc_exts[@]}"; do wanted+=("*.$e"); done
         ;;
 esac
 if ((data)); then
-    for e in "${data_exts[@]}"; do wanted+=("*$e"); done
+    for e in "${data_exts[@]}"; do wanted+=("*.$e"); done
 fi
 
 # Order groups explicitly rather than alphabetically: a reader pastes this into a

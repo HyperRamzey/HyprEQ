@@ -923,17 +923,11 @@ pub fn normalize_model_entry(
         target_name,
         target_pts,
         harm_offset,
-        gauss_apodize: match cfg.get("gauss_apodize") {
-            Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
-            Some(_) => defaults
-                .get("gauss_apodize")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            None => defaults
-                .get("gauss_apodize")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-        },
+        gauss_apodize: cfg
+            .get("gauss_apodize")
+            .and_then(Value::as_bool)
+            .or_else(|| defaults.get("gauss_apodize").and_then(Value::as_bool))
+            .unwrap_or(false),
         hf_bypass_hz,
         notch_range_hz,
         notch_ref_hz,

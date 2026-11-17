@@ -41,8 +41,6 @@
 use crate::fft::Complex64;
 use crate::fft::{irfft, rfft, rfftfreq};
 
-/// The band edge below which group delay is flattened, in Hz.
-///
 /// How far above the crossover the weight is tapered away, as a ratio.
 ///
 /// The taper exists because a hard edge in the weight is a discontinuity in phase derivative, which
@@ -59,7 +57,7 @@ const BAND_FLOOR_HZ: f64 = 10.0;
 ///
 /// This is the parameter that makes the operation possible at all, and it is the reason the stage is
 /// not simply "make the bass linear phase". On the shipped DT 770 correction the minimum-phase group
-/// delay spans **0.7 ms to 219.7 ms across 10-200 Hz** (measured, `--experimental-phase 200`). A truly
+/// delay spans **-2.92 ms to +6.64 ms across 10-200 Hz** (a 9.56 ms span; measured, `--experimental-phase 200`). A truly
 /// flat line therefore has to either advance two hundred milliseconds of deep-bass energy — which is
 /// not a causal operation: the energy leaves the front of the kernel, wraps on the padded grid, and
 /// shows up as an absurd latency plus a 0.30 dB magnitude error, which is exactly what an earlier
@@ -83,7 +81,7 @@ pub const DEFAULT_GD_BUDGET_MS: f64 = 0.56;
 /// What the stage did, in the units a user can act on.
 #[derive(Debug, Clone)]
 pub struct Adjustment {
-    /// The filter with its band flattened, truncated to the length it came in at.
+    /// The filter with its band flattened, windowed to `taps_after` samples (growing along a 1x..4x ladder if needed).
     pub ir: Vec<f64>,
     /// The same filter before truncation, on the padded grid.
     ///
@@ -192,10 +190,16 @@ fn unwrap(phase: &[f64]) -> Vec<f64> {
 }
 
 /// How much of the replacement is in effect at `f`: 1.0 across the flat band, easing to 0.0 at the
-/// top of the taper, 0.0 below the band floor.
+/// top of the taper, and easing smoothly to 0.0 at `f_lo / 2.0` below the band floor.
 fn weight(f: f64, f_lo: f64, crossover: f64, f_taper: f64) -> f64 {
-    if f < f_lo || f >= f_taper {
+    let f_sub = f_lo / 2.0;
+    if f < f_sub || f >= f_taper {
         return 0.0;
+    }
+    if f < f_lo {
+        let t = (f - f_sub) / (f_lo - f_sub);
+        let c = (std::f64::consts::PI * (1.0 - t)).cos();
+        return 0.5 * (1.0 + c);
     }
     if f <= crossover {
         return 1.0;
@@ -332,11 +336,10 @@ fn smallest_shift(
         return Some((0, kept));
     }
     for shift in 1..=max_shift {
-        for s in [n - shift, shift] {
-            let (f, e, kept) = window_passes(full, prefix, n, energy, budget_energy, s, w);
-            if f && e {
-                return Some((s, kept));
-            }
+        let s = n - shift;
+        let (f, e, kept) = window_passes(full, prefix, n, energy, budget_energy, s, w);
+        if f && e {
+            return Some((s, kept));
         }
     }
     None
@@ -358,15 +361,14 @@ fn smallest_shift_stereo(
         }
     }
     for shift in 1..=max_shift {
-        for s in [n - shift, shift] {
-            let (fl, el, kl) = window_passes(&rl.full, &rl.prefix, n, rl.energy, rl.budget_energy, s, w);
-            if !fl || !el {
-                continue;
-            }
-            let (fr, er, kr) = window_passes(&rr.full, &rr.prefix, n, rr.energy, rr.budget_energy, s, w);
-            if fr && er {
-                return Some((s, kl, kr));
-            }
+        let s = n - shift;
+        let (fl, el, kl) = window_passes(&rl.full, &rl.prefix, n, rl.energy, rl.budget_energy, s, w);
+        if !fl || !el {
+            continue;
+        }
+        let (fr, er, kr) = window_passes(&rr.full, &rr.prefix, n, rr.energy, rr.budget_energy, s, w);
+        if fr && er {
+            return Some((s, kl, kr));
         }
     }
     None
@@ -417,8 +419,19 @@ fn reshape_filter(
         return None;
     }
     let mean_gd = {
-        let fit: Vec<f64> = band.iter().map(|&i| gd_now[i]).collect();
-        fit.iter().sum::<f64>() / fit.len() as f64
+        let mut sum_w = 0.0f64;
+        let mut sum_gd = 0.0f64;
+        for &i in &band {
+            let f = freq[i].max(1.0);
+            let w = 1.0 / f;
+            sum_w += w;
+            sum_gd += w * gd_now[i];
+        }
+        if sum_w > 0.0 {
+            sum_gd / sum_w
+        } else {
+            band.iter().map(|&i| gd_now[i]).sum::<f64>() / band.len() as f64
+        }
     };
     let requested: f64 = {
         let lo = band
@@ -431,12 +444,13 @@ fn reshape_filter(
             .fold(f64::NEG_INFINITY, f64::max);
         (hi - lo).max((mean_gd - lo).max(hi - mean_gd))
     };
+    let f_lo_active = BAND_FLOOR_HZ / 2.0;
     let mut correction: Vec<f64> = freq
         .iter()
         .enumerate()
         .map(|(i, &f)| {
             let w = weight(f, BAND_FLOOR_HZ, crossover_hz, f_taper);
-            if w == 0.0 || !(BAND_FLOOR_HZ..f_taper).contains(&f) {
+            if w == 0.0 || !(f_lo_active..f_taper).contains(&f) {
                 return 0.0;
             }
             let want = mean_gd - gd_now[i];
@@ -444,38 +458,45 @@ fn reshape_filter(
         })
         .collect();
     let band_bins: Vec<usize> = (0..freq.len())
-        .filter(|&i| (BAND_FLOOR_HZ..f_taper).contains(&freq[i]))
+        .filter(|&i| (f_lo_active..f_taper).contains(&freq[i]))
         .collect();
     if band_bins.len() >= 2 {
-        let span = freq[*band_bins.last().unwrap()] - freq[band_bins[0]];
-        if span > 0.0 {
-            let i_min = band_bins[0];
-            let i_max = *band_bins.last().unwrap();
-            let mut offset = 0.0f64;
-            for _ in 0..64 {
-                for &i in &band_bins {
-                    let f = freq[i];
-                    let w = weight(f, BAND_FLOOR_HZ, crossover_hz, f_taper);
-                    let want = mean_gd - gd_now[i];
-                    correction[i] = w * (want - offset).clamp(-budget_ms, budget_ms);
-                }
-                let mut integral = 0.0f64;
-                if i_min > 0 {
-                    integral += (freq[i_min] - freq[i_min - 1]) * 0.5 * correction[i_min];
-                }
-                for w in band_bins.windows(2) {
-                    integral += (freq[w[1]] - freq[w[0]]) * 0.5 * (correction[w[0]] + correction[w[1]]);
-                }
-                if i_max + 1 < freq.len() {
-                    integral += (freq[i_max + 1] - freq[i_max]) * 0.5 * correction[i_max];
-                }
-                let residue = integral / span;
-                if residue.abs() < 1e-8 {
-                    break;
-                }
-                offset += residue;
+        let i_min = band_bins[0];
+        let i_max = *band_bins.last().unwrap();
+        let compute_integral = |offset: f64, corr: &mut [f64]| -> f64 {
+            for &i in &band_bins {
+                let f = freq[i];
+                let w = weight(f, BAND_FLOOR_HZ, crossover_hz, f_taper);
+                let want = mean_gd - gd_now[i];
+                corr[i] = w * (want - offset).clamp(-budget_ms, budget_ms);
+            }
+            let mut integral = 0.0f64;
+            if i_min > 0 {
+                integral += (freq[i_min] - freq[i_min - 1]) * 0.5 * corr[i_min];
+            }
+            for w in band_bins.windows(2) {
+                integral += (freq[w[1]] - freq[w[0]]) * 0.5 * (corr[w[0]] + corr[w[1]]);
+            }
+            if i_max + 1 < freq.len() {
+                integral += (freq[i_max + 1] - freq[i_max]) * 0.5 * corr[i_max];
+            }
+            integral
+        };
+
+        let min_want = band_bins.iter().map(|&i| mean_gd - gd_now[i]).fold(f64::INFINITY, f64::min);
+        let max_want = band_bins.iter().map(|&i| mean_gd - gd_now[i]).fold(f64::NEG_INFINITY, f64::max);
+        let mut lo = min_want - budget_ms - 1.0;
+        let mut hi = max_want + budget_ms + 1.0;
+        for _ in 0..48 {
+            let mid = 0.5 * (lo + hi);
+            let int_mid = compute_integral(mid, &mut correction);
+            if int_mid > 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
             }
         }
+        compute_integral(0.5 * (lo + hi), &mut correction);
     }
     let df_to_rad = |a: f64, b: f64| (b - a) * std::f64::consts::TAU / 1000.0;
     let mut new_phase = phase_u.clone();
@@ -528,9 +549,7 @@ fn build_adjustment(
     budget_ms: f64,
 ) -> Adjustment {
     let out: Vec<f64> = (0..taps_after).map(|i| r.full[(start + i) % r.n]).collect();
-    let out_peak = peak_index(&out);
-    let input_peak = peak_index(ir_input);
-    let added_latency_samples = out_peak.saturating_sub(input_peak);
+    let added_latency_samples = if start > r.n / 2 { r.n - start } else { 0 };
 
     let after = rfft(&out, r.n);
     let mut max_mag_error_db = 0.0f64;
@@ -587,14 +606,6 @@ fn build_adjustment(
     }
 }
 
-/// Index of the largest-magnitude sample.
-fn peak_index(x: &[f64]) -> usize {
-    x.iter().enumerate().fold(
-        0usize,
-        |best, (i, v)| if v.abs() > x[best].abs() { i } else { best },
-    )
-}
-
 /// Flatten the group delay of `ir` between 10 Hz and `crossover_hz`, changing nothing
 /// above `crossover_hz · TAPER_RATIO`.
 ///
@@ -635,7 +646,7 @@ pub fn linearize_band_stereo_with_budget(
     };
     let len = ir_l.len().max(ir_r.len());
     let want = len.saturating_mul(8).max(8);
-    let n = crate::fft::shl_bit_length(want).max(8);
+    let n = want.checked_next_power_of_two().unwrap_or(1 << 28).max(8);
     let rl = reshape_filter(ir_l, fs, crossover_hz, budget_ms, n)?;
     let rr = reshape_filter(ir_r, fs, crossover_hz, budget_ms, n)?;
     let cap = len.saturating_mul(4).min(n / 2).max(len);
@@ -680,7 +691,7 @@ pub fn linearize_band_with_budget(
     };
     let len = ir.len();
     let want = len.saturating_mul(8).max(8);
-    let n = crate::fft::shl_bit_length(want).max(8);
+    let n = want.checked_next_power_of_two().unwrap_or(1 << 28).max(8);
     let r = reshape_filter(ir, fs, crossover_hz, budget_ms, n)?;
     let cap = len.saturating_mul(4).min(n / 2).max(len);
     let max_shift = (n / 8).max(1);
@@ -821,7 +832,7 @@ mod tests {
         // The grid the stage works on (it pads eightfold, so matching it is not optional). An n-point
         // transform of a longer array aliases, and an aliased magnitude has nothing to say about whether
         // the stage preserved one.
-        let n = crate::fft::shl_bit_length(ir.len() * 8);
+        let n = a.full.len();
         let before = mag_db(&ir, n);
         let after = mag_db(&a.ir, n);
         let worst = before
@@ -862,10 +873,10 @@ mod tests {
         // fit. A minimum-phase bass shelf has real group-delay ripple; after the stage it must have
         // substantially less inside the band.
         let ir = shelf_ir();
-        let n = crate::fft::shl_bit_length(ir.len() * 8);
+        let a = linearize_band(&ir, 48000, 200.0).expect("adjustment");
+        let n = a.full.len();
         let freq = rfftfreq(n, 48000.0);
         let before = gd_spread(&fwd(&ir, n), &freq, 30.0, 180.0);
-        let a = linearize_band(&ir, 48000, 200.0).expect("adjustment");
         let after = gd_spread(&fwd(&a.ir, n), &freq, 30.0, 180.0);
         // The claim is "flattens, within the budget", not "makes linear". On this fixture the band spans
         // 2.13 ms and the default budget is 0.56 ms per frequency, so a bounded stage can only close part
@@ -888,7 +899,7 @@ mod tests {
         let a = linearize_band(&ir, 48000, 200.0).expect("adjustment");
         // Same grid the stage reshaped on, or the two spectra are different transforms of different
         // amounts of the array and the comparison measures aliasing.
-        let n = crate::fft::shl_bit_length(ir.len() * 8);
+        let n = a.full.len();
         let freq = rfftfreq(n, 48000.0);
         // The treble guarantee is structural, not numerical: above the taper the weight is zero, so the
         // replacement leaves the phase term alone, and `the_taper_weight_is_continuous_and_ends_where_it_

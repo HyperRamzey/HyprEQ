@@ -761,7 +761,7 @@ def main() -> int:
             except OSError as exc:
                 setup.append(Check(f"setup {d.name}", False, str(exc)))
         try:
-            shutil.copy(REPO / "hypreq.py", py_dir / "hypreq.py")
+            shutil.copy(Path(args.ref), py_dir / "hypreq.py")
         except OSError as exc:
             setup.append(Check("setup reference script", False, str(exc)))
         checks.extend(setup)
@@ -784,7 +784,7 @@ def main() -> int:
             checks.append(
                 Check("rust exit", False, f"{rr.returncode} != {sc.expected_exit}: {rr.stderr[-300:]}")
             )
-        else:
+        if rp.returncode == sc.expected_exit and rr.returncode == sc.expected_exit:
             checks.append(Check("exit code", True, f"both {rr.returncode}"))
 
         if sc.expected_exit == 0:

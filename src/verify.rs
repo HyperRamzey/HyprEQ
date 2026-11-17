@@ -593,15 +593,6 @@ pub fn report_lines(r: &Report, note: Option<&str>) -> Vec<String> {
             format!("; {}", unscored.join(", "))
         }
     ));
-    out.push(format!(
-        "  Level offset    : {} dB removed before judging shape (the capture is not calibrated, so its absolute level says nothing about the filter)",
-        crate::measure::sgn(r.offset_db, 2)
-    ));
-    out.push(format!(
-        "  Capture level   : median band {:.1} dB, gate at {:.1} dB (its own units; a capture that is nothing but noise floor is uniformly quiet and this section cannot see that - check this number against your rig)",
-        r.median_db, r.gate_db
-    ));
-
     if r.empty() {
         out.push(
             "  Verdict         : NOTHING TO CHECK - no band was both covered and above the noise gate"
@@ -612,6 +603,15 @@ pub fn report_lines(r: &Report, note: Option<&str>) -> Vec<String> {
         }
         return out;
     }
+
+    out.push(format!(
+        "  Level offset    : {} dB removed before judging shape (the capture is not calibrated, so its absolute level says nothing about the filter)",
+        crate::measure::sgn(r.offset_db, 2)
+    ));
+    out.push(format!(
+        "  Capture level   : median band {:.1} dB, gate at {:.1} dB (its own units; a capture that is nothing but noise floor is uniformly quiet and this section cannot see that - check this number against your rig)",
+        r.median_db, r.gate_db
+    ));
 
     out.push(format!(
         "  Threshold       : +/-{:.2} dB of residual after the offset",

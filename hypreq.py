@@ -34,6 +34,7 @@ Usage Examples:
 import argparse
 import csv
 from collections.abc import Sequence
+import dataclasses
 from dataclasses import dataclass
 from enum import Enum
 import json
@@ -690,8 +691,11 @@ def synthesize_minimum_phase_ir(
     target_db[0] = g_nodes[0]
 
     if gauss_apodize:
-        apod_mask = freqs > 20200.0
-        target_db[apod_mask] += -3.0103 * ((freqs[apod_mask] - 20200.0) / 1650.0) ** 2
+        f_nyq = max(float(fs) / 2.0, 24000.0)
+        f_start = f_nyq * (20200.0 / 24000.0)
+        width = (f_nyq - f_start) / (3800.0 / 1650.0)
+        apod_mask = freqs > f_start
+        target_db[apod_mask] += -3.0103 * ((freqs[apod_mask] - f_start) / width) ** 2
 
     max_boost_db = float(np.max(target_db))
     preamp_db = headroom_db - max_boost_db
@@ -2710,6 +2714,24 @@ def run_audio_wav_mode(args, model_cfg: Optional[dict], lim_cfg: LimiterCfg) -> 
     print(f"  Written Output WAV  : {out_path} ({args.out_bits}-bit @ {fs:,} Hz, {len(work)}ch, {len(work[0]):,} frames)")
 
 
+def limit_ir(ir: np.ndarray, fs: int, lim_cfg: LimiterCfg, headroom_db: float = -1.5) -> tuple[np.ndarray, float]:
+    if not lim_cfg.enable:
+        return ir, 0.0
+    orig_len = len(ir)
+    cfg = dataclasses.replace(lim_cfg, ceiling_db=min(0.0, max(lim_cfg.ceiling_db, headroom_db)))
+    lim = Limiter.enabled(cfg, fs, 1)
+    lat = lim.latency_samples()
+    ch = [ir.copy()]
+    lim.process(ch)
+    tail = lim.flush()
+    rep = lim.report()
+    if tail:
+        joined = np.concatenate([ch[0], tail[0]])
+        if len(joined) >= lat + orig_len:
+            return joined[lat:lat + orig_len], rep.max_gain_reduction_db
+    return ch[0][:orig_len], rep.max_gain_reduction_db
+
+
 def run_model(model_cfg: dict, args, copy_default_ir: bool, lim_cfg: LimiterCfg) -> None:
     fs = 48000 if args.fs is None else int(args.fs)
     rate_tag = format_rate_tag(fs)
@@ -2752,6 +2774,8 @@ def run_model(model_cfg: dict, args, copy_default_ir: bool, lim_cfg: LimiterCfg)
         gauss_apodize=use_apodize,
         kaiser_beta=kaiser_beta,
     )
+    ir_mpv_f64, gr_mpv = limit_ir(ir_mpv_f64, fs, lim_cfg, headroom_db)
+    pre_mpv -= gr_mpv
     write_wav_ieee_float(f64_wav, ir_mpv_f64, fs=fs, bits=64)
     if copy_default_ir:
         shutil.copyfile(f64_wav, "ir.wav")
@@ -2781,17 +2805,20 @@ def run_model(model_cfg: dict, args, copy_default_ir: bool, lim_cfg: LimiterCfg)
         f" (param {ir_mpv_meas.meter_param:.4f} on -60..0 dB scale)"
     )
 
-    n_fft_rt = 32768
+    rt_taps = max(16384, int(2 ** np.ceil(np.log2(max(1, (16384 * fs) // 48000)))) if fs > 48000 else 16384)
+    n_fft_rt = max(32768, rt_taps * 2)
     ir_rt_f64, mag_lin_rt, boost_rt, pre_rt, _, unwin_rt, win_rt = synthesize_minimum_phase_ir(
         active_ctrl_pts,
         fs=fs,
         n_fft=n_fft_rt,
-        n_taps=16384,
-        n_tail=2048,
+        n_taps=rt_taps,
+        n_tail=rt_taps // 8,
         headroom_db=headroom_db,
         gauss_apodize=use_apodize,
         kaiser_beta=16.0,
     )
+    ir_rt_f64, gr_rt = limit_ir(ir_rt_f64, fs, lim_cfg, headroom_db)
+    pre_rt -= gr_rt
     ir_rt_f32 = ir_rt_f64.astype(np.float32)
     write_wav_ieee_float(mono_rt, ir_rt_f32, fs=fs, bits=32)
     write_wav_ieee_float(stereo_rt, np.column_stack([ir_rt_f32, ir_rt_f32]), fs=fs, bits=32)
@@ -2799,7 +2826,7 @@ def run_model(model_cfg: dict, args, copy_default_ir: bool, lim_cfg: LimiterCfg)
     ir_rt_meas = measure_signal([ir_rt_f32.astype(np.float64)], fs=fs, ratio=lim_cfg.ratio)
 
     print("\n=== [2] Real-Time PipeWire / DAW 32-Bit Float Convolvers ===")
-    print(f"  FFT / Taps        : {n_fft_rt:,} FFT ({fs/n_fft_rt:.4f} Hz bin) -> 16,384 taps ({16384/fs*1000:.1f} ms, Half-Kaiser beta=16.0)")
+    print(f"  FFT / Taps        : {n_fft_rt:,} FFT ({fs/n_fft_rt:.4f} Hz bin) -> {rt_taps:,} taps ({rt_taps/fs*1000:.1f} ms, Half-Kaiser beta=16.0)")
     print(f"  Decay @ Truncation: {unwin_rt:.2f} dBFS (unwindowed) | {win_rt:.2f} dBFS (after half-Kaiser fade)")
     print(
         f"  IR Peak / Meter   : {ir_rt_meas.sample_peak_dbfs:+.3f} dBFS sample"
@@ -2998,6 +3025,9 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    if args.fs is not None and args.fs <= 0:
+        parser.error(f"sample rate must be positive (got {args.fs})")
 
     if args.taps < 256:
         parser.error("--taps must be >= 256")

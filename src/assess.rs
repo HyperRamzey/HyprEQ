@@ -306,8 +306,6 @@ fn worst_levels(planar: &[Vec<f64>], fs: u32, grid: &[Band]) -> (Vec<f64>, usize
 /// hand over half a staging.
 #[derive(Clone, Copy, Debug)]
 pub struct Staging {
-    /// Steady-state convolver headroom the operator asked for, dB (`--headroom-db`).
-    pub headroom_db: f64,
     /// The preamp baked into every FIR tap, dB: `headroom_db - max_boost_db` as computed by
     /// [`crate::ir::synthesize_minimum_phase_ir`]. Pass the field of the result, not a guess.
     pub preamp_db: f64,
@@ -582,7 +580,6 @@ mod tests {
     fn staging(ctrl: &[(f64, f64)]) -> Staging {
         let (boost, _, _, _) = curve_extremes(ctrl);
         Staging {
-            headroom_db: HEADROOM,
             preamp_db: HEADROOM - boost,
             ceiling_db: CEILING,
             limiter_on: true,

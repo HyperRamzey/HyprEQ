@@ -7,7 +7,7 @@ All target curves and headphone measurement datasets are decoupled from the DSP 
 ## Implementation
 
 The DSP is a single self-contained Rust crate — a library plus a `hypreq` binary — with no
-external service, plugin host, or path dependency, covered by an extensive 356-test suite
+external service, plugin host, or path dependency, covered by an extensive 358-test suite
 (`cargo test --all-targets`). `hypreq.py` is the same pipeline kept as
 a **parity oracle**: `scripts/parity.py` runs both sides scenario by scenario and diffs
 stdout, WAV containers and payloads, audit CSVs, and usage errors. See
@@ -184,11 +184,11 @@ applied correction on the same bands the content occupies — third-octave bands
 what the filter moves in each:
 
 ```text
-=== Correction Demand (budget +6.00 dB, headroom -1.50 dB, ceiling -3.00 dBTP) ===
+=== Correction Demand (budget +6.00 dB, preamp -5.60 dB, ceiling -3.00 dBTP) ===
   Curve extreme : boost +4.10 dB @ 200 Hz, cut -5.04 dB @ 8 kHz
   Content       : 96,000 samples/channel, 1/3-octave bands, worst channel kept
-  Boost demand  : 0 band(s) boost 6.00 dB or more into audible content
-  Ceiling       : no band reaches -3.00 dBTP after -1.50 dB of headroom
+  Boost demand  : 0 band(s) boost +6.00 dB or more into audible content
+  Ceiling       : no band reaches -3.00 dBTP after the filter
 ```
 
 Report-only, and off by default: it changes no filter, no level and no output file, and the
@@ -198,7 +198,7 @@ band, the filter's gain there, and where the sum lands relative to the limiter c
 not model a driver, an amplifier or a distortion threshold, and no number in it should be read
 as one.
 
-`hypreq.py` accepts the same options and is kept only as the parity oracle for
+`hypreq.py` accepts the core equalization, true-peak limiting, and WAV generation options and is kept as the parity oracle for
 `scripts/parity.py`.
 
 ### Checking the Correction Against What Actually Happened (`--verify-with`)
@@ -285,7 +285,7 @@ published problem for target curves puts the failure mode plainly: the Harman ar
 defined on a GRAS 45CA fixture with an RA0045 ear, and is "often misused with other fixtures, leading
 to measurement and interpretation errors due to differing acoustic transfer impedances" (Olive &
 Clark, *A Preferred Headphone Target Curve Defined for the B&K 5128 and GRAS 45CA-10 Test Fixtures*,
-AES 157th Convention 2024, eLibrary `23068`, Express Paper 394). This database used to have no field in which to record any of it.
+AES 159th Convention, Long Beach, CA (October 2025), eLibrary `23068`, Express Paper 394). This database used to have no field in which to record any of it.
 
 Three keys, all optional:
 
@@ -424,7 +424,7 @@ Create `models/<model_key>.json` (e.g. `models/hd600.json`). You can either supp
 ```
 
 ### 3. Add a Model Entry to `measurements.json`
-Add a new object under `"models"` in `measurements.json` using the same schema as `jbl770nc`, `dt770_80`, and `ft1pro` (supporting optional `autoeq_geq_str` for AutoEq GraphicEQ overlay comparison, `plot_annotations`, `audit_notes`, `notch_range_hz`, and `hf_bypass_hz`).
+Add a new object under `"models"` in `measurements.json` using the same schema as `jbl770nc`, `dt770_80`, and `ft1pro` (supporting optional `autoeq_geq_str` for AutoEq GraphicEQ overlay comparison, `plot_meta`, `annotations`, `notch_range_hz`, and `hf_bypass_hz`).
 
 ---
 
@@ -446,7 +446,7 @@ af=lavfi=[aformat=sample_fmts=dblp,aresample=48000:filter_size=256:phase_shift=1
 ### Platform & Path Notes
 - **FFmpeg Version:** The `afir` options `minp`, `maxp`, and `precision=double` require **FFmpeg 6.0 or newer**.
 - **Linux Paths:** `/etc/mpv/` is system-wide and requires root (`sudo`). For a rootless user config, place the `.wav` in `/home/<username>/.config/mpv/` and set `amovie=/home/<username>/.config/mpv/jbl770nc_f64_48k.wav`.
-- **Windows Paths:** Inside FFmpeg's `amovie=`, use forward slashes and escape the drive colon (`amovie=C\\:/Users/<username>/AppData/Roaming/mpv/jbl770nc_f64_48k.wav`).
+- **Windows Paths:** Inside FFmpeg's `amovie=`, use forward slashes and escape the drive colon (`amovie=C\:/Users/<username>/AppData/Roaming/mpv/jbl770nc_f64_48k.wav`).
 
 ---
 

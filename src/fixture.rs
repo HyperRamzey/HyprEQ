@@ -6,7 +6,7 @@
 //! The paper that made this a published problem for target curves states the failure mode exactly:
 //!
 //! > Olive & Clark, *A Preferred Headphone Target Curve Defined for the B&K 5128 and GRAS 45CA-10
-//! > Test Fixtures*, AES 157th Convention (Long Beach, CA), eLibrary `23068`, Express Paper 394 — the
+//! > Test Fixtures*, AES 159th Convention (Long Beach, CA, October 2025), eLibrary `23068`, Express Paper 394 — the
 //! > Harman around-/on-ear target was defined on a GRAS 45CA fixture with an RA0045 ("711") ear simulator
 //! > and a custom pinna, and is "often misused with other fixtures, leading to measurement and
 //! > interpretation errors due to differing acoustic transfer impedances".
@@ -19,8 +19,10 @@
 //! # What is claimed here, and by whom
 //!
 //! The fixture identities are real products with published identities: GRAS 43AG/43AG-7 is a
-//! head-and-torso-free simulator fixture with an ear simulator and a swappable pinna; GRAS 45CA-10
-//! is the fixture the Harman around-ear work used; GRAS KB5000/KB5001 is an anthropometric pinna for
+//! head-and-torso-free simulator fixture with an ear simulator and a swappable pinna; GRAS 45CA
+//! (with an RA0045 "711" coupler and custom pinna) is the fixture the original Harman around-ear work
+//! used; GRAS 45CA-10 (with an RA0402 coupler and KB5000/KB5001 anthropometric pinna) is the fixture
+//! Olive & Clark (2025) defined equivalent targets for; GRAS KB5000/KB5001 is an anthropometric pinna for
 //! KEMAR fixtures (45BA/45BB); B&K 5128 is a head-and-torso simulator conforming to ITU-T P.58 and
 //! IEC 60318-7 (with Type 4620 ear simulator conforming to ITU-T P.57 Type 4.3); IEC 60318-4 is the
 //! "711" ear simulator alone.
@@ -42,8 +44,8 @@ pub enum Fixture {
     /// pinna is a different acoustic object, and a model that says "clone" should not be recorded as
     /// though it were genuine.
     Gras43agClone,
-    /// GRAS 45CA-10 with an RA0045 (or RA0402) ear simulator — the fixture the Harman around-ear target
-    /// family was defined on, and therefore the one a `harman_*` target most plausibly belongs to.
+    /// GRAS 45CA with an RA0045 ("711") ear simulator and custom pinna — the fixture the original
+    /// Harman around-ear target family was defined on (distinct from GRAS 45CA-10 with RA0402).
     Gras45ca,
     /// GRAS KB5000 anthropometric pinna / KEMAR fixture.
     GrasKb5000,

@@ -91,18 +91,32 @@ pub const ANALYSIS_WINDOW: usize = 1 << 18;
 #[must_use]
 pub fn bands(fs: u32) -> Vec<Band> {
     let nyquist = f64::from(fs) / 2.0;
-    if fs == 0 || !nyquist.is_finite() {
+    if fs == 0 {
+        return Vec::new();
+    }
+    bands_below(nyquist)
+}
+
+/// The same grid trimmed at a frequency instead of a sample rate.
+///
+/// [`bands`] is this at Nyquist. Verification needs the geometry with no sample rate in sight —
+/// a CSV of `(freq, dB)` does not have one — and it has to be *this* grid rather than a second
+/// implementation of it: two report sections that name different bands for the same frequency
+/// teach the reader that band names are approximate, which they are not.
+#[must_use]
+pub fn bands_below(f_max_hz: f64) -> Vec<Band> {
+    if !f_max_hz.is_finite() {
         return Vec::new();
     }
     // The standard's range is 20 Hz to 20 kHz by *nominal* value, so the lower bound is an index
     // bound. Testing the exact centre against 20 Hz drops the 20 Hz band, whose exact centre is
     // 19.9526 Hz, and the grid then started at 25.12 Hz while the module docs and `nominal(-17)`
     // both say 20 Hz. The upper bound stays a frequency test, because a band whose centre is above
-    // Nyquist cannot be measured at this sample rate at all.
+    // the trim cannot be measured at all.
     (LOWEST_K..=HIGHEST_K)
         .filter_map(|k| {
             let centre = 1000.0 * 10f64.powf(f64::from(k) / 10.0);
-            (centre < nyquist).then(|| at_index(k, centre))
+            (centre < f_max_hz).then(|| at_index(k, centre))
         })
         .collect()
 }

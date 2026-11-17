@@ -7,7 +7,8 @@ All target curves and headphone measurement datasets are decoupled from the DSP 
 ## Implementation
 
 The DSP is a single self-contained Rust crate — a library plus a `hypreq` binary — with no
-external service, plugin host, or path dependency. `hypreq.py` is the same pipeline kept as
+external service, plugin host, or path dependency, covered by an extensive 356-test suite
+(`cargo test --all-targets`). `hypreq.py` is the same pipeline kept as
 a **parity oracle**: `scripts/parity.py` runs both sides scenario by scenario and diffs
 stdout, WAV containers and payloads, audit CSVs, and usage errors. See
 [`docs/SETUP.md`](docs/SETUP.md) for prerequisites (the verification figure needs
@@ -65,9 +66,11 @@ requirement the verification figure has):
 ./target/release/hypreq --headphone dt770_80 --notch-mode safe
 ./target/release/hypreq --headphone ft1pro --notch-mode safe
 
-# Lighter 16,384-tap IR (already reaches <-147 dBFS unwindowed floor) or custom sample rate (e.g. 44.1 kHz):
+# Lighter 16,384-tap IR (already reaches <-147 dBFS unwindowed floor) or custom sample rate (e.g. 44.1 kHz, 96 kHz, 192 kHz):
 ./target/release/hypreq --headphone dt770_80 --taps 16384 --fs 44100
-./target/release/hypreq --headphone ft1pro --taps 16384 --fs 44100
+./target/release/hypreq --headphone dt770_80 --fs 96000
+# Real-time taps scale with sample rate (16k @ 48k, 32k @ 96k, 64k @ 192k) to maintain time resolution,
+# and Gaussian apodization scales with Nyquist (fs / 2) to eliminate ultrasonic stopband clamping.
 
 # Specify a custom measurement database JSON or external models directory:
 ./target/release/hypreq --data-file measurements.json --models-dir models --headphone all
@@ -168,6 +171,9 @@ instead of quietly becoming `report`. The per-ear difference is capped at 6 dB p
 (`--stereo-max-skew`) — a ceiling on the damage the flag can do to an image, not a claim about
 perception. `off` is the default and writes exactly what it wrote before the flag existed.
 
+* **Shared master preamp gain staging:** Both channels are synthesized under a unified headroom stage (`preamp = headroom - max(boost_L, boost_R)`). This normalizes the hotter ear to the target headroom and applies the identical preamp gain to both ears, preserving the exact measured interaural level offset without channel-independent normalization erasing balance.
+* **Joint stereo phase alignment:** When combined with `--experimental-phase`, impulse peak latency (`start`) and kernel growth (`taps_after`) are solved jointly across both ears, guaranteeing exact 0-sample interaural time delay (ITD) skew and identical channel lengths.
+
 ### What a Correction Demands (`--assess`)
 
 The report has always printed the biggest boost in the curve, and a boost is a promise about
@@ -205,7 +211,10 @@ CSV, and the program compares the two, band by band, on the same IEC 61260-1 thi
 ```text
 ./target/release/hypreq -H dt770_80 --verify-with post_eq.csv
 ./target/release/hypreq --input mix.wav --verify-with post_eq.csv --verify-pass-db 2
+./target/release/hypreq --measure-wav song.wav -H dt770_80 --verify-with post_eq.csv
 ```
+
+`--verify-with` works in both filter-generation mode and audio measurement mode (`--measure-only` / `--measure-wav`), evaluating acoustic compliance directly without requiring output audio to be rewritten.
 
 The output below is a synthetic capture — the filter's own predicted response with **6 dB injected
 at 1 kHz** — so that the numbers can be checked against the thing that was done to them:
@@ -356,7 +365,7 @@ hypreq -H dt770_80 --experimental-phase 200
 * **The band is bounded on purpose, and the report says by how much.** Group delay below 200 Hz on a
   real correction spans roughly a decade of values, and closing all of it would mean advancing
   hundreds of milliseconds of deep-bass energy, which no causal filter can do. The per-frequency
-  budget (0.56 ms, the audibility scale from Liski et al., TASLP 29, 2189–2201 (2021)) is a HyprEQ
+  budget (0.56 ms, the audibility scale from Liski et al., TASLP 29, 2189–2201 (2021), DOI: 10.1109/TASLP.2021.3087969) is a HyprEQ
   configuration default that nobody prescribed; the block prints it next to the band's real spread so
   you can see how much was closed and how much was left alone.
 * **Audibility is genuinely contested, including in the study the budget comes from.** That paper

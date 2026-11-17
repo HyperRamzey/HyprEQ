@@ -282,6 +282,22 @@ struct Args {
         )
     )]
     verify_snr_db: f64,
+    /// Experimental: flatten the filter's group delay below <Hz>, leaving the magnitude alone
+    #[arg(
+        long,
+        value_name = "HZ",
+        allow_negative_numbers = true,
+        help_heading = "Experimental",
+        help = concat!(
+            "EXPERIMENTAL. Replace the filter's phase below <Hz> with the straight line that best fits "
+            ,"it, so the band's group delay flattens and the magnitude is carried through untouched. "
+            ,"Off by default: the shipped filter stays minimum-phase. Costs latency, not magnitude, and "
+            ,"whether the difference is audible is contested (Liski et al., TASLP 2021). Reports what "
+            ,"it moved. Default when combined with --experimental-phase-default: ",
+            "200 Hz"
+        )
+    )]
+    experimental_phase: Option<f64>,
 }
 
 fn main() {
@@ -386,6 +402,15 @@ fn run(args: Args) -> Result<(), Error> {
         }
         if v <= 0.0 {
             usage_error(format!("{name} must be above 0.00 dB"));
+        }
+    }
+    if let Some(hz) = args.experimental_phase {
+        // Same rule as every other numeric option: a NaN or an infinity is a typo, not a request.
+        if !hz.is_finite() {
+            usage_error("--experimental-phase must be a finite frequency in Hz");
+        }
+        if hz <= 0.0 {
+            usage_error("--experimental-phase must be a frequency above 0 Hz");
         }
     }
     if let Some(path) = args.verify_with.as_ref() {
@@ -733,7 +758,7 @@ fn run_model(
     // figure in the report and the figure that chose the taper cannot drift apart by someone
     // editing one of the two copies of `0.1102`.
     let kaiser_form_db = hypreq::window::kaiser_atten_db_from_beta(kaiser_beta);
-    let mpv = synthesize_minimum_phase_ir(
+    let mut mpv = synthesize_minimum_phase_ir(
         &active_ctrl,
         fs,
         n_fft_mpv,
@@ -744,6 +769,12 @@ fn run_model(
         kaiser_beta,
     )
     .map_err(|e| Error::msg(e.0))?;
+    // Before the WAV is written: the shaped filter is the one that gets delivered, so it is also the
+    // one every measurement below has to be taken on.
+    let mut phase_done: Vec<(&str, hypreq::phase::Adjustment)> = Vec::new();
+    if let Some(a) = phase_stage(&mut mpv, fs, "mastering", args)? {
+        phase_done.push(("mastering", a));
+    }
 
     write_wav_ieee_float(Path::new(&f64_wav), std::slice::from_ref(&mpv.ir), fs, 64)?;
     if copy_default_ir {
@@ -821,7 +852,7 @@ fn run_model(
     // The real-time pair: a shorter filter, a gentler taper, and the f32 rounding the
     // PipeWire/DAW convolvers actually load.
     let n_fft_rt = 32768;
-    let rt = synthesize_minimum_phase_ir(
+    let mut rt = synthesize_minimum_phase_ir(
         &active_ctrl,
         fs,
         n_fft_rt,
@@ -832,6 +863,9 @@ fn run_model(
         16.0,
     )
     .map_err(|e| Error::msg(e.0))?;
+    if let Some(a) = phase_stage(&mut rt, fs, "real-time", args)? {
+        phase_done.push(("real-time", a));
+    }
     let ir_rt_f32: Vec<f32> = rt.ir.iter().map(|&x| x as f32).collect();
     let ir_rt_f64: Vec<f64> = ir_rt_f32.iter().map(|&x| f64::from(x)).collect();
     write_wav_ieee_float(
@@ -876,6 +910,7 @@ fn run_model(
     );
     println!("  f32 vs f64 Error  : {:.2} dBFS RMS", err_rms_dbfs);
     println!("  Written WAVs      : {mono_rt}, {stereo_rt}");
+    print_phase_block(&phase_done);
 
     if args.export_csv {
         let csv_path = export_audit_csv(
@@ -1081,7 +1116,7 @@ fn run_audio_wav_mode(
             };
             let taps = taps_count(args);
             let n_fft_mpv = mpv_n_fft(taps);
-            let mpv = synthesize_minimum_phase_ir(
+            let mut mpv = synthesize_minimum_phase_ir(
                 &active_ctrl,
                 fs,
                 n_fft_mpv,
@@ -1092,6 +1127,7 @@ fn run_audio_wav_mode(
                 18.0,
             )
             .map_err(|e| Error::msg(e.0))?;
+            let phase = phase_stage(&mut mpv, fs, "applied", args)?;
             applied_ir = Some((mpv.ir.clone(), mpv.preamp_db));
             // In `split` the shared curve is not what gets applied, so it is not printed as if it
             // were: the two lines below are. It is still synthesized, because the assessment below
@@ -1121,6 +1157,10 @@ fn run_audio_wav_mode(
                     lim_cfg.enable,
                 );
             }
+            if let Some(a) = phase.as_ref() {
+                println!("{}", "-".repeat(100));
+                print_phase_block(&[("applied", a.clone())]);
+            }
             match per_ear {
                 Some((left_curve, right_curve)) => {
                     let build = |curve: &hypreq::stereo::Curve| {
@@ -1136,7 +1176,19 @@ fn run_audio_wav_mode(
                         )
                         .map_err(|e| Error::msg(e.0))
                     };
-                    let (left, right) = (build(&left_curve)?, build(&right_curve)?);
+                    let (mut left, mut right) = (build(&left_curve)?, build(&right_curve)?);
+                    // Two ears, two filters, one crossover each: the stage is per-filter, so a split
+                    // run gets both kernels shaped rather than one shaped and one claimed to be.
+                    let ear_phase: Vec<(&str, hypreq::phase::Adjustment)> =
+                        [("left", &mut left), ("right", &mut right)]
+                            .into_iter()
+                            .map(|(tag, res)| {
+                                phase_stage(res, fs, tag, args).map(|a| a.map(|a| (tag, a)))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_iter()
+                            .flatten()
+                            .collect();
                     for (tag, ir) in [("left", &left), ("right", &right)] {
                         // Padded to the width the shared line's `(prefix)   ` occupies, so the two
                         // variants of this line put their numbers in the same column.
@@ -1150,6 +1202,7 @@ fn run_audio_wav_mode(
                         );
                     }
                     let channels = work.len();
+                    print_phase_block(&ear_phase);
                     work = convolve_planar_pair(&work, &left.ir, &right.ir, args.trim_tail)
                         .ok_or_else(|| {
                             Error::msg(format!(
@@ -1397,6 +1450,74 @@ fn corrected_curve(model: &Model, args: &Args) -> Result<CurveAndReport, Error> 
 /// Not the design's control knots: the filter that exists has truncation ripple, and the half-Kaiser
 /// tail pulls the top octave. Verifying against the knots instead would blame the rig for the
 /// filter's own deviation, which is the one confusion this section must not produce.
+/// Apply the experimental mixed-phase stage to a finished filter, keeping the report honest.
+///
+/// The stage replaces the delivered taps, so the two report numbers that describe those taps — the
+/// causal-energy share and the decay floor at truncation — are replaced with the stage's own
+/// measurements of the taps it delivered, not left describing a filter that is no longer being
+/// written.
+///
+/// `unwindowed_floor_dbfs` is deliberately untouched: it measures the minimum-phase filter *before*
+/// its tail fade, which is exactly what its label claims, and there is no post-reshape equivalent of
+/// "before the fade" to substitute. The phase block says which two lines it replaced.
+fn phase_stage(
+    res: &mut hypreq::ir::IrResult,
+    fs: u32,
+    label: &str,
+    args: &Args,
+) -> Result<Option<hypreq::phase::Adjustment>, Error> {
+    let Some(crossover) = args.experimental_phase else {
+        return Ok(None);
+    };
+    let mut a = hypreq::phase::linearize_band(&res.ir, fs, crossover).ok_or_else(|| {
+        Error::msg(format!(
+            "--experimental-phase {:.1} Hz cannot run on the {label} filter: the crossover has to sit \
+             above 20 Hz and below Nyquist ({} Hz at {fs} Hz)",
+            crossover,
+            f64::from(fs) / 2.0
+        ))
+    })?;
+    // The delivered taps are the reshaped ones. Handing back only the diagnostics and leaving the
+    // minimum-phase kernel in place is exactly the bug this line prevents, and both of the tests that
+    // caught it passed every assertion except the ones that compared bytes.
+    res.ir = std::mem::take(&mut a.ir);
+    res.energy_pct = a.retained_energy_pct;
+    res.windowed_floor_dbfs = a.floor_dbfs;
+    // The taps are now in `res`; the caller does not need a second copy of a 65 536-point array.
+    a.full = Vec::new();
+    Ok(Some(a))
+}
+
+/// Print the experimental phase block, once, naming every filter it shaped.
+fn print_phase_block(items: &[(&str, hypreq::phase::Adjustment)]) {
+    let Some((_, first)) = items.first() else {
+        return;
+    };
+    for line in hypreq::phase::report_lines(first) {
+        println!("{line}");
+    }
+    if items.len() > 1 {
+        let parts: Vec<String> = items
+            .iter()
+            .map(|(label, a)| {
+                format!(
+                    "{label} {:.3} ms / {:.1} ms latency",
+                    a.max_gd_change_ms, a.added_latency_ms
+                )
+            })
+            .collect();
+        println!(
+            "  Every filter shaped : {} (group delay moved / latency added)",
+            parts.join(", ")
+        );
+    }
+    println!(
+        "  Note                : 'Causal Energy' and the '(after half-Kaiser fade)' floor above are "
+    );
+    println!("                        the reshaped filter's; '(unwindowed)' still describes the ");
+    println!("                        minimum-phase filter before its tail fade.");
+}
+
 fn realized_gain_db(ir: &[f64], fs: u32, f_query: &[f64]) -> Vec<f64> {
     if ir.is_empty() || fs == 0 {
         return vec![0.0; f_query.len()];

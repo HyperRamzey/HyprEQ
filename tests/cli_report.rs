@@ -1121,3 +1121,279 @@ fn the_shipped_database_records_fixtures_and_the_pairing_it_inherited() {
         "a shipped pairing printed a refusal it is not supposed to have:\n{stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// --experimental-phase: the mixed-phase stage, judged on what it promises.
+// ---------------------------------------------------------------------------
+
+/// Magnitude in dB on a common grid, so two filters of the same length are compared bin for bin.
+fn mag_db(h: &[f64]) -> Vec<f64> {
+    let n = hypreq::fft::shl_bit_length(h.len() * 2);
+    hypreq::fft::rfft(h, n)
+        .iter()
+        .map(|c| 20.0 * (c.norm() + 1e-300).log10())
+        .collect()
+}
+
+/// Group delay in ms, unwrapped then differenced, on the same grid a filter is compared on.
+///
+/// This is the quantity the experimental stage exists to change, so it is the quantity the test
+/// measures. An energy centroid cannot do this job: the bass is a small share of a correction
+/// filter's energy, so pulling 10-200 Hz toward linear phase leaves the global centroid sitting at
+/// 1.2 samples before and after alike, which is what an earlier draft of this test confidently
+/// reported as "nothing moved".
+fn group_delay_ms(h: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let fs = 48000.0;
+    let n = hypreq::fft::shl_bit_length(h.len() * 2);
+    let spec = hypreq::fft::rfft(h, n);
+    let freq = hypreq::fft::rfftfreq(n, fs);
+    let mut phase = Vec::with_capacity(spec.len());
+    let mut carry = 0.0;
+    let mut prev = 0.0;
+    for (i, c) in spec.iter().enumerate() {
+        let p = c.arg();
+        if i > 0 {
+            let mut d = p - prev;
+            while d > std::f64::consts::PI {
+                carry -= std::f64::consts::TAU;
+                d -= std::f64::consts::TAU;
+            }
+            while d < -std::f64::consts::PI {
+                carry += std::f64::consts::TAU;
+                d += std::f64::consts::TAU;
+            }
+        }
+        phase.push(p + carry);
+        prev = p;
+    }
+    let gd: Vec<f64> = (0..phase.len())
+        .map(|i| {
+            let (a, b) = if i == 0 {
+                (0, 1)
+            } else if i + 1 == phase.len() {
+                (i - 1, i)
+            } else {
+                (i - 1, i + 1)
+            };
+            let df = freq[b] - freq[a];
+            if df > 0.0 {
+                -(phase[b] - phase[a]) / df / (2.0 * std::f64::consts::PI) * 1000.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    (freq, gd)
+}
+
+/// Spread (max - min) of group delay across a frequency window, ms.
+fn gd_spread(h: &[f64], lo: f64, hi: f64) -> f64 {
+    let (freq, gd) = group_delay_ms(h);
+    let band: Vec<f64> = (0..freq.len())
+        .filter(|&i| (lo..=hi).contains(&freq[i]))
+        .map(|i| gd[i])
+        .collect();
+    assert!(band.len() > 10, "the window holds {} bins", band.len());
+    let mn = band.iter().cloned().fold(f64::INFINITY, f64::min);
+    let mx = band.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    mx - mn
+}
+
+/// Largest phase difference against another filter, in radians, across a frequency window.
+fn phase_difference(a: &[f64], b: &[f64], lo: f64, hi: f64) -> f64 {
+    let n = hypreq::fft::shl_bit_length(a.len() * 2);
+    let sa = hypreq::fft::rfft(a, n);
+    let sb = hypreq::fft::rfft(b, n);
+    let freq = hypreq::fft::rfftfreq(n, 48000.0);
+    (0..sa.len())
+        .filter(|&i| (lo..=hi).contains(&freq[i]))
+        .map(|i| {
+            let d = (sa[i].arg() - sb[i].arg()).abs();
+            d.min((std::f64::consts::TAU - d).abs())
+        })
+        .fold(0.0f64, f64::max)
+}
+
+#[test]
+fn a_default_run_says_nothing_about_a_stage_it_did_not_run() {
+    let dir = scratch("phase-default");
+    let (code, stdout, stderr) = run_in(&dir, &["-H", "dt770_80", "--no-plot"]);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(
+        !stdout.contains("Experimental Phase"),
+        "the default report talks about the experimental stage:\n{stdout}"
+    );
+    // And the delivered filter is the minimum-phase one, byte for byte: the stage is opt-in or the
+    // parity-pinned artefacts move on their own.
+    let bytes = read_bytes(&dir.join("dt770_80ohm_f64_48k.wav"));
+    let again = scratch("phase-default-again");
+    let (code2, _, stderr2) = run_in(
+        &again,
+        &["-H", "dt770_80", "--no-plot", "--experimental-phase", "200"],
+    );
+    assert_eq!(code2, Some(0), "{stderr2}");
+    let shaped = read_bytes(&again.join("dt770_80ohm_f64_48k.wav"));
+    assert_ne!(
+        bytes, shaped,
+        "the flag changed nothing, so it is not wired to anything"
+    );
+}
+
+#[test]
+fn the_stage_moves_the_phase_and_leaves_the_curve_alone() {
+    // The acceptance criterion, measured end to end on the filter the run writes: the magnitude is
+    // the same curve, and the time behaviour is not. Everything else the block prints is commentary
+    // on these two facts.
+    let dir = scratch("phase-accept");
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &["-H", "dt770_80", "--no-plot", "--experimental-phase", "200"],
+    );
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains("Experimental Phase"), "{stdout}");
+
+    let shaped =
+        hypreq::wav::read_wav(&dir.join("dt770_80ohm_f64_48k.wav")).expect("shaped filter");
+    let plain = scratch("phase-plain");
+    assert_eq!(
+        run_in(&plain, &["-H", "dt770_80", "--no-plot"]).0,
+        Some(0),
+        "the reference run works"
+    );
+    let reference =
+        hypreq::wav::read_wav(&plain.join("dt770_80ohm_f64_48k.wav")).expect("reference filter");
+
+    let (a, b) = (&shaped.planar[0], &reference.planar[0]);
+    assert_eq!(a.len(), b.len(), "the stage changed the tap count");
+
+    let ma = mag_db(a);
+    let mb = mag_db(b);
+    let worst = ma
+        .iter()
+        .zip(&mb)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f64, f64::max);
+    // Stated tolerance: a tenth of a dB, which is a fifth of what the verification loop forgives a
+    // single third-octave band. The cost is truncation of a response the reshape made longer, not a
+    // re-derived curve, and the report prints the number it is holding itself to.
+    assert!(
+        worst < 0.1,
+        "the curve moved by {worst:.4} dB; this stage is supposed to move phase only"
+    );
+
+    // Phase moved, where the stage says it moved.
+    let moved = phase_difference(a, b, 30.0, 180.0);
+    assert!(
+        moved > 0.05,
+        "the band's phase moved by {moved:.2e} rad, so nothing was reshaped"
+    );
+    // And it moved the way the stage claims: flatter across the band, not differently flat by accident.
+    let (before, after) = (gd_spread(b, 30.0, 180.0), gd_spread(a, 30.0, 180.0));
+    assert!(
+        after < before,
+        "group-delay spread across the band went {before:.3} ms -> {after:.3} ms; it did not flatten"
+    );
+    // Above the taper the filter's delay *shape* is untouched, with each filter's own median removed.
+    // Absolute values are the wrong thing to compare and failed on a correct stage: the delivered kernel
+    // arrives later than the minimum-phase one, and a later kernel simply has a taller group delay at
+    // every frequency. Raw phase was wronger still and moved by pi — a delay is a linear phase ramp
+    // across the whole spectrum. Both of those are the latency, which is the next assertion.
+    let (fa, mut ga) = group_delay_ms(a);
+    let (_fb, mut gb) = group_delay_ms(b);
+    let treble: Vec<usize> = (0..fa.len())
+        .filter(|&i| (1000.0..20000.0).contains(&fa[i]))
+        .collect();
+    let centre = |g: &mut Vec<f64>| {
+        let mut d: Vec<f64> = treble.iter().map(|&i| g[i]).collect();
+        d.sort_by(|x, y| x.total_cmp(y));
+        let m = d[d.len() / 2];
+        for i in &treble {
+            g[*i] -= m;
+        }
+        m
+    };
+    let median_a = centre(&mut ga);
+    let median_b = centre(&mut gb);
+    let above = treble
+        .iter()
+        .map(|&i| (ga[i] - gb[i]).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        above < 0.05,
+        "the treble's delay shape moved by {above:.3} ms once each filter's own median was removed; the \n             stage was given 10-200 Hz"
+    );
+    // And the kernel did arrive later, which is the price. Compared against the number the report
+    // prints, so the two cannot drift apart.
+    let shift = median_a - median_b;
+    assert!(
+        shift > 1.0,
+        "the delivered kernel is not later than the minimum-phase one ({shift:.3} ms), so the latency the \n         report prints is not the latency the taps carry"
+    );
+    let quoted = stdout
+        .lines()
+        .find(|l| l.contains("Kernel"))
+        .and_then(|l| l.split('+').nth(1))
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|s| s.parse::<f64>().ok());
+    match quoted {
+        Some(q) => assert!(
+            (q - shift).abs() < 2.0,
+            "the block prints {q} ms of latency and the taps carry {shift:.3} ms"
+        ),
+        None => panic!("the Kernel line does not print a latency the test can read"),
+    }
+    let block = stdout
+        .lines()
+        .skip_while(|l| !l.contains("Experimental Phase"))
+        // The block is nine lines now that it also prints the budget and the kernel growth; an earlier
+        // window of eight clipped off the audibility line and made this test fail on the fact it exists
+        // to check.
+        .take(12)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for fact in ["Band", "Group delay", "Magnitude", "contested"] {
+        assert!(
+            block.contains(fact),
+            "the block does not state {fact}:\n{block}"
+        );
+    }
+}
+
+#[test]
+fn an_impossible_crossover_is_refused_before_a_single_file_is_written() {
+    let dir = scratch("phase-refuse");
+    // Above Nyquist the band cannot exist.
+    let (code, _stdout, stderr) = run_in(
+        &dir,
+        &[
+            "-H",
+            "dt770_80",
+            "--no-plot",
+            "--experimental-phase",
+            "30000",
+        ],
+    );
+    assert_eq!(
+        code,
+        Some(1),
+        "a crossover above Nyquist was accepted: {stderr}"
+    );
+    assert!(stderr.contains("Nyquist"), "{stderr}");
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the scratch dir exists")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a refused run still wrote: {leftovers:?}"
+    );
+
+    // A nonsense number is a bad command line, not a failed run.
+    let (code2, _, stderr2) = run_in(
+        &dir,
+        &["-H", "dt770_80", "--no-plot", "--experimental-phase", "0"],
+    );
+    assert_eq!(code2, Some(2), "zero Hz was accepted as a crossover");
+    assert!(stderr2.contains("--experimental-phase"), "{stderr2}");
+}

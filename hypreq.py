@@ -1162,9 +1162,6 @@ IN_SLOTS: List[int] = [0, 1, 2, 3, 4, 5, 9, 10]
 IN_CHANNELS: int = 8
 OUT_CHANNELS: int = 2
 TOTAL_METERS: int = IN_CHANNELS + OUT_CHANNELS
-IN_LABELS: List[str] = ["In1 FL", "In2 FR", "In3 FC", "In4 LFE", "In5 BL", "In6 BR", "In7 SL", "In8 SR"]
-OUT_LABELS: List[str] = ["OutL", "OutR"]
-
 
 _FLOOR_F32: float = float(np.float32(0.001))
 
@@ -1181,11 +1178,6 @@ def level_to_param(v: float) -> float:
         return 1.0
     db = 20.0 * math.log10(v32)
     return float(np.float32((db + 60.0) / 60.0))
-
-
-def param_to_db(p: float) -> float:
-    """Inverse of `level_to_param` (`0..1` -> `-60..0 dB`)."""
-    return float(p) * 60.0 - 60.0
 
 
 class Meters:
@@ -1278,34 +1270,6 @@ class Meters:
         self.values = [0.0] * len(self.values)
         self._frames = 0
         self._xruns = 0
-
-
-class MeterTap:
-    """Sample tap wrapper around `Meters`, feeding one slot per channel."""
-
-    def __init__(self, meters: Optional[Meters] = None) -> None:
-        self._meters = meters if meters is not None else Meters()
-        self._rate: int = 48_000
-
-    def meters(self) -> Meters:
-        return self._meters
-
-    def rate(self) -> int:
-        return self._rate
-
-    def will_render(self, sample_rate: int) -> None:
-        if sample_rate > 0:
-            self._rate = int(sample_rate)
-
-    def tap(
-        self,
-        planar_slots: List[Optional[np.ndarray]],
-        l_buf: np.ndarray,
-        r_buf: np.ndarray,
-        n: int,
-    ) -> None:
-        self._meters.set_format(float(self._rate), n)
-        self._meters.observe_block(planar_slots, l_buf, r_buf, n)
 
 
 @dataclass
@@ -2717,19 +2681,16 @@ def run_audio_wav_mode(args, model_cfg: Optional[dict], lim_cfg: LimiterCfg) -> 
 def limit_ir(ir: np.ndarray, fs: int, lim_cfg: LimiterCfg, headroom_db: float = -1.5) -> tuple[np.ndarray, float]:
     if not lim_cfg.enable:
         return ir, 0.0
-    orig_len = len(ir)
-    cfg = dataclasses.replace(lim_cfg, ceiling_db=min(0.0, max(lim_cfg.ceiling_db, headroom_db)))
-    lim = Limiter.enabled(cfg, fs, 1)
-    lat = lim.latency_samples()
-    ch = [ir.copy()]
-    lim.process(ch)
-    tail = lim.flush()
-    rep = lim.report()
-    if tail:
-        joined = np.concatenate([ch[0], tail[0]])
-        if len(joined) >= lat + orig_len:
-            return joined[lat:lat + orig_len], rep.max_gain_reduction_db
-    return ch[0][:orig_len], rep.max_gain_reduction_db
+    ceiling_db = min(0.0, max(lim_cfg.ceiling_db, headroom_db))
+    tp = TruePeak(lim_cfg.ratio, 1)
+    tp.push_ch(0, ir)
+    tp.drain()
+    ir_dbtp = tp.dbtp()
+    if ir_dbtp > ceiling_db:
+        gr = ir_dbtp - ceiling_db
+        scale = 10.0 ** (-gr / 20.0)
+        return ir * scale, gr
+    return ir, 0.0
 
 
 def run_model(model_cfg: dict, args, copy_default_ir: bool, lim_cfg: LimiterCfg) -> None:
@@ -2775,7 +2736,10 @@ def run_model(model_cfg: dict, args, copy_default_ir: bool, lim_cfg: LimiterCfg)
         kaiser_beta=kaiser_beta,
     )
     ir_mpv_f64, gr_mpv = limit_ir(ir_mpv_f64, fs, lim_cfg, headroom_db)
-    pre_mpv -= gr_mpv
+    if gr_mpv > 0.0:
+        pre_mpv -= gr_mpv
+        unwin_mpv -= gr_mpv
+        win_mpv = 20.0 * np.log10(np.max(np.abs(ir_mpv_f64[-min(100, len(ir_mpv_f64)):])) + 1e-25)
     write_wav_ieee_float(f64_wav, ir_mpv_f64, fs=fs, bits=64)
     if copy_default_ir:
         shutil.copyfile(f64_wav, "ir.wav")
@@ -2783,7 +2747,9 @@ def run_model(model_cfg: dict, args, copy_default_ir: bool, lim_cfg: LimiterCfg)
     ir_mpv_meas = measure_signal([ir_mpv_f64], fs=fs, ratio=lim_cfg.ratio)
     ir_l1_db = db_from_peak(float(np.sum(np.abs(ir_mpv_f64))))
 
-    apod_desc = "Gaussian Apodizer (>20.2 kHz)" if use_apodize else "Non-Apodizing 0.00 dB HF Wire"
+    f_nyq = fs / 2.0
+    f_apod_start = max(24000.0, f_nyq) * (20200.0 / 24000.0)
+    apod_desc = f"Gaussian Apodizer (>{f_apod_start / 1000.0:.1f} kHz)" if use_apodize else "Non-Apodizing 0.00 dB HF Wire"
     print("\n================================================================================")
     print(f"MODEL: {title}")
     print("================================================================================")
@@ -2818,7 +2784,10 @@ def run_model(model_cfg: dict, args, copy_default_ir: bool, lim_cfg: LimiterCfg)
         kaiser_beta=16.0,
     )
     ir_rt_f64, gr_rt = limit_ir(ir_rt_f64, fs, lim_cfg, headroom_db)
-    pre_rt -= gr_rt
+    if gr_rt > 0.0:
+        pre_rt -= gr_rt
+        unwin_rt -= gr_rt
+        win_rt = 20.0 * np.log10(np.max(np.abs(ir_rt_f64[-min(100, len(ir_rt_f64)):])) + 1e-25)
     ir_rt_f32 = ir_rt_f64.astype(np.float32)
     write_wav_ieee_float(mono_rt, ir_rt_f32, fs=fs, bits=32)
     write_wav_ieee_float(stereo_rt, np.column_stack([ir_rt_f32, ir_rt_f32]), fs=fs, bits=32)

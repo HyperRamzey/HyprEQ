@@ -146,15 +146,16 @@ fn block_bound(n_in: usize) -> usize {
     }
 }
 
-/// The FFT size a given (input length, filter length) pair uses, exposed for
-/// the report and the tests.
+/// The FFT size a given (input length, filter length) pair uses, tested against reference.
+#[cfg(test)]
 #[must_use]
 pub fn plan(n_in: usize, n_ir: usize) -> (usize, usize) {
     let block_len = 16384usize.max(block_bound(n_in));
     (block_len, shl_bit_length(block_len + n_ir - 2))
 }
 
-/// Convolve a single channel.
+/// Convolve a single channel (used in tests).
+#[cfg(test)]
 #[must_use]
 pub fn convolve1(x: &[f64], ir: &[f64], trim_to_input: bool) -> Vec<f64> {
     let n_in = x.len();

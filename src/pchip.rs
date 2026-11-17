@@ -50,6 +50,8 @@ pub struct Pchip {
     d: Vec<f64>,
     /// Successive `x` differences, length `x.len() - 1`.
     h: Vec<f64>,
+    f_min: f64,
+    f_max: f64,
 }
 
 impl Pchip {
@@ -76,6 +78,8 @@ impl Pchip {
                 gains.push(g);
             }
         }
+        let f_min = nodes[0];
+        let f_max = nodes[nodes.len() - 1];
         let f_nodes: &[f64] = &nodes;
         let y = gains;
         let x: Vec<f64> = f_nodes.iter().map(|f| f.log10()).collect();
@@ -85,6 +89,8 @@ impl Pchip {
                 y,
                 d: vec![0.0],
                 h: Vec::new(),
+                f_min,
+                f_max,
             };
         }
         let h: Vec<f64> = x.windows(2).map(|w| w[1] - w[0]).collect();
@@ -107,7 +113,14 @@ impl Pchip {
         d[0] = delta[0];
         d[x.len() - 1] = delta[delta.len() - 1];
 
-        Self { x, y, d, h }
+        Self {
+            x,
+            y,
+            d,
+            h,
+            f_min,
+            f_max,
+        }
     }
 
     /// Number of knots, after [`Pchip::new`] has folded any repeats.
@@ -134,11 +147,12 @@ impl Pchip {
         if self.x.len() == 1 {
             return self.y[0];
         }
+        if f_hz.is_nan() {
+            return f64::NAN;
+        }
         // Clamp in Hz first, exactly as `np.clip(f_query, f[0], f[-1])` does before the
-        // log10. Taking the log first meant a 0 Hz query produced -inf and a negative one
-        // produced NaN - and NaN then searched to index 0, where `0 - 1` on a usize is
-        // what actually crashed. A NaN query keeps NumPy's answer (NaN) instead.
-        let f = f_hz.clamp(10f64.powf(self.x[0]), 10f64.powf(self.x[self.x.len() - 1]));
+        // log10. Caching f_min/f_max avoids per-query 10^x evaluation and IEEE-754 boundary drift.
+        let f = f_hz.clamp(self.f_min, self.f_max);
         let fq = f.log10();
         let idx = searchsorted_right(&self.x, fq)
             .saturating_sub(1)
@@ -157,10 +171,47 @@ impl Pchip {
             + h11 * hi * self.d[idx + 1]
     }
 
-    /// Evaluate on a grid.
+    /// Evaluate on a grid, using a monotonic search cursor when queries ascend.
     #[must_use]
     pub fn eval_grid(&self, f_query: &[f64]) -> Vec<f64> {
-        f_query.iter().map(|&f| self.eval(f)).collect()
+        if self.x.len() <= 1 {
+            return f_query.iter().map(|&f| self.eval(f)).collect();
+        }
+        let last_idx = self.x.len() - 2;
+        let mut cursor = 0usize;
+        let mut out = Vec::with_capacity(f_query.len());
+        for &f_hz in f_query {
+            if f_hz.is_nan() {
+                out.push(f64::NAN);
+                continue;
+            }
+            let f = f_hz.clamp(self.f_min, self.f_max);
+            let fq = f.log10();
+            if fq >= self.x[cursor] {
+                while cursor < last_idx && fq >= self.x[cursor + 1] {
+                    cursor += 1;
+                }
+            } else {
+                cursor = searchsorted_right(&self.x, fq)
+                    .saturating_sub(1)
+                    .min(last_idx);
+            }
+            let hi = self.h[cursor];
+            let t = (fq - self.x[cursor]) / hi;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+            let h10 = t3 - 2.0 * t2 + t;
+            let h01 = -2.0 * t3 + 3.0 * t2;
+            let h11 = t3 - t2;
+            out.push(
+                h00 * self.y[cursor]
+                    + h10 * hi * self.d[cursor]
+                    + h01 * self.y[cursor + 1]
+                    + h11 * hi * self.d[cursor + 1],
+            );
+        }
+        out
     }
 }
 

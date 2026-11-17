@@ -20,7 +20,9 @@
 //! channels at 0 Hz, and every caller believes that until it divides.
 
 use crate::error::{Error, Result};
-use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(test)]
+use std::io::Read;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 const WAVE_FORMAT_PCM: u16 = 0x0001;
@@ -203,11 +205,13 @@ impl WavWriter {
 /// without reading samples. The program's own reader is [`crate::wav::read_wav`], which walks the
 /// chunks differently on purpose — see the note at the top of that module — so this is reached by
 /// the tests here and by anyone who needs the header alone.
+#[cfg(test)]
 pub fn read_info(path: &Path) -> Result<(WavInfo, u64)> {
     read_info_file(&mut std::fs::File::open(path)?)
 }
 
 /// What a WAV header claims.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WavInfo {
     pub rate: u32,
@@ -220,6 +224,7 @@ pub struct WavInfo {
     pub tag: u16,
 }
 
+#[cfg(test)]
 impl WavInfo {
     pub fn frames(&self) -> u64 {
         let b = (self.channels as u64) * (self.bits as u64 / 8);
@@ -228,6 +233,7 @@ impl WavInfo {
     }
 }
 
+#[cfg(test)]
 pub fn read_info_file(f: &mut std::fs::File) -> Result<(WavInfo, u64)> {
     let mut riff = [0u8; 12];
     f.read_exact(&mut riff).map_err(short)?;
@@ -323,6 +329,7 @@ pub fn read_info_file(f: &mut std::fs::File) -> Result<(WavInfo, u64)> {
     }
 }
 
+#[cfg(test)]
 fn short(e: std::io::Error) -> Error {
     if e.kind() == std::io::ErrorKind::UnexpectedEof {
         Error::msg("file is shorter than its WAV header")

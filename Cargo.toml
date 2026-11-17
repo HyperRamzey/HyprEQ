@@ -51,4 +51,4 @@ codegen-units = 1
 # couple of ULP, because rustfft and NumPy's pocketfft factor the same transform
 # differently and therefore sum the same terms in a different order. That residual is
 # transform structure, not instruction selection, and it is what the f32 real-time
-# convolvers' 1-ULP parity tolerance absorbs.
+# convolvers' parity tolerance (bounded to <= 2 ULP) absorbs.

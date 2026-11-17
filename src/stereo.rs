@@ -137,6 +137,7 @@ pub struct Ears {
     /// Right ear, dB.
     pub r: Vec<f64>,
     /// The column the single-filter path fits, which is what `--stereo` is being asked about.
+    #[cfg(test)]
     pub avg: Vec<f64>,
 }
 
@@ -156,6 +157,7 @@ impl Ears {
             f: col(0),
             l: col(1),
             r: col(2),
+            #[cfg(test)]
             avg: pts.iter().map(|p| *p.last().unwrap()).collect(),
         };
         (e.l.len() >= 2).then_some(e)

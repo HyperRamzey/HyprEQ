@@ -7,7 +7,7 @@ All target curves and headphone measurement datasets are decoupled from the DSP 
 ## Implementation
 
 The DSP is a single self-contained Rust crate — a library plus a `hypreq` binary — with no
-external service, plugin host, or path dependency, covered by an extensive 358-test suite
+external service, plugin host, or path dependency, covered by an extensive 362-test suite
 (`cargo test --all-targets`). `hypreq.py` is the same pipeline kept as
 a **parity oracle**: `scripts/parity.py` runs both sides scenario by scenario and diffs
 stdout, WAV containers and payloads, audit CSVs, and usage errors. See
@@ -29,17 +29,25 @@ cargo build --release
 1. **JBL Live 770NC (Passive / Wired Mode)** — `--headphone jbl770nc`
    - **Measurement Source:** **Filk** (Clone GRAS 43AG fixture with `KB006x` KEMAR pinna + clone IEC 60318-4 `711` occluded-ear simulator), via the [AutoEq](https://github.com/jaakkopasanen/AutoEq) database.
    - **Target:** Harman Over-Ear 2018.
-     <img width="1950" height="1725" alt="jbl770nc_final_verification" src="https://github.com/user-attachments/assets/8077a438-9547-4bcd-937a-5b97cdca29fd" />
+     <img width="1950" height="1725" alt="jbl770nc_final_verification" src="docs/plots/jbl770nc_final_verification.png" />
 
 2. **Beyerdynamic DT 770 Pro (80 Ω)** — `--headphone dt770_80`
    - **Measurement Source:** **Crinacle** (Genuine `GRAS 43AG-7` fixture: `RA0402` high-frequency 711 coupler + `KB500X` anthropometric pinna), via AutoEq.
    - **Target:** Harman Over-Ear 2018.
-     <img width="1950" height="1725" alt="dt770_80ohm_final_verification" src="https://github.com/user-attachments/assets/bb9cb3a1-7519-494b-b826-211ef1710715" />
+     <img width="1950" height="1725" alt="dt770_80ohm_final_verification" src="docs/plots/dt770_80ohm_final_verification.png" />
 
 3. **FiiO FT1 Pro (Open-Back Planar Magnetic)** — `--headphone ft1pro`
    - **Measurement Source:** **oratory1990 / Kuulokenurkka** (Genuine `GRAS 43AG` fixture with `KB50xx` anthropometric pinna + IEC 60318-4 `711` occluded-ear simulator), via AutoEq.
    - **Target:** Harman Over-Ear 2018.
-<img width="1950" height="1725" alt="ft1pro_final_verification" src="https://github.com/user-attachments/assets/63e24940-7c91-4df8-b0b4-14480a36a0f6" />
+     <img width="1950" height="1725" alt="ft1pro_final_verification" src="docs/plots/ft1pro_final_verification.png" />
+
+### Reference Model Profiles & Convolver Metrics
+
+| Model Key | Fixture & Pinna | Target | Max Boost | Preamp | Truncation Floor ($f_{64}$) | Causal Energy | HF Taper | Generated Convolvers |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **`jbl770nc`** | Clone GRAS 43AG (`KB006x` + `711`) | Harman Over-Ear 2018 | $+5.00\text{ dB}$ | $-6.50\text{ dB}$ | $-311.18\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | `jbl770nc_f64_48k.wav`<br>`jbl770nc_mastering_mono_48k.wav`<br>`jbl770nc_mastering_stereo_48k.wav` |
+| **`dt770_80`** | Genuine GRAS 43AG-7 (`KB500X` + `RA0402`) | Harman Over-Ear 2018 | $+4.10\text{ dB}$ | $-5.60\text{ dB}$ | $-294.53\text{ dBFS}$ | $99.9999999983\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `dt770_80ohm_f64_48k.wav`<br>`dt770_80ohm_mastering_mono_48k.wav`<br>`dt770_80ohm_mastering_stereo_48k.wav` |
+| **`ft1pro`** | Genuine GRAS 43AG (`KB50xx` + `711`) | Harman Over-Ear 2018 | $+4.07\text{ dB}$ | $-5.57\text{ dB}$ | $-309.00\text{ dBFS}$ | $99.9999999999\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `ft1pro_f64_48k.wav`<br>`ft1pro_mastering_mono_48k.wav`<br>`ft1pro_mastering_stereo_48k.wav` |
 
 ### Acoustic Scope & Limitations
 A coupler measurement captures one unit on one artificial pinna/ear simulator. Pad wear, seal leakage, and individual pinna geometry shift sub-bass (`<60 Hz`) and high-frequency pinna interference notches (`>3 kHz`) by several dB from ear to ear. For example, even between the Left and Right earcups of the measured DT 770 Pro 80 Ω unit on Crinacle's GRAS 43AG-7 rig, the `~3.76 kHz` concha reflection null shifts by `135 Hz` and `6.6 dB` (`-2.16 dBr` Left vs. `-8.78 dBr` Right at `3,838 Hz`), while the FiiO FT1 Pro exhibits a `4.05 dB` L/R channel split across its `~3.84–4.05 kHz` concha/driver notch (`+4.32 dBr` Left vs. `+8.37 dBr` Right at `3,839 Hz`).
@@ -49,6 +57,164 @@ To avoid over-correcting rig-specific artifacts while still fixing audible drive
 - **Minimum-phase cup & breakup pole inversion:** Uses Hilbert-Cepstral minimum-phase reconstruction (`0.00 ms` impulse peak delay, zero pre-ringing) to invert lumped-parameter bass/cup modes (`160 Hz` / `455 Hz` on JBL; `59 Hz` / `205 Hz` on DT 770), open-back planar ear-gain recession and upper-midrange glare (`+4.07 dB` at `1.82 kHz` and `-2.64 dB` at `2.82 kHz` on FT1 Pro), and diaphragm breakup peaks (`6.88 kHz` / `8.48 kHz` on JBL; `5.34 kHz`, `6.64 kHz`, and `8.16 kHz` on DT 770; `5.75 kHz` on FT1 Pro) without letting wide `2.0-octave` treble smoothing bleed adjacent dip errors into boosting sibilance peaks.
 - **Safe concha notch bridging (`--notch-mode safe`):** Caps narrow boosts inside the DT 770's `2.8–4.4 kHz` and FT1 Pro's `3.4–4.4 kHz` non-minimum-phase concha nulls to `+1.50 dB` (`safe_cap_db * tanh(g / safe_cap_db)`) by default (preventing L/R and head-to-head upper-midrange glare), or allows `--notch-mode original` (`+4.26 dB` fill on DT 770; `+2.01 dB` fill on FT1 Pro) and `--notch-mode zero` (`0.00 dB`).
 - **Uncorrected coupler-null & HF bypass zone:** Leaves `>9.1 kHz` (`jbl770nc`), `>8.8 kHz` / `>15.8 kHz` (`dt770_80`), and `>9.75 kHz` (`ft1pro`) coupler half-wave cylinder nulls unmodified (`0.00 dB` ultrasonic wire to Nyquist, shaded on the verification plots).
+
+---
+
+## DSP Architecture & Core Technologies
+
+HyprEQ operates as a high-precision filter realization, acoustic verification, and mastering engine. It bridges the gap between raw frequency response measurements and deployable convolution filters.
+
+```mermaid
+flowchart TD
+    subgraph Input ["1. Input & Validation"]
+        M["Headphone Measurement (CSV / JSON)"] --> V["Fixture Validation (Olive & Clark 2025)"]
+        T["Harman Target Curve"] --> V
+    end
+
+    subgraph Curve ["2. Target Matching & Curve Design"]
+        V --> R["Fit-Aware Regularization (Gómez-Bolaños 2016)"]
+        R --> S["Stereo Skew & Imbalance Trim"]
+        S --> N["Concha Notch Safe-Bridging"]
+        N --> P["PCHIP Monotonic Cubic Spline in log10(f)"]
+    end
+
+    subgraph Synthesis ["3. Spectral & Temporal Realization"]
+        P --> H["Hilbert-Cepstral Minimum-Phase Folding"]
+        H --> A["Nyquist-Scaled Gaussian Apodization"]
+        A --> K["Half-Kaiser Tail Fade (beta=18.0 / 16.0)"]
+    end
+
+    subgraph Dynamics ["4. True-Peak Dynamics & Normalization"]
+        K --> MTR["ITU-R BS.1770-5 Polyphase True-Peak Meter"]
+        MTR --> SC["Non-Distorting Static FIR True-Peak Scaling"]
+        SC --> LIM["Two-Stage True-Peak Limiter (Lookahead)"]
+    end
+
+    subgraph Output ["5. Deployment & Verification"]
+        LIM --> F64["64-Bit mpv / FFmpeg Convolver (pcm_f64le)"]
+        LIM --> F32["32-Bit PipeWire / DAW Convolver (pcm_f32le)"]
+        LIM --> VER["IEC 61260-1 1/3-Octave Acoustic Verification"]
+        LIM --> PLT["4-Panel High-Resolution Verification Figure"]
+    end
+```
+
+### 1. Hilbert-Cepstral Minimum-Phase FIR Synthesis
+Traditional minimum-phase FIR generation often relies on discrete Hilbert transform approximations with circular convolution artifacts or parametric IIR cascades that suffer from frequency warping near Nyquist. HyprEQ computes the analytic minimum-phase impulse response directly via the real cepstrum:
+
+$$\hat{c}[n] = \mathcal{F}^{-1}\left\{ \ln |H(\omega)| \right\}$$
+
+$$c_{\text{min}}[n] = \begin{cases} \hat{c}[0], & n = 0 \\ 2\hat{c}[n], & 1 \le n < N/2 \\ \hat{c}[N/2], & n = N/2 \\ 0, & N/2 < n < N \end{cases}$$
+
+$$h[n] = \text{Re}\left( \mathcal{F}^{-1}\left\{ \exp\left( \mathcal{F}\{ c_{\text{min}}[n] \} \right) \right\} \right)$$
+
+This reconstruction guarantees:
+- **Causal Compact Support:** The impulse peak is anchored precisely at $t = 0.00\text{ ms}$, packing maximum energy into the earliest samples ($>99.99999999\%$ causal energy ratio).
+- **Zero Pre-Ringing:** Transients decay naturally forward in time without pre-echo smearing or transient blurring.
+- **Dual-Tier Resolution:**
+  - **Mastering / Offline ($f_{64}$):** $N_{\text{fft}} = 262,144$ ($0.1831\text{ Hz}$ bin resolution) yielding $65,536\text{ taps}$ ($1365.3\text{ ms}$) in 64-bit IEEE double precision (`pcm_f64le`).
+  - **Real-Time ($f_{32}$):** $N_{\text{fft}} = 32,768$ ($1.4648\text{ Hz}$ bin resolution) yielding $16,384\text{ taps}$ ($341.3\text{ ms}$) in 32-bit float (`pcm_f32le`), scaling dynamically with sample rate ($32,768\text{ taps}$ at $96\text{ kHz}$, $64,536\text{ taps}$ at $192\text{ kHz}$).
+
+### 2. Monotonic Log-Frequency PCHIP Interpolation
+Standard natural cubic splines oscillate and overshoot between non-uniform acoustic measurement knots, corrupting the transfer function with spurious peaks (Runge's phenomenon). HyprEQ employs Piecewise Cubic Hermite Interpolating Polynomials (PCHIP) according to Fritsch & Carlson (1980), evaluated strictly across log-frequency:
+
+$$\xi = \log_{10}(f)$$
+
+Slopes $d_k$ at knot $\xi_k$ are harmonically weighted and constrained: if adjacent secular differences change sign ($\Delta_{k-1} \cdot \Delta_k \le 0$), the slope is clamped to zero ($d_k = 0$). If signs agree, the slope is bounded:
+
+$$d_k = \frac{3 \Delta_{k-1} \Delta_k}{\max(\Delta_{k-1}, \Delta_k) + 2\min(\Delta_{k-1}, \Delta_k)}$$
+
+This ensures strict monotonicity across intervals, completely eliminating artificial frequency ripples. Continuous evaluation over dense FFT grids utilizes a monotonic cursor, reducing search complexity from $O(M \log N)$ to $O(M)$ linear time.
+
+### 3. Truncation Decay Discipline & Half-Kaiser Tail Windowing
+Abruptly truncating an FIR kernel creates severe spectral leakage (Gibbs phenomenon). Conversely, windowing the entire impulse response corrupts passband magnitude and distorts transient response. HyprEQ enforces a strict tail-decay architecture:
+- Early taps ($0 \le n < N - n_{\text{tail}}$) are left completely unwindowed ($100\%$ passband transparency).
+- The final tail ($n_{\text{tail}} = 4,096$ taps offline; $n_{\text{tail}} = 2,048$ taps real-time) is tapered using the descending half of a Kaiser window:
+
+$$w[m] = \frac{I_0\left(\beta \sqrt{1 - \left(\frac{m}{n_{\text{tail}}}\right)^2}\right)}{I_0(\beta)}, \quad 0 \le m < n_{\text{tail}}$$
+
+With $\beta = 18.0$ (offline), sidelobes are suppressed by $172.0\text{ dB}$, plunging the truncation floor past $-300\text{ dBFS}$ without passband attenuation. With $\beta = 16.0$ (real-time), the truncation floor reliably reaches $<-228\text{ dBFS}$.
+
+### 4. Ultrasonic Gaussian Apodization & High-Frequency Bypass
+Headphone coupler measurements above $8\text{ kHz} - 10\text{ kHz}$ contain non-minimum-phase half-wave standing-wave nulls inherent to ear-simulator geometry. Attempting to boost these nulls produces aggressive acoustic glare.
+- **High-Frequency Bypass:** Above $f_{\text{bypass}}$ (e.g. $9.1\text{ kHz}$ on JBL Live 770NC; $8.8\text{ kHz}$ / $15.8\text{ kHz}$ on DT 770 Pro; $9.75\text{ kHz}$ on FT1 Pro), filter gain transitions smoothly via a raised cosine into a $0.00\text{ dB}$ flat wire through Nyquist.
+- **Nyquist-Adaptive Gaussian Apodizer:** Where models carry ultrasonic measurement noise, stopband energy is attenuated smoothly toward Nyquist via:
+
+$$w(f) = \exp\left(-\frac{1}{2}\left(\frac{f - f_{\text{start}}}{\sigma}\right)^2\right), \quad f_{\text{start}} = \max\left(24000, f_{\text{nyq}}\right) \cdot \frac{20200}{24000}, \quad \sigma = 1650\text{ Hz}$$
+
+Clamping the apodizer scale floor at $24\text{ kHz}$ ensures that sample rates at or below $48\text{ kHz}$ ($44.1\text{ kHz}$, $48\text{ kHz}$) never attenuate audible treble below $20\text{ kHz}$ (preserving flat response up to $20.2\text{ kHz}$), while eliminating stopband ringing at high rates ($96\text{ kHz}$, $192\text{ kHz}$).
+
+### 5. ITU-R BS.1770-5 Polyphase True-Peak Metering
+Standard digital sample-peak meters cannot detect inter-sample peaks that emerge during digital-to-analog reconstruction or asynchronous sample rate conversion. HyprEQ integrates an ITU-R BS.1770-5 Annex 2 compliant polyphase oversampling detector:
+- **Polyphase Filter Bank:** 16-phase Kaiser-windowed sinc interpolation filter ($51\text{ taps/phase}$, oversampling by $16\times$, with support from $2\times$ up to $32\times$, plus standard ITU $4\times$ mode).
+- **Static Branch Caching:** Polyphase impulse responses are calculated once and stored in static memory via thread-safe `OnceLock` structures, eliminating runtime allocation during streaming convolution.
+- **Sub-Sample Parabolic Refinement:** When oversampled samples locate a peak at index $k$, continuous parabolic interpolation solves for the sub-sample apex:
+
+$$t^* = -\frac{y_{k+1} - y_{k-1}}{2(y_{k+1} - 2y_k + y_{k-1})}, \quad y^* = y_k - \frac{1}{4}(y_{k-1} - y_{k+1}) t^*$$
+
+This achieves sub-sample apex measurement precision within $<0.01\text{ dBTP}$ across the audio band.
+
+### 6. Two-Stage True-Peak Limiter & Non-Distorting Static FIR Scaling
+To maintain zero inter-sample clipping while preserving transient punch, HyprEQ incorporates a dual-stage ceiling limiter alongside non-distorting impulse response gain scaling:
+- **Two-Stage Dynamic Limiter:**
+  - **Fast Transient Stage:** $25.0\text{ ms}$ release time, $100\%$ stereo linked to prevent stereo image collapse during percussive transients.
+  - **Slow RMS Stage:** Dual-rate $60.0\text{ ms}$ attack and $900.0\text{ ms}$ release, $75\%$ stereo linked for transparent musical density control.
+  - **Lookahead & Ramp:** $2.0\text{ ms}$ lookahead buffer ($122\text{ samples}$ at $48\text{ kHz}$) with a 24-sample linear attack ramp eliminating hard-knee distortion.
+- **Non-Distorting Static Scalar IR Attenuation:** Passing an FIR impulse response itself through a dynamic time-varying envelope alters the filter's frequency response (sample 0 attenuates while subsequent taps release back toward $0\text{ dB}$). HyprEQ avoids this entirely: if an synthesized IR's true-peak exceeds the ceiling threshold, the entire FIR kernel is scaled uniformly by a static scalar:
+
+$$g_{\text{scalar}} = 10^{\frac{\text{ceiling\_db} - \text{ir\_dbtp}}{20}}$$
+
+This guarantees that the equalisation curve, phase response, and preamp gain accounting remain $100\%$ mathematically exact without dynamic transfer function warping.
+
+### 7. Rig-Compensated Fixture Validation (Olive & Clark, AES 2025)
+A frequency response is not an absolute property of a headphone; it is the transfer function of the headphone coupled to a specific acoustic test fixture. As demonstrated by Olive & Clark (*AES 159th Convention, 2025*), different ear simulators (e.g. GRAS RA0045, RA0402, B&K 5128, KB5000) exhibit distinct acoustic transfer impedances:
+
+$$\mathcal{H}_{\text{ear}}(f) = \frac{P_{\text{eardrum}}(f)}{U_{\text{pinna}}(f)}$$
+
+Target curves defined on one rig (e.g. Harman Over-Ear 2018 on GRAS 45CA) cannot be ported to another rig (e.g. B&K 5128) without acoustic compensation. HyprEQ validates fixture pairings at startup across:
+- `gras_43ag` & `gras_43ag_clone` (IEC 60318-4 711 coupler + anthropometric/KEMAR pinna)
+- `gras_45ca` (RA0045 occluded ear simulator + custom pinna)
+- `gras_kb5000` (anthropometric pinna assembly)
+- `bk5128` (Type 4620 high-frequency head and torso simulator)
+- `iec60318_4` (standard 711 acoustic coupler)
+
+Cross-fixture equalization is refused upfront (exit code 2), guarding against cross-rig target corruption unless overridden with `--force`.
+
+### 8. IEC 61260-1 Third-Octave Closed-Loop Verification
+HyprEQ closes the calibration loop with automated post-EQ compliance verification. When supplied with a post-EQ remeasurement via `--verify-with <file.csv>`, the engine assesses acoustic fidelity across 31 standardized third-octave bands per **IEC 61260-1** ($1\text{ kHz}$ reference, base-10 spacing):
+
+$$f_{\text{edge}} = f_{\text{centre}} \cdot 10^{\pm 1/20}$$
+
+The analysis isolates three independent dimensions:
+1. **Residual Deviation:** Evaluates whether acoustic error sits within the pass/fail boundary (default $\pm 3.00\text{ dB}$) after extracting median interface level offset.
+2. **In-Band Scatter:** Evaluates 25 frequency points per band to distinguish uniform spectral bias from high-frequency coupler noise and interference ripples.
+3. **Design Shortfall:** Directly tracks where intentional engineering constraints (regularization shrinkage, concha notch ceilings, or high-frequency bypass) intentionally diverge from the target curve.
+
+### 9. Stereo Interaural Imbalance Compensation & Joint Latency Alignment
+Headphone drivers inevitably exhibit manufacturing tolerances, and artificial ears experience slight positioning asymmetries. HyprEQ provides rigorous stereo interaural analysis (`--stereo`):
+- **Per-Ear Trim:** Computes channel-specific deviations while maintaining the acoustic centre, correcting channel tilt up to `--stereo-max-skew` (default $6.00\text{ dB}$).
+- **Shared Master Preamp Normalization:** When generating stereo filters, both channels share a unified headroom formula:
+
+$$\text{preamp\_db} = \text{headroom\_db} - \max\left(\text{boost}_L, \text{boost}_R\right)$$
+
+Applying identical attenuation to both channels prevents channel-independent normalization from distorting the stereo soundstage.
+- **Joint Stereo Phase Alignment:** When mixed-phase processing is combined with stereo splitting, filter latency and tap expansion are solved jointly, ensuring zero interaural time delay (ITD) skew.
+
+### 10. Mixed-Phase Bass Group-Delay Linearization (Liski et al., 2021)
+Minimum-phase filters introduce phase shift and group delay when boosting low frequencies. To investigate the perceptual trade-off between minimum-phase decay and phase linearity, HyprEQ provides `--experimental-phase <HZ>`.
+- Replaces minimum-phase group delay below the transition frequency (e.g. $200\text{ Hz}$) with flat group delay while preserving the exact magnitude response.
+- Configured using the empirical psychoacoustic audibility thresholds published by Liski, Mäkivirta & Välimäki (*IEEE/ACM TASLP 2021*): $-0.56\text{ ms}$ negative and $+0.64\text{ ms}$ positive group delay across pink-noise impulse listening tests.
+
+### 11. Fit-Aware Adaptive Regularization (Gómez-Bolaños et al., 2016)
+Inverting sharp, high-Q measurement dips creates harsh, unnatural resonances. Inspired by Gómez-Bolaños, Mäkivirta & Pulkki (*JAES 2016*), HyprEQ's `--regularize` evaluates local deviation between the measured response and a smoothed envelope:
+
+$$\sigma(\omega) = \max\left(0, \tilde{H}(\omega) - |H(\omega)|\right)$$
+
+Where deviation exceeds the regularization knee (determined automatically or via `--regularize <DB>`), correction demand contracts smoothly toward unity ($0.00\text{ dB}$), preserving acoustic naturalness without chasing fixture artifacts.
+
+### 12. Numerical Precision & Bit-Exact TPDF Dither
+- **IEEE-754 $f64$ End-to-End:** All intermediate spectral calculations, cepstral folding, PCHIP evaluation, and convolution buffers operate in 64-bit double precision. Conversion to $f32$ occurs only at the final container serialization.
+- **Compensated Summation:** Critical energy accumulation and mean calculations use Neumaier compensated summation (`accum.rs`), preventing floating-point catastrophic cancellation across millions of samples.
+- **NumPy-Compatible PCG64 TPDF Dither:** When exporting fixed-point formats (16-bit or 24-bit PCM), quantization distortion is eliminated via Triangular Probability Density Function (TPDF) dither drawn from an exact NumPy-identical PCG64 pseudo-random generator stream.
 
 ---
 
@@ -210,11 +376,10 @@ CSV, and the program compares the two, band by band, on the same IEC 61260-1 thi
 
 ```text
 ./target/release/hypreq -H dt770_80 --verify-with post_eq.csv
-./target/release/hypreq --input mix.wav --verify-with post_eq.csv --verify-pass-db 2
-./target/release/hypreq --measure-wav song.wav -H dt770_80 --verify-with post_eq.csv
+./target/release/hypreq --input mix.wav -H dt770_80 --verify-with post_eq.csv --verify-pass-db 2
 ```
 
-`--verify-with` works in both filter-generation mode and audio measurement mode (`--measure-only` / `--measure-wav`), evaluating acoustic compliance directly without requiring output audio to be rewritten.
+`--verify-with` evaluates acoustic compliance directly against the active equalisation filter. Because it requires a filter to compare against, combining `--verify-with` with `--bypass-eq` or `--measure-wav` (which bypasses EQ) is refused before any file is written.
 
 The output below is a synthetic capture — the filter's own predicted response with **6 dB injected
 at 1 kHz** — so that the numbers can be checked against the thing that was done to them:

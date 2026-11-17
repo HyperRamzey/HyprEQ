@@ -24,7 +24,7 @@ Those are different claims, and the difference is the whole content of this sect
 | **True-peak** limiting, not sample-peak: interpolating detector, two-stage slow/transient gain, lookahead and release accounting, per-channel and group meters | Post-EQ clipping is the most common way "correcting" a headphone makes it worse, and sample-peak meters do not see inter-sample overs |
 | Every run writes an **audit CSV** (raw, target, raw error, applied EQ per control knot) and a 4-panel verification figure, and both are checked against a reference implementation | The curve can be audited after the fact, which is the difference between a tool and a preset |
 | Reproducible numerical contract: NumPy-compatible FFT/PCHIP/dither semantics, TPDF dither with a fixed stream, ties-to-even rounding, and a parity harness that diffs artefacts against the reference | The port is testable rather than plausible |
-| The engine is small and legible: `model → pchip → ir → convolve → limiter → plot`, with 312 library tests, 22 binary tests and 24 CLI integration tests | A base you can read is a base you can extend |
+| The engine is small and legible: `model → pchip → ir → convolve → limiter → plot`, with 313 library tests, 22 binary tests and 27 CLI integration tests (362 tests total) | A base you can read is a base you can extend |
 
 ### What caps it — the honest list
 
@@ -422,7 +422,7 @@ belongs with the decision to make `auto` the default rather than with this PR.
 ### PR 2 — Fixture-aware targets — **shipped** as `fixture` + `--force`
 
 **The premise held, and the data was worse than the schema.** §3.3 quoted Olive & Clark (AES 2025):
-the Harman around-ear target was defined on a GRAS 45CA fixture with an RA045 ear and is "often
+the Harman around-ear target was defined on a GRAS 45CA fixture with an RA0045 ear and is "often
 misused with other fixtures, leading to measurement and interpretation errors due to differing
 acoustic transfer impedances". Checking what the shipped database actually says about its own rigs:
 
@@ -455,7 +455,7 @@ actually use (`used_models`) — including the audio path's rule that `-H all` w
   audio-mode header all print the model's `name`, and the reference program prints the same field, so
   the fixture label went into `name` and appears in all four places on both programs:
   `Beyerdynamic DT 770 Pro (80 Ω) [GRAS 43AG]`. A line added in *code* would have to be added to the
-  oracle too, and the oracle is frozen; the parity harness confirms it — 98/98 scenarios, byte-identical
+  oracle too, and the oracle is frozen; the parity harness confirms it — 102/102 checks across 29 scenarios, byte-identical
   WAVs, with the three longer names in place. What the roadmap wanted the new line to *achieve* — nobody
   reads a curve without seeing the rig it came from — is achieved.
 * *"Ship the equivalents that have a defensible published curve (… GRAS KB5000 and B&K 5128
@@ -502,7 +502,7 @@ that a user acts on differently:
 
 A verifier that reports only the residual calls the second a pass — which is precisely the case where
 the user should be told the design gave up. Both are in the report, and the shortfall is scored on
-band means, not worst points, because it describes a curve rather than a measurement.
+band means (reporting the worst band's shortfall), because it describes a curve rather than an unsmoothed single-bin measurement.
 
 **Predicted is `raw + |H(f)|`, not the control knots.** The written FIR carries the half-Kaiser
 apodizer and its own truncation ripple; predicting from the design books the filter's deviation as a
@@ -714,12 +714,11 @@ is a bass-focused guard, not a wideband phase shaper. NYU's minimum-phase FIR de
 quoted: "the delay of a linear-phase filter is equal to (N − 1)/2", and a narrow transition
 band with high stop-band attenuation "requires making the filter long" — the trade this stage
 lives inside, and the reason accuracy here is bought with taps and an 8× padded transform
-rather than given up. Liski, Mäkivirta & Välimäki (TASLP 29, 2189–2201, 2021) supplies the
-threshold the budget is set against; that paper's own abstract records that the ear tolerates
-**more** phase processing in the low frequencies, which argues for treating a bass
-GD-flattening stage as experimental rather than as a recommendation, and that is how it ships.
-The full text was behind a paywall at the time of writing, so no per-frequency threshold
-numbers are quoted that could not be read.
+rather than given up. Liski, Mäkivirta & Välimäki (TASLP 29, 2189–2201, 2021; published Open Access under CC BY 4.0) supplies the
+threshold the budget is set against; that paper's own findings record that the ear tolerates
+**more** phase processing in the low frequencies (with audibility tested across 500 Hz – 4 kHz),
+which argues for treating a bass GD-flattening stage as experimental rather than as a recommendation,
+and that is how it ships.
 
 **Acceptance, and how it was met:**
 - `the_magnitude_survives_within_rounding`, and end to end in

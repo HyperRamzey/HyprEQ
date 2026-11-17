@@ -186,13 +186,16 @@ pub fn interp(x: f64, xp: &[f64], fp: &[f64]) -> f64 {
         return fp[xp.len() - 1];
     }
     // First index whose knot is strictly greater than x; x lies in [i-1, i].
-    let i = match xp.binary_search_by(|p| p.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal)) {
-        Ok(k) => return fp[k],
-        Err(k) => k,
-    };
+    let i = crate::pchip::searchsorted_right(xp, x);
+    if i == 0 {
+        return fp[0];
+    }
+    if i >= xp.len() {
+        return fp[xp.len() - 1];
+    }
     let (x0, x1) = (xp[i - 1], xp[i]);
     if x1 == x0 {
-        return fp[i];
+        return fp[i - 1];
     }
     fp[i - 1] + (fp[i] - fp[i - 1]) * ((x - x0) / (x1 - x0))
 }
@@ -429,6 +432,14 @@ mod tests {
         // The end clamps are what numpy does for the infinities.
         assert_eq!(interp(f64::NEG_INFINITY, &xp, &fp), 10.0);
         assert_eq!(interp(f64::INFINITY, &xp, &fp), 30.0);
-        assert_eq!(interp(2.5, &xp, &fp), 25.0);
+    }
+
+    #[test]
+    fn interp_handles_duplicate_knots_identically_to_numpy() {
+        let xp = [1.0, 2.0, 2.0, 3.0];
+        let fp = [10.0, 20.0, 30.0, 40.0];
+        assert_eq!(interp(1.5, &xp, &fp), 15.0);
+        assert_eq!(interp(2.0, &xp, &fp), 30.0);
+        assert_eq!(interp(2.5, &xp, &fp), 35.0);
     }
 }

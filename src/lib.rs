@@ -27,7 +27,7 @@
 //! [`pchip`] interpolates those knots monotonically in `log10(f)`; [`ir`] folds that
 //! magnitude into a minimum-phase impulse response by Hilbert-cepstral reconstruction
 //! (zero pre-ringing, no impulse-peak delay), truncates it to `--taps`, and fades the
-//! tail with a half-Kaiser. [`convolve`] is exact linear-phase overlap-add, [`tp`]
+//! tail with a half-Kaiser. [`convolve`] is exact linear convolution by overlap-add, [`tp`]
 //! measures true-peak per ITU-R BS.1770-5, and [`limiter`] honours a ceiling against
 //! that measurement.
 //!
@@ -109,6 +109,7 @@ pub mod window;
 ///
 /// The parity tests that need real NumPy output use this and skip (loudly) when it
 /// is unset, so the suite stays runnable on a machine that has only the Rust tree.
+#[cfg(test)]
 #[doc(hidden)]
 #[must_use]
 pub fn oracle_dir() -> Option<String> {

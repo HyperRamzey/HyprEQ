@@ -45,8 +45,18 @@ pub const MODEL_ALIASES: [(&str, &str); 5] = [
 /// `gauss_apodize`, `plot_meta`), keyed by model. Mirrors
 /// `hypreq.py::DEFAULT_MODEL_METADATA`.
 #[must_use]
-pub fn built_in_metadata(key: &str) -> Option<Value> {
-    let all = json!({
+/// Extracts the dB gain from a row: for 3 columns [freq, L, R], takes the ear mean.
+#[inline]
+fn point_gain(p: &[f64]) -> f64 {
+    if p.len() == 3 {
+        (p[1] + p[2]) / 2.0
+    } else {
+        *p.last().unwrap()
+    }
+}
+
+static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    json!({
       "jbl770nc": {
         "short_title": "JBL Live 770NC (Passive)",
         "notch_ref_hz": null,
@@ -139,8 +149,12 @@ pub fn built_in_metadata(key: &str) -> Option<Value> {
           ]
         }
       }
-    });
-    all.get(key).cloned()
+    })
+});
+
+#[must_use]
+pub fn built_in_metadata(key: &str) -> Option<Value> {
+    ALL_METADATA.get(key).cloned()
 }
 
 /// One normalised headphone model, ready to synthesise.
@@ -229,11 +243,11 @@ impl Model {
             return Regularized::NothingToJudge;
         }
         let f: Vec<f64> = self.raw_pts.iter().map(|p| p[0]).collect();
-        let g: Vec<f64> = self.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+        let g: Vec<f64> = self.raw_pts.iter().map(|p| point_gain(p)).collect();
         let raw: Vec<(f64, f64)> = self
             .raw_pts
             .iter()
-            .map(|p| (p[0], *p.last().unwrap()))
+            .map(|p| (p[0], point_gain(p)))
             .collect();
         let knots: Vec<f64> = self.ctrl_pts.iter().map(|&(x, _)| x).collect();
         let loads = crate::fit::beta_at_freqs(&f, &g, &knots, policy);
@@ -397,7 +411,7 @@ pub fn normalize_raw_near_1khz(raw_pts: &[Point], ref_hz: f64) -> Vec<Point> {
         return Vec::new();
     }
     let f_raw: Vec<f64> = raw_pts.iter().map(|p| p[0]).collect();
-    let g_avg: Vec<f64> = raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+    let g_avg: Vec<f64> = raw_pts.iter().map(|p| point_gain(p)).collect();
     let offset = crate::pchip::pchip_eval1(&f_raw, &g_avg, ref_hz);
     if offset.abs() < 1e-9 {
         return raw_pts.to_vec();
@@ -441,7 +455,7 @@ pub fn derive_ctrl_pts_from_raw(
         .zip(&g_tar_on_raw)
         .map(|(p, &tar)| {
             let f = p[0];
-            let e = tar - *p.last().unwrap();
+            let e = tar - point_gain(p);
             (
                 f,
                 round2(shape_error(
@@ -502,7 +516,7 @@ pub fn derive_ctrl_pts_from_raw_regularized(
     subbass_leak_discount_db: f64,
     policy: &crate::fit::Policy,
 ) -> Vec<(f64, f64)> {
-    let raw_pairs: Vec<(f64, f64)> = raw_pts.iter().map(|p| (p[0], *p.last().unwrap())).collect();
+    let raw_pairs: Vec<(f64, f64)> = raw_pts.iter().map(|p| (p[0], point_gain(p))).collect();
     if raw_pairs.len() < 2 || target_pts.len() < 2 {
         return Vec::new();
     }
@@ -761,7 +775,7 @@ pub fn normalize_model_entry(
     } else if let Some(rel) = ctrl_csv {
         sort_and_dedup_points(&load_csv_points(&base_dir.join(rel))?)
             .into_iter()
-            .map(|p| (p[0], *p.last().unwrap()))
+            .map(|p| (p[0], point_gain(&p)))
             .collect()
     } else {
         let subbass_leak_discount_db = f64_or(cfg, "subbass_leak_discount_db", 0.0);
@@ -970,6 +984,7 @@ impl Database {
     }
 
     /// Resolve `-H` value (or alias) to a model key; `None` if unknown.
+    #[cfg(test)]
     #[must_use]
     pub fn resolve<'a>(&self, requested: &'a str) -> Option<&'a str> {
         if requested == "all" {

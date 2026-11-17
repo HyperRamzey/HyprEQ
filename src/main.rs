@@ -35,6 +35,7 @@ use hypreq::model::{
     load_measurement_database, upgrade_measurements_json, Database, Model, MODEL_ALIASES,
 };
 use hypreq::plot::{PlotData, PlotInputs};
+use hypreq::tp::TruePeak;
 use hypreq::wav::{comma_sep, read_wav, write_wav_ieee_float, write_wav_pcm_or_float};
 
 /// Exit code argparse uses for a usage error, kept so scripts that branch on it still do.
@@ -457,6 +458,12 @@ fn run(args: Args) -> Result<(), Error> {
         usage_error(msg);
     }
 
+    if let Some(fs) = args.fs {
+        if fs <= 0 {
+            usage_error(format!("sample rate must be positive (got {fs})"));
+        }
+    }
+
     if args.taps < 256 {
         usage_error("--taps must be >= 256");
     }
@@ -737,29 +744,25 @@ fn resolve_headphone<'a>(
     models.get(requested).map(|m| m.key.as_str())
 }
 
-fn limit_ir(ir: &mut Vec<f64>, fs: u32, lim_cfg: &hypreq::limiter::Cfg, headroom_db: f64) -> f64 {
+fn limit_ir(ir: &mut [f64], lim_cfg: &hypreq::limiter::Cfg, headroom_db: f64) -> f64 {
     if !lim_cfg.enable {
         return 0.0;
     }
-    let orig_len = ir.len();
-    let mut cfg = *lim_cfg;
-    cfg.ceiling_db = lim_cfg.ceiling_db.max(headroom_db).min(0.0);
-    let mut lim = Limiter::enabled(cfg, fs, 1);
-    let lat = lim.latency_samples();
-    let mut ch = vec![ir.clone()];
-    {
-        let mut refs: Vec<&mut [f64]> = ch.iter_mut().map(|c| c.as_mut_slice()).collect();
-        lim.process(refs.as_mut_slice());
+    let ceiling_db = lim_cfg.ceiling_db.max(headroom_db).min(0.0);
+    let mut tp = TruePeak::new(lim_cfg.ratio, 1);
+    tp.push_ch(0, ir);
+    tp.drain();
+    let ir_dbtp = tp.dbtp();
+    if ir_dbtp > ceiling_db {
+        let gr = ir_dbtp - ceiling_db;
+        let scale = 10.0f64.powf(-gr / 20.0);
+        for x in ir.iter_mut() {
+            *x *= scale;
+        }
+        gr
+    } else {
+        0.0
     }
-    let tail = lim.flush();
-    if let Some(t) = tail.first() {
-        ch[0].extend_from_slice(t);
-    }
-    let rep = lim.report();
-    if ch[0].len() >= lat + orig_len {
-        *ir = ch[0][lat..lat + orig_len].to_vec();
-    }
-    rep.max_gain_reduction_db
 }
 
 /// Generate one model's convolvers and print the four report sections.
@@ -812,8 +815,17 @@ fn run_model(
         phase_done.push(("mastering", a));
     }
 
-    let gr_mpv = limit_ir(&mut mpv.ir, fs, lim_cfg, headroom_db);
-    mpv.preamp_db -= gr_mpv;
+    let gr_mpv = limit_ir(&mut mpv.ir, lim_cfg, headroom_db);
+    if gr_mpv > 0.0 {
+        mpv.preamp_db -= gr_mpv;
+        mpv.unwindowed_floor_dbfs -= gr_mpv;
+        mpv.windowed_floor_dbfs = hypreq::ir::db_floor(&mpv.ir, 100);
+        for (label, a) in &mut phase_done {
+            if *label == "mastering" {
+                a.floor_dbfs = mpv.windowed_floor_dbfs;
+            }
+        }
+    }
     write_wav_ieee_float(Path::new(&f64_wav), std::slice::from_ref(&mpv.ir), fs, 64)?;
     if copy_default_ir {
         std::fs::copy(Path::new(&f64_wav), Path::new("ir.wav"))
@@ -823,10 +835,12 @@ fn run_model(
     let ir_mpv_meas = measure_signal(std::slice::from_ref(&mpv.ir), fs, lim_cfg.ratio);
     let ir_l1_db = l1_gain_db(&mpv.ir);
 
+    let f_nyq = f64::from(fs) / 2.0;
+    let f_apod_start = f_nyq.max(24000.0) * (20200.0 / 24000.0);
     let apod_desc = if use_apodize {
-        "Gaussian Apodizer (>20.2 kHz)"
+        format!("Gaussian Apodizer (>{:.1} kHz)", f_apod_start / 1000.0)
     } else {
-        "Non-Apodizing 0.00 dB HF Wire"
+        "Non-Apodizing 0.00 dB HF Wire".to_string()
     };
     println!();
     println!("{}", "=".repeat(80));
@@ -908,8 +922,17 @@ fn run_model(
     if let Some(a) = phase_stage(&mut rt, fs, "real-time", args)? {
         phase_done.push(("real-time", a));
     }
-    let gr_rt = limit_ir(&mut rt.ir, fs, lim_cfg, headroom_db);
-    rt.preamp_db -= gr_rt;
+    let gr_rt = limit_ir(&mut rt.ir, lim_cfg, headroom_db);
+    if gr_rt > 0.0 {
+        rt.preamp_db -= gr_rt;
+        rt.unwindowed_floor_dbfs -= gr_rt;
+        rt.windowed_floor_dbfs = hypreq::ir::db_floor(&rt.ir, 100);
+        for (label, a) in &mut phase_done {
+            if *label == "real-time" {
+                a.floor_dbfs = rt.windowed_floor_dbfs;
+            }
+        }
+    }
     let ir_rt_f32: Vec<f32> = rt.ir.iter().map(|&x| x as f32).collect();
     let ir_rt_f64: Vec<f64> = ir_rt_f32.iter().map(|&x| f64::from(x)).collect();
     write_wav_ieee_float(
@@ -956,7 +979,7 @@ fn run_model(
     );
     println!("  f32 vs f64 Error  : {:.2} dBFS RMS", err_rms_dbfs);
     println!("  Written WAVs      : {mono_rt}, {stereo_rt}");
-    print_phase_block(&phase_done);
+    print_phase_block(&phase_done, true);
 
     if args.export_csv {
         let csv_path = export_audit_csv(
@@ -1145,8 +1168,8 @@ fn run_audio_wav_mode(
     let m_in = measure_signal(&wav_in.planar, fs, lim_cfg.ratio);
     print_signal_measurements("Input Audio", &m_in);
 
-    let mut work = wav_in.planar.clone();
-    let orig_n = wav_in.planar.first().map_or(0, |c| c.len());
+    let mut work = wav_in.planar;
+    let orig_n = work.first().map_or(0, |c| c.len());
     let mut ir_tag = "bypass".to_string();
     // The filter the output was actually made with. Verification has to run against this one rather
     // than a re-synthesis of the design, because what the listener hears is the taps, not the knots.
@@ -1165,7 +1188,7 @@ fn run_audio_wav_mode(
         };
         let taps = taps_count(args);
         let n_fft_mpv = mpv_n_fft(taps);
-        let mut mpv_filter = if per_ear.is_none() || args.assess {
+        let mut mpv_filter = if per_ear.is_none() {
             Some(
                 synthesize_minimum_phase_ir(
                     &active_ctrl,
@@ -1193,32 +1216,28 @@ fn run_audio_wav_mode(
         };
         if let Some(mpv) = mpv_filter.as_ref() {
             applied_ir = Some((mpv.ir.clone(), mpv.preamp_db));
-            if per_ear.is_none() {
-                println!(
-                    "  EQ FIR ({})   : {} taps @ {} Hz | Preamp {:+.2} dB (Max boost +{:.2} dB, ||h||_1 {:+.2} dB)",
-                    model.file_prefix,
-                    comma_sep(mpv.ir.len() as u64),
-                    comma_sep(u64::from(fs)),
-                    mpv.preamp_db,
-                    mpv.max_boost_db,
-                    l1_gain_db(&mpv.ir)
-                );
-            }
+            println!(
+                "  EQ FIR ({})   : {} taps @ {} Hz | Preamp {:+.2} dB (Max boost +{:.2} dB, ||h||_1 {:+.2} dB)",
+                model.file_prefix,
+                comma_sep(mpv.ir.len() as u64),
+                comma_sep(u64::from(fs)),
+                mpv.preamp_db,
+                mpv.max_boost_db,
+                l1_gain_db(&mpv.ir)
+            );
             if args.assess {
                 print_assessment(
                     &active_ctrl,
-                    &wav_in.planar,
+                    &work,
                     fs,
                     args,
                     mpv.preamp_db,
                     lim_cfg.enable,
                 );
             }
-            if per_ear.is_none() {
-                if let Some(a) = phase.as_ref() {
-                    println!("{}", "-".repeat(100));
-                    print_phase_block(&[("applied", a.clone())]);
-                }
+            if let Some(a) = phase.as_ref() {
+                println!("{}", "-".repeat(100));
+                print_phase_block(&[("applied", a.clone())], false);
             }
         }
         match per_ear {
@@ -1277,8 +1296,18 @@ fn run_audio_wav_mode(
                         l1_gain_db(&ir.ir)
                     );
                 }
+                if args.assess {
+                    print_assessment(
+                        &active_ctrl,
+                        &work,
+                        fs,
+                        args,
+                        left.preamp_db,
+                        lim_cfg.enable,
+                    );
+                }
                 let channels = work.len();
-                print_phase_block(&ear_phase);
+                print_phase_block(&ear_phase, false);
                 let filter_lat = ear_phase.first().map_or(0, |(_, adj)| adj.added_latency_samples);
                 let trim_to_in = args.trim_tail && filter_lat == 0;
                 work = convolve_planar_pair(&work, &left.ir, &right.ir, trim_to_in)
@@ -1290,8 +1319,11 @@ fn run_audio_wav_mode(
                     })?;
                 if args.trim_tail && filter_lat > 0 {
                     for ch in &mut work {
-                        let end = (filter_lat + orig_n).min(ch.len());
-                        *ch = ch[filter_lat.min(ch.len())..end].to_vec();
+                        if ch.len() < filter_lat + orig_n {
+                            ch.resize(filter_lat + orig_n, 0.0);
+                        }
+                        let end = filter_lat + orig_n;
+                        *ch = ch[filter_lat..end].to_vec();
                     }
                 }
             }
@@ -1302,8 +1334,11 @@ fn run_audio_wav_mode(
                 work = convolve_planar_fft(&work, &mpv.ir, trim_to_in);
                 if args.trim_tail && filter_lat > 0 {
                     for ch in &mut work {
-                        let end = (filter_lat + orig_n).min(ch.len());
-                        *ch = ch[filter_lat.min(ch.len())..end].to_vec();
+                        if ch.len() < filter_lat + orig_n {
+                            ch.resize(filter_lat + orig_n, 0.0);
+                        }
+                        let end = filter_lat + orig_n;
+                        *ch = ch[filter_lat..end].to_vec();
                     }
                 }
             }
@@ -1568,7 +1603,7 @@ fn phase_stage(
 }
 
 /// Print the experimental phase block, once, naming every filter it shaped.
-fn print_phase_block(items: &[(&str, hypreq::phase::Adjustment)]) {
+fn print_phase_block(items: &[(&str, hypreq::phase::Adjustment)], is_model_mode: bool) {
     let Some((_, first)) = items.first() else {
         return;
     };
@@ -1590,11 +1625,13 @@ fn print_phase_block(items: &[(&str, hypreq::phase::Adjustment)]) {
             parts.join(", ")
         );
     }
-    println!(
-        "  Note                : 'Causal Energy' and the '(after half-Kaiser fade)' floor above are "
-    );
-    println!("                        the reshaped filter's; '(unwindowed)' still describes the ");
-    println!("                        minimum-phase filter before its tail fade.");
+    if is_model_mode {
+        println!(
+            "  Note                : 'Causal Energy' and the '(after half-Kaiser fade)' floor above are "
+        );
+        println!("                        the reshaped filter's; '(unwindowed)' still describes the ");
+        println!("                        minimum-phase filter before its tail fade.");
+    }
 }
 
 /// The written filter's realised magnitude, in dB, on a query grid.
@@ -1950,7 +1987,13 @@ pub fn default_out_path(input: &str, ir_tag: &str, limiter: Option<&str>) -> Str
 /// byte-identical reports and two that differ in one path.
 fn upgrade_target(args: &Args) -> (PathBuf, PathBuf) {
     let (data_file, _) = database_paths(args);
-    if data_file == Path::new(hypreq::model::DEFAULT_DATA_FILE) {
+    let explicitly_passed = std::env::args_os().any(|a| {
+        a == "--data-file"
+            || a.to_str().is_some_and(|s| s.starts_with("--data-file="))
+    });
+    if explicitly_passed {
+        (args.data_file.clone(), args.data_file.clone())
+    } else if data_file == Path::new(hypreq::model::DEFAULT_DATA_FILE) {
         // Never found anywhere: report the path the user would have to act on, in the
         // form that says where that is.
         let abs = std::path::absolute(&data_file).unwrap_or(data_file.clone());

@@ -193,10 +193,8 @@ mod tests {
             fs: 48000,
             duration_s: 2.0,
             ratio: Ratio::X16,
-            sample_peak_lin: 0.7,
             sample_peak_dbfs: -3.1,
             per_channel_sample_dbfs: vec![-3.1, -6.0],
-            true_peak_lin: 0.708,
             true_peak_dbtp: -3.04,
             per_channel_dbtp: vec![-3.04, -5.9],
             itu_x4_dbtp: -3.21,
@@ -205,7 +203,6 @@ mod tests {
             per_channel_rms_dbfs: vec![-14.2, -17.2],
             crest_tp_db: 11.16,
             crest_sample_db: 11.1,
-            meter_peak_hold_lin: 0.7,
             meter_peak_hold_dbfs: -3.1,
             meter_param: 0.48,
         }

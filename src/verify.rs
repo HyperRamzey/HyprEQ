@@ -305,7 +305,8 @@ fn band_samples(lo_hz: f64, hi_hz: f64) -> Vec<f64> {
 /// **last** one is the curve. With two or three there is no average column, so the non-frequency
 /// columns are averaged — which for the usual two-column `(freq, dB)` file is exactly that column,
 /// and for a `[freq, L, R]` export is the mean of the ears, the same thing the shared filter was
-/// built to hit.
+/// built to hit. (Note: if a 3-column CSV contains `[freq, spl, phase]`, strip the phase degree
+/// column to avoid averaging SPL decibels with phase degrees).
 #[must_use]
 pub fn read_capture(rows: &[Vec<f64>]) -> Option<Vec<(f64, f64)>> {
     let pts: Vec<(f64, f64)> = rows
@@ -632,7 +633,7 @@ pub fn report_lines(r: &Report, note: Option<&str>) -> Vec<String> {
         r.scored,
         r.pass_db,
         if r.noise_limited > 0 {
-            format!(", {} of them noise-limited", r.noise_limited)
+            format!("; {} scored band(s) noise-limited", r.noise_limited)
         } else {
             String::new()
         }

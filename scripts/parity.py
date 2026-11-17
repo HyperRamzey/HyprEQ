@@ -700,6 +700,7 @@ def main() -> int:
             artifacts=["measurements.json"],
         ),
         Scenario("usage-taps-too-small", ["--taps", "100", "--no-plot"], expected_exit=2),
+        Scenario("usage-bad-fs", ["--fs", "0", "--no-plot"], expected_exit=2),
         Scenario("usage-bad-model", ["-H", "nope", "--no-plot"], expected_exit=2),
         Scenario("usage-bad-bits", ["--bypass-eq", "--input", "input_audio.wav", "--out-bits", "20"], expected_exit=2),
         Scenario("usage-bad-ratio", ["--bypass-eq", "--input", "input_audio.wav", "--tp-ratio", "x64"], expected_exit=2),
@@ -835,7 +836,7 @@ def main() -> int:
                 )
             )
 
-        if sc.expected_exit == 0 and any("_tp_" in n for n in sc.artifacts):
+        if sc.expected_exit == 0 and (any("_tp_" in n for n in sc.artifacts) or sc.expect_engaged):
             # Byte-identical stdout would also be satisfied by two sides that agree the
             # limiter never touched the signal, so engagement and the cross-check the
             # report performs on itself are asserted here as well.

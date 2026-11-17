@@ -39,10 +39,8 @@ pub struct SignalMeasurements {
     pub fs: u32,
     pub duration_s: f64,
     pub ratio: Ratio,
-    pub sample_peak_lin: f64,
     pub sample_peak_dbfs: f64,
     pub per_channel_sample_dbfs: Vec<f64>,
-    pub true_peak_lin: f64,
     pub true_peak_dbtp: f64,
     pub per_channel_dbtp: Vec<f64>,
     pub itu_x4_dbtp: f64,
@@ -51,7 +49,6 @@ pub struct SignalMeasurements {
     pub per_channel_rms_dbfs: Vec<f64>,
     pub crest_tp_db: f64,
     pub crest_sample_db: f64,
-    pub meter_peak_hold_lin: f64,
     pub meter_peak_hold_dbfs: f64,
     pub meter_param: f64,
 }
@@ -65,10 +62,8 @@ impl SignalMeasurements {
             fs,
             duration_s: 0.0,
             ratio,
-            sample_peak_lin: 0.0,
             sample_peak_dbfs: f64::NEG_INFINITY,
             per_channel_sample_dbfs: Vec::new(),
-            true_peak_lin: 0.0,
             true_peak_dbtp: f64::NEG_INFINITY,
             per_channel_dbtp: Vec::new(),
             itu_x4_dbtp: f64::NEG_INFINITY,
@@ -77,7 +72,6 @@ impl SignalMeasurements {
             per_channel_rms_dbfs: Vec::new(),
             crest_tp_db: 0.0,
             crest_sample_db: 0.0,
-            meter_peak_hold_lin: 0.0,
             meter_peak_hold_dbfs: f64::NEG_INFINITY,
             meter_param: 0.0,
         }
@@ -151,7 +145,6 @@ pub fn measure_signal_block(
 
     let sp_lin = sp_ch.iter().copied().fold(0.0f64, f64::max);
     let sp_db = db_from_peak(sp_lin);
-    let tp_lin = tp_main.peak();
     let tp_db = tp_main.dbtp();
     let itu_db = tp_itu.as_ref().map_or(tp_db, |tp| tp.dbtp());
     let itu_x4_per_channel_dbtp = tp_itu
@@ -173,10 +166,8 @@ pub fn measure_signal_block(
         // validated positive — but `measure_signal` is public and takes any `u32`.
         duration_s: frames as f64 / f64::from(fs.max(1)),
         ratio,
-        sample_peak_lin: sp_lin,
         sample_peak_dbfs: sp_db,
         per_channel_sample_dbfs: sp_ch.iter().map(|&v| db_from_peak(v)).collect(),
-        true_peak_lin: tp_lin,
         true_peak_dbtp: tp_db,
         per_channel_dbtp: tp_main.per_channel_dbtp(),
         itu_x4_dbtp: itu_db,
@@ -193,7 +184,6 @@ pub fn measure_signal_block(
         } else {
             0.0
         },
-        meter_peak_hold_lin: hold_lin,
         meter_peak_hold_dbfs: hold_db,
         meter_param: hold_param,
     }
@@ -560,7 +550,7 @@ mod tests {
         // Observed on this build: metering at a zero rate produces NaN, so the guard is
         // what keeps the meter fields at their "nothing metered" values instead.
         assert!(
-            !m.meter_param.is_nan() && !m.meter_peak_hold_lin.is_nan(),
+            !m.meter_param.is_nan() && !m.meter_peak_hold_dbfs.is_nan(),
             "a zero rate must not put NaN in the meter fields: {m:?}"
         );
         assert_eq!(

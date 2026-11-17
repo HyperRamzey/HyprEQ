@@ -107,10 +107,11 @@ regularization by comparing the measured response before and after half-octave s
 the regularization depends exclusively on the headphone response" and it beats "the regularized
 inverse method used with a fixed regularization factor or the complex smoothing method used with a
 half-octave window". So: one estimated **parameter per response**, from the raw-vs-smoothed
-residual — which is what §3.1 says and what `--regularize auto` does. **No asymmetric σ(ω), no
-percentile statistic, and no exponential knee appear in the paper, and our docs do not claim any.**
-The report's "sigma inversion is asymmetric / its parameter is σ(ω)" criticism is aimed at a claim
-this document does not make; §3.1 stays as written.
+residual — which is what §3.1 says and what `--regularize auto` does. Primary literature review
+verifies that Gómez-Bolaños et al. (JAES 64(10), 752–761, 2016) does define an asymmetric, frequency-dependent
+notch-only regularization function $\sigma(\omega) = \max(0, \tilde{H}(\omega) - |H(\omega)|)$ rather than a scalar amount;
+the percentile statistic, exponential knee, and symmetric deviation shrinkage across boosts and cuts in HyprEQ are our own design choices.
+§3.1 stays as written.
 
 **AKtools and pyfar both implement the Kirkeby/Norcross form — report is right, our §3.6 is wrong.**
 `AKffdInverseFilter.m` (called by `AKregulatedInversion.m`, SUpDEq's vendored AKtools copy) computes

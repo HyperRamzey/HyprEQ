@@ -6,9 +6,10 @@
 //! the smearing that a linear-phase filter spreads symmetrically instead. §3.4 of the roadmap cites
 //! the objective evidence (Li et al., *Applied Acoustics* 2019: transient decay speed correlates with
 //! phase linearity) and the listening thresholds (Liski, Mäkivirta & Välimäki, *IEEE/ACM TASLP* 29,
-//! 2189–2201 (2021): about −0.56 ms of negative and +0.64 ms of positive group delay at threshold for
-//! a pink-noise impulse). The evidence that it is audible at all is contested, which is why this ships
-//! behind `--experimental` rather than as a default or a recommendation.
+//! 2189–2201 (2021): evaluated across the 500 Hz – 4 kHz test band, finding about −0.56 ms of negative
+//! and +0.64 ms of positive group delay at threshold for a pink-noise impulse). The evidence that it is
+//! audible at all is contested, which is why this ships behind `--experimental` rather than as a default
+//! or a recommendation.
 //!
 //! # Why an all-pass stage, and not a two-factor design
 //!
@@ -268,14 +269,33 @@ fn best_window_prefix(prefix: &[f64], n: usize, w: usize) -> usize {
     best
 }
 
-/// Helper for stereo alignment: selects circular start index `s` maximizing joint normalized energy.
-fn best_window_joint(
+/// Helper that restricts window search to valid pre-shift offsets {0} U {n - max_shift .. n}.
+fn best_window_valid_prefix(prefix: &[f64], n: usize, w: usize, max_shift: usize) -> usize {
+    if w == 0 || w >= n {
+        return 0;
+    }
+    let mut best = 0usize;
+    let mut best_sum = prefix[w] - prefix[0];
+    let min_s = n.saturating_sub(max_shift);
+    for s in min_s..n {
+        let sum = prefix[s + w] - prefix[s];
+        if sum > best_sum {
+            best_sum = sum;
+            best = s;
+        }
+    }
+    best
+}
+
+/// Helper for stereo alignment: selects circular start index `s` in {0} U {n - max_shift .. n} maximizing joint normalized energy.
+fn best_window_valid_joint(
     prefix_l: &[f64],
     prefix_r: &[f64],
     energy_l: f64,
     energy_r: f64,
     n: usize,
     w: usize,
+    max_shift: usize,
 ) -> usize {
     if w == 0 || w >= n {
         return 0;
@@ -283,8 +303,9 @@ fn best_window_joint(
     let el = if energy_l > 0.0 { energy_l } else { 1.0 };
     let er = if energy_r > 0.0 { energy_r } else { 1.0 };
     let mut best = 0usize;
-    let mut best_score = f64::NEG_INFINITY;
-    for s in 0..n {
+    let mut best_score = (prefix_l[w] - prefix_l[0]) / el + (prefix_r[w] - prefix_r[0]) / er;
+    let min_s = n.saturating_sub(max_shift);
+    for s in min_s..n {
         let score = (prefix_l[s + w] - prefix_l[s]) / el + (prefix_r[s + w] - prefix_r[s]) / er;
         if score > best_score {
             best_score = score;
@@ -538,6 +559,7 @@ fn reshape_filter(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_adjustment(
     r: Reshaped,
     ir_input: &[f64],
@@ -667,7 +689,7 @@ pub fn linearize_band_stereo_with_budget(
             break;
         }
         if probe >= cap {
-            start = best_window_joint(&rl.prefix, &rr.prefix, rl.energy, rr.energy, n, probe);
+            start = best_window_valid_joint(&rl.prefix, &rr.prefix, rl.energy, rr.energy, n, probe, max_shift);
         }
     }
 
@@ -711,17 +733,10 @@ pub fn linearize_band_with_budget(
             break;
         }
         if probe >= cap {
-            start = best_window_prefix(&r.prefix, n, probe);
+            start = best_window_valid_prefix(&r.prefix, n, probe, max_shift);
         }
     }
     Some(build_adjustment(r, ir, start, taps_after, reached_floor, fs, crossover_hz, budget_ms))
-}
-
-/// The band's group-delay span before the stage ran, ms. Kept on the adjustment by the caller-side
-/// report; see [`DEFAULT_GD_BUDGET_MS`] for the measurement this feeds.
-#[must_use]
-pub fn budget_ms() -> f64 {
-    DEFAULT_GD_BUDGET_MS
 }
 
 /// Report lines for a run that asked for this. Printed only when the stage ran, so the default
@@ -1125,9 +1140,7 @@ mod tests {
     #[test]
     fn best_window_finds_the_dense_stretch_and_discriminates_against_zero() {
         let mut full = vec![0.0; 256];
-        for i in 100..120 {
-            full[i] = 1.0;
-        }
+        full[100..120].fill(1.0);
         let w = 20;
         let chosen = best_window(&full, w);
         assert_eq!(chosen, 100, "best_window must select index 100");

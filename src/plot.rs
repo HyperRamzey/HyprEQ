@@ -1203,9 +1203,9 @@ impl PlotData {
             .filter(|&(t, _)| (-1.0..=4.0).contains(&t))
             .map(|(t, i)| (t, ir_lin_centered[i] / peak_mp))
             .unzip();
-        let span_samples = ((fs as f64 * (250.0 / 48000.0)).round() as usize).max(1);
+        let span_samples = ((fs * (250.0 / 48000.0)).round() as usize).max(1);
         let (mp_t_ms, mp_ir) = if lat == 0 {
-            let lead_n = ((fs as f64 * 0.001).round() as usize).max(2);
+            let lead_n = ((fs * 0.001).round() as usize).max(2);
             let t_ms: Vec<f64> = (0..lead_n)
                 .map(|i| -1.0 + (1.0 - 1e3 / fs) * i as f64 / (lead_n - 1) as f64)
                 .chain((0..span_samples.min(in_.ir_rt.len())).map(|i| i as f64 / fs * 1000.0))
@@ -1216,7 +1216,7 @@ impl PlotData {
                 .collect();
             (t_ms, ir)
         } else {
-            let lead_samples = (((fs as f64 * 0.001).round() as usize).max(1)).min(lat);
+            let lead_samples = (((fs * 0.001).round() as usize).max(1)).min(lat);
             let start = lat - lead_samples;
             let end = in_.ir_rt.len().min(start + span_samples);
             let t_ms: Vec<f64> = (start..end)

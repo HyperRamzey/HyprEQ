@@ -21,7 +21,7 @@
 //! against the reference program, so a line added there is a parity failure; this section
 //! is printed separately for exactly that reason.
 
-use crate::fft::{rfft, Complex64};
+use crate::fft::rfft;
 use crate::pchip::Pchip;
 use crate::wav::comma_sep;
 
@@ -169,6 +169,85 @@ pub fn curve_at(bands: &[Band], ctrl: &[(f64, f64)]) -> Vec<f64> {
     Pchip::new(&nodes, &gains).eval_grid(&bands.iter().map(|b| b.centre_hz).collect::<Vec<_>>())
 }
 
+struct AnalysisCache {
+    window: Vec<f64>,
+    bin_to_band: Vec<Option<usize>>,
+    n: usize,
+    denom: f64,
+}
+
+impl AnalysisCache {
+    fn new(keep: usize, fs: u32, bands: &[Band]) -> Option<Self> {
+        if keep == 0 || fs == 0 || bands.is_empty() {
+            return None;
+        }
+        let n = keep.next_power_of_two().max(16);
+        let mut window = Vec::with_capacity(keep);
+        let mut window_energy = 0.0f64;
+        let factor = 2.0 * std::f64::consts::PI / f64::from(keep as u32);
+        for i in 0..keep {
+            let w = 0.5 - 0.5 * (factor * f64::from(i as u32)).cos();
+            window.push(w);
+            window_energy += w * w;
+        }
+        if window_energy <= 0.0 {
+            return None;
+        }
+        let denom = f64::from(n as u32) * window_energy;
+        let bin_hz = f64::from(fs) / f64::from(n as u32);
+        let spec_len = n / 2 + 1;
+        let first = bands[0].index;
+        let mut bin_to_band = Vec::with_capacity(spec_len);
+        bin_to_band.push(None); // k = 0 (DC)
+        for k in 1..spec_len {
+            let hz = f64::from(k as u32) * bin_hz;
+            let idx = (10.0 * (hz / 1000.0).log10()).round() as i32;
+            let mapping = match usize::try_from(idx - first) {
+                Ok(pos) => match bands.get(pos) {
+                    Some(b) if hz >= b.lo_hz && hz <= b.hi_hz => Some(pos),
+                    _ => None,
+                },
+                Err(_) => None,
+            };
+            bin_to_band.push(mapping);
+        }
+        Some(Self {
+            window,
+            bin_to_band,
+            n,
+            denom,
+        })
+    }
+
+    fn analyze(&self, signal: &[f64], n_bands: usize) -> Vec<f64> {
+        let keep = self.window.len();
+        let mut buf = vec![0.0f64; self.n];
+        for i in 0..keep {
+            buf[i] = signal[i] * self.window[i];
+        }
+        let spec = rfft(&buf, self.n);
+        let mut sums = vec![0.0f64; n_bands];
+        let spec_len = spec.len();
+        for (k, &x) in spec.iter().enumerate().skip(1) {
+            if let Some(pos) = self.bin_to_band[k] {
+                let power = x.re * x.re + x.im * x.im;
+                let doubled = k < spec_len - 1;
+                sums[pos] += if doubled { 2.0 * power } else { power };
+            }
+        }
+        sums.into_iter()
+            .map(|s| {
+                let ms = s / self.denom;
+                if ms.is_finite() && ms > 0.0 {
+                    10.0 * ms.log10()
+                } else {
+                    f64::NEG_INFINITY
+                }
+            })
+            .collect()
+    }
+}
+
 /// Third-octave RMS levels of one channel, in dBFS.
 ///
 /// One Hann-windowed real transform of at most [`ANALYSIS_WINDOW`] samples, then `|X|²`
@@ -185,72 +264,12 @@ pub fn band_levels(signal: &[f64], fs: u32, bands: &[Band]) -> Vec<f64> {
     if signal.is_empty() || fs == 0 || bands.is_empty() {
         return vec![f64::NEG_INFINITY; bands.len()];
     }
-    // Window the record, then pad it — never pad it and window the padding. A taper sized to the
-    // transform stops at its peak where the samples run out, which is a rectangular edge into the
-    // zeros: measured two bands away from a 1 kHz tone, leakage went from -124 dBFS at an exact
-    // power of two to -45 dBFS at 8193 samples, and the level itself read -6.05 instead of -3.01
-    // dBFS because `window_energy` integrated the taper over silence as well.
     let keep = signal.len().min(ANALYSIS_WINDOW);
-    let n = keep.next_power_of_two().max(16);
-    let mut buf = vec![0.0f64; n];
-
-    // Hann, and its energy over the samples that exist, which the normalization divides by.
-    let mut window_energy = 0.0f64;
-    for i in 0..keep {
-        let w = 0.5
-            - 0.5
-                * (2.0 * std::f64::consts::PI * f64::from(i as u32) / f64::from(keep as u32)).cos();
-        buf[i] = signal[i] * w;
-        window_energy += w * w;
+    if let Some(cache) = AnalysisCache::new(keep, fs, bands) {
+        cache.analyze(signal, bands.len())
+    } else {
+        vec![f64::NEG_INFINITY; bands.len()]
     }
-    if window_energy <= 0.0 {
-        return vec![f64::NEG_INFINITY; bands.len()];
-    }
-
-    let spec: Vec<Complex64> = rfft(&buf, n);
-    let denom = f64::from(n as u32) * window_energy;
-    let bin_hz = f64::from(fs) / f64::from(n as u32);
-
-    // Partition, not window. Every bin is given to the band whose centre is nearest in log
-    // frequency; for a 1/3-octave grid that boundary is the geometric mean of two adjacent
-    // centres, which is exactly each band's edge. Summing the bins whose frequency falls
-    // between a band's edges instead would `floor` one edge down and `ceil` the other up,
-    // and a bin shared by two bands is then counted twice: measured on a 60 Hz tone, that
-    // read the neighbouring band 13 dB high.
-    //
-    // DC is dropped rather than folded into the lowest band — no third-octave band contains
-    // it, and a record-player rumble is not bass content.
-    let first = bands[0].index;
-    let mut sums = vec![0.0f64; bands.len()];
-    for (k, &x) in spec.iter().enumerate().skip(1) {
-        let hz = f64::from(k as u32) * bin_hz;
-        let idx = (10.0 * (hz / 1000.0).log10()).round() as i32;
-        let Ok(pos) = usize::try_from(idx - first) else {
-            continue;
-        };
-        let Some(b) = bands.get(pos) else { continue };
-        // The grid is trimmed at both ends, so the nearest centre can lie outside the band
-        // that actually exists; those bins belong to no band.
-        if hz < b.lo_hz || hz > b.hi_hz {
-            continue;
-        }
-        let power = x.re * x.re + x.im * x.im;
-        // A real transform keeps half the spectrum, so interior bins stand for a conjugate
-        // pair. DC was skipped and Nyquist is the final bin, which is not doubled.
-        let doubled = k < spec.len() - 1;
-        sums[pos] += if doubled { 2.0 * power } else { power };
-    }
-
-    sums.into_iter()
-        .map(|s| {
-            let ms = s / denom;
-            if ms.is_finite() && ms > 0.0 {
-                10.0 * ms.log10()
-            } else {
-                f64::NEG_INFINITY
-            }
-        })
-        .collect()
 }
 
 /// The largest boost in the curve and where it sits, and the largest cut.
@@ -284,6 +303,34 @@ fn curve_extremes(ctrl: &[(f64, f64)]) -> (f64, f64, f64, f64) {
 fn worst_levels(planar: &[Vec<f64>], fs: u32, grid: &[Band]) -> (Vec<f64>, usize) {
     let mut worst = vec![f64::NEG_INFINITY; grid.len()];
     let mut analysed = 0usize;
+    if planar.is_empty() || fs == 0 || grid.is_empty() {
+        return (worst, analysed);
+    }
+    let first_keep = planar
+        .iter()
+        .find(|c| !c.is_empty())
+        .map(|c| c.len().min(ANALYSIS_WINDOW))
+        .unwrap_or(0);
+    let all_same = planar
+        .iter()
+        .all(|c| c.is_empty() || c.len().min(ANALYSIS_WINDOW) == first_keep);
+    if all_same && first_keep > 0 {
+        if let Some(cache) = AnalysisCache::new(first_keep, fs, grid) {
+            for ch in planar {
+                if ch.is_empty() {
+                    continue;
+                }
+                analysed = analysed.max(first_keep);
+                let levels = cache.analyze(ch, grid.len());
+                for (w, &v) in worst.iter_mut().zip(&levels) {
+                    if v.is_finite() && v > *w {
+                        *w = v;
+                    }
+                }
+            }
+            return (worst, analysed);
+        }
+    }
     for ch in planar {
         analysed = analysed.max(ch.len().min(ANALYSIS_WINDOW));
         if ch.is_empty() {

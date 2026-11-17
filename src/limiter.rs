@@ -984,15 +984,15 @@ impl Limiter {
             &mut req_heap[..]
         };
         let mut group = 1.0f64;
-        for c in 0..nch {
+        for (c, item) in req_slice.iter_mut().enumerate() {
             let req = self.required(c);
-            req_slice[c] = req;
+            *item = req;
             if req < group {
                 group = req;
             }
         }
-        for c in 0..nch {
-            let mut req = req_slice[c];
+        for (c, &req_val) in req_slice.iter().enumerate() {
+            let mut req = req_val;
             if self.cfg.link_transient > 0.0 {
                 req = blend(req, group, self.cfg.link_transient);
             }

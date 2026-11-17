@@ -42,7 +42,6 @@
 //! `--regularize` is left at its default, so the default output stays byte-identical to the
 //! reference program.
 
-use crate::pchip::pchip_log_interp;
 
 /// The level of a raw measurement, which is what its magnitude has to be reduced by before the
 /// curve can stand for `S`.
@@ -409,6 +408,7 @@ pub fn beta(s_db: f64, policy: &Policy) -> f64 {
 ///
 /// `raw_db` is the measurement *relative to its own reference level* — see [`reference_db`]. The
 /// load is compared against `|S|²`, so an absolute reading is a policy change in disguise.
+#[cfg(test)]
 pub fn regularized_gain_db(raw_db: f64, target_db: f64, beta: f64) -> f64 {
     if !raw_db.is_finite() || !target_db.is_finite() {
         return f64::NAN;
@@ -480,11 +480,21 @@ pub fn beta_at_freqs(raw_f: &[f64], raw_g: &[f64], query_hz: &[f64], policy: &Po
     if raw_f.len() != raw_g.len() || raw_f.len() < 2 {
         return vec![f64::INFINITY; query_hz.len()];
     }
-    let s = deviation(raw_f, raw_g, policy.residual_octave, policy.beta_octave);
+    let valid: Vec<(f64, f64)> = raw_f
+        .iter()
+        .zip(raw_g)
+        .filter(|(&f, &g)| f.is_finite() && f > 0.0 && g.is_finite())
+        .map(|(&f, &g)| (f, g))
+        .collect();
+    if valid.len() < 2 {
+        return vec![f64::INFINITY; query_hz.len()];
+    }
+    let (vf, vg): (Vec<f64>, Vec<f64>) = valid.into_iter().unzip();
+    let s = deviation(&vf, &vg, policy.residual_octave, policy.beta_octave);
     // Interpolate the deviation itself onto the query frequencies. It must not be smoothed a
     // second time here: `deviation` already closes with a 1/6-octave window, and a further
     // half-octave one erases exactly the narrow features the load is supposed to find.
-    let curve = crate::pchip::Pchip::new(raw_f, &s);
+    let curve = crate::pchip::Pchip::new(&vf, &s);
     query_hz
         .iter()
         .map(|&hz| {
@@ -503,6 +513,7 @@ pub fn beta_at_freqs(raw_f: &[f64], raw_g: &[f64], query_hz: &[f64], policy: &Po
 /// uses, so the two paths differ in the regularizer and in nothing else. Frequencies are the
 /// measurement frequencies, so a caller can hand the result straight to
 /// [`crate::ir::synthesize_minimum_phase_ir`] the way it would hand it the plain knots.
+#[cfg(test)]
 #[must_use]
 pub fn regularized_curve(
     raw: &[(f64, f64)],
@@ -516,7 +527,7 @@ pub fn regularized_curve(
     let g: Vec<f64> = raw.iter().map(|&(_, y)| y).collect();
     let tf: Vec<f64> = target.iter().map(|&(x, _)| x).collect();
     let tg: Vec<f64> = target.iter().map(|&(_, y)| y).collect();
-    let target_on_raw = pchip_log_interp(&tf, &tg, &f);
+    let target_on_raw = crate::pchip::Pchip::new(&tf, &tg).eval_grid(&f);
     let s = deviation(&f, &g, policy.residual_octave, policy.beta_octave);
     // Both sides of `S·D` are put on the curve's own reference. They have to move together: the
     // error this produces when the load is zero is `target − raw`, and a shared offset cancels out

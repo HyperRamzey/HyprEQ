@@ -1411,23 +1411,23 @@ fn model_run_applies_true_peak_limiter_to_written_ir_when_enabled() {
         &dir,
         &[
             "-H",
-            "dt770_80",
+            "jbl770nc",
             "--taps",
             "4096",
             "--headroom-db",
-            "-10.0",
+            "6.0",
             "--tp-ceiling",
-            "-10.0",
+            "0.0",
             "--no-plot",
         ],
     );
     assert_eq!(code, Some(0), "run failed: {stderr}");
-    let wav_path = dir.join("dt770_80ohm_f64_48k.wav");
+    let wav_path = dir.join("jbl770nc_f64_48k.wav");
     assert!(wav_path.exists(), "IR wav was not written");
     let wav = hypreq::wav::read_wav(&wav_path).expect("read wav");
     let m = hypreq::measure::measure_signal(&wav.planar, 48000, hypreq::tp::Ratio::X16);
     assert!(
-        m.true_peak_dbtp <= -10.0 + 1e-4,
+        m.true_peak_dbtp <= 0.0 + 1e-4,
         "written IR true peak was not limited to ceiling: got {} dBTP",
         m.true_peak_dbtp
     );
@@ -1470,6 +1470,25 @@ fn bypass_eq_applies_true_peak_limiter_to_music_before_writing() {
         m.true_peak_dbtp <= -4.0 + 1e-4,
         "written passthrough music was not limited to ceiling: got {} dBTP",
         m.true_peak_dbtp
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn non_positive_sample_rate_exits_2_even_with_list_models() {
+    let dir = scratch("bad-fs");
+    let (code1, _, stderr1) = run_in(&dir, &["--fs", "0", "--no-plot"]);
+    assert_eq!(code1, Some(2));
+    assert!(
+        stderr1.contains("error: sample rate must be positive (got 0)"),
+        "{stderr1}"
+    );
+
+    let (code2, _, stderr2) = run_in(&dir, &["--list-models", "--fs", "0"]);
+    assert_eq!(code2, Some(2));
+    assert!(
+        stderr2.contains("error: sample rate must be positive (got 0)"),
+        "{stderr2}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

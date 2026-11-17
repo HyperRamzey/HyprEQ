@@ -286,6 +286,7 @@ pub fn synthesize_minimum_phase_ir(
 ///
 /// Normalizes the hotter ear to `headroom_db` and applies that exact same preamp to both ears,
 /// so the interaural level offset (balance) is preserved rather than erased by independent normalization.
+#[allow(clippy::too_many_arguments)]
 pub fn synthesize_stereo_minimum_phase_ir(
     left_ctrl: &[(f64, f64)],
     right_ctrl: &[(f64, f64)],
@@ -351,7 +352,7 @@ pub fn synthesize_stereo_minimum_phase_ir(
 /// is what keeps a perfectly-zero tail at a finite (very negative) number instead of
 /// `-inf`, exactly as the Python's `+ 1e-25` / `+ 1e-25` does.
 #[must_use]
-pub(crate) fn db_floor(ir: &[f64], n: usize) -> f64 {
+pub fn db_floor(ir: &[f64], n: usize) -> f64 {
     let k = n.min(ir.len());
     let peak = ir[ir.len() - k..]
         .iter()

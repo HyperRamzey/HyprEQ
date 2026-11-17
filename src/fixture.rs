@@ -169,11 +169,21 @@ pub fn pair(measured: Option<Fixture>, target: Option<Fixture>) -> Pairing {
 /// Written out rather than using `match_indices` because the caller needs the *ranges*, to tell an
 /// occurrence of one label apart from an occurrence of another that merely contains it.
 fn ranges(hay: &str, needle: &str) -> Vec<(usize, usize)> {
+    let hay_low = hay.to_ascii_lowercase();
+    let needle_low = needle.to_ascii_lowercase();
+    let hay_bytes = hay.as_bytes();
     let mut out = Vec::new();
     let mut from = 0;
-    while let Some(i) = hay[from..].find(needle) {
-        out.push((from + i, from + i + needle.len()));
-        from += i + needle.len();
+    while let Some(i) = hay_low[from..].find(&needle_low) {
+        let s = from + i;
+        let e = s + needle_low.len();
+        from = s + 1;
+        let start_ok = s == 0 || (!hay_bytes[s - 1].is_ascii_alphanumeric() && hay_bytes[s - 1] != b'_');
+        let end_ok = e == hay.len() || (!hay_bytes[e].is_ascii_alphanumeric() && hay_bytes[e] != b'-' && hay_bytes[e] != b'_');
+        if start_ok && end_ok {
+            out.push((s, e));
+            from = e;
+        }
     }
     out
 }
@@ -275,6 +285,10 @@ mod tests {
     fn a_declared_fixture_must_be_named_in_the_name_too() {
         let name = "Beyerdynamic DT 770 Pro (80 Ω) [GRAS 45CA]";
         assert_eq!(name_conflict(name, Fixture::Gras45ca), None);
+        let name_lower = "Beyerdynamic DT 770 Pro (80 Ω) [gras 45ca]";
+        assert_eq!(name_conflict(name_lower, Fixture::Gras45ca), None);
+        let name_45ca10 = "Beyerdynamic DT 770 Pro (80 Ω) [GRAS 45CA-10]";
+        assert!(name_conflict(name_45ca10, Fixture::Gras45ca).is_some());
         let drift = name_conflict("Beyerdynamic DT 770 Pro (80 Ω)", Fixture::Gras45ca);
         assert!(
             drift.as_deref().is_some_and(|m| m.contains("GRAS 45CA")),

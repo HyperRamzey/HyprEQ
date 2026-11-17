@@ -32,6 +32,7 @@ pub fn i0(x: f64) -> f64 {
 }
 
 /// Element-wise [`i0`], term loop capped at 64 like `hypreq.py`'s array path.
+#[cfg(test)]
 #[must_use]
 pub fn i0_vec(x: &[f64]) -> Vec<f64> {
     let mut res = vec![1.0f64; x.len()];
@@ -96,14 +97,11 @@ pub fn half_kaiser_tail_apply(ir: &mut [f64], tail: usize, beta: f64) {
     }
     let i0_beta = i0(beta);
     let start = ir.len() - tail;
-    let t: Vec<f64> = (0..tail).map(|j| j as f64 / tail as f64).collect();
-    let arg: Vec<f64> = t
-        .iter()
-        .map(|tn| beta * (1.0 - tn * tn).max(0.0).sqrt())
-        .collect();
-    let w = i0_vec(&arg);
+    let inv_tail = 1.0 / tail as f64;
     for (j, r) in ir[start..].iter_mut().enumerate() {
-        *r *= w[j] / i0_beta;
+        let tn = j as f64 * inv_tail;
+        let arg = beta * (1.0 - tn * tn).max(0.0).sqrt();
+        *r *= i0(arg) / i0_beta;
     }
 }
 

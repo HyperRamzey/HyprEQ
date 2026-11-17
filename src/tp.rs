@@ -82,6 +82,7 @@
 //! inversion could creep in.
 
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 /// Taps per phase in Annex 2 §3's table (it prints 12 rows).
 pub const ITU_TAPS: usize = 12;
@@ -310,6 +311,7 @@ impl Ratio {
     /// Multiply-accumulates per input sample: every phase reads the whole history.
     /// Printed with the ratio in `--help`, because the cost is the reason x4 is the
     /// default.
+    #[cfg(test)]
     #[must_use]
     pub fn mac_per_sample(self) -> usize {
         self.n() * self.taps()
@@ -390,6 +392,7 @@ impl Ratio {
     /// gives up loudness it did not have to — but it is still a false number on a meter.
     /// The printed bank has +0.22 dB of passband ripple at f_norm 0.08, which is how a
     /// BS.1770 meter can read a file *louder* than its true peak.
+    #[cfg(test)]
     #[must_use]
     pub fn worst_overread_db(self) -> f64 {
         match self {
@@ -430,6 +433,7 @@ impl Ratio {
     }
 
     /// The two columns of the Attachment 1 table, at f_norm 0.45 and 0.5.
+    #[cfg(test)]
     #[must_use]
     pub fn bound_table(self) -> (f64, f64) {
         (self.bound_db(0.45), self.bound_db(0.5))
@@ -475,11 +479,35 @@ impl std::fmt::Display for Ratio {
     }
 }
 
+fn cached_phases(ratio: Ratio) -> &'static [f64] {
+    static PHASES_X2: OnceLock<Vec<f64>> = OnceLock::new();
+    static PHASES_X4: OnceLock<Vec<f64>> = OnceLock::new();
+    static PHASES_X8: OnceLock<Vec<f64>> = OnceLock::new();
+    static PHASES_X16: OnceLock<Vec<f64>> = OnceLock::new();
+    static PHASES_X32: OnceLock<Vec<f64>> = OnceLock::new();
+
+    let cell = match ratio {
+        Ratio::X2 => &PHASES_X2,
+        Ratio::X4 => &PHASES_X4,
+        Ratio::X8 => &PHASES_X8,
+        Ratio::X16 => &PHASES_X16,
+        Ratio::X32 => &PHASES_X32,
+    };
+    cell.get_or_init(|| {
+        let branches = ratio.branches();
+        let mut flat = Vec::with_capacity(branches.len() * branches[0].len());
+        for row in &branches {
+            flat.extend_from_slice(row);
+        }
+        flat
+    })
+}
+
 /// One polyphase stage: `phases[p][k]`, oldest tap first, over a shift register in
 /// the same order.
 struct Stage {
     /// Flattened phase coefficients, `phases.len()` branches of `taps` each.
-    phases: Vec<f64>,
+    phases: &'static [f64],
     n_phases: usize,
     taps: usize,
     /// This stage's input ring buffer.
@@ -489,13 +517,9 @@ struct Stage {
 
 impl Stage {
     fn new(ratio: Ratio) -> Self {
-        let branches = ratio.branches();
-        let taps = branches[0].len();
-        let n_phases = branches.len();
-        let mut phases = Vec::with_capacity(n_phases * taps);
-        for row in branches.iter() {
-            phases.extend_from_slice(row);
-        }
+        let phases = cached_phases(ratio);
+        let n_phases = ratio.n();
+        let taps = ratio.taps();
         Self {
             phases,
             n_phases,
@@ -580,6 +604,7 @@ fn vertex(a: f64, b: f64, c: f64) -> f64 {
 pub struct Detector {
     stage: Stage,
     peak: f64,
+    #[cfg(test)]
     ratio: Ratio,
     /// Parabolic peak refinement on the over-sampled grid. Off for the printed ITU bank
     /// (x4), which stays exactly what Annex 2 describes so that its number is the one
@@ -601,6 +626,7 @@ impl Detector {
         Self {
             stage: Stage::new(ratio),
             peak: 0.0,
+            #[cfg(test)]
             ratio,
             lag: ratio.group_delay().round() as usize,
             refine: ratio.refines(),
@@ -718,6 +744,7 @@ impl Detector {
         self.peak()
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn ratio(&self) -> Ratio {
         self.ratio
@@ -751,6 +778,7 @@ impl TruePeak {
     }
 
     /// Feed an interleaved block of `channels`-wide frames.
+    #[cfg(test)]
     #[inline]
     pub fn push_interleaved(&mut self, block: &[f64]) {
         let nch = self.chans.len();
@@ -803,6 +831,7 @@ impl TruePeak {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn ratio(&self) -> Ratio {
         self.ratio

@@ -250,6 +250,14 @@ struct Args {
         help_heading = "True-Peak Limiter & Measurements"
     )]
     verify_with: Option<std::path::PathBuf>,
+    /// Equalise a measurement to a target defined on a different test fixture anyway.
+    ///
+    /// Narrower than the word suggests: it overrides exactly one refusal, the one that fires when a
+    /// model's `fixture` and the fixture its target was defined on are different pieces of hardware
+    /// (Olive & Clark, AES 2025). It does not bypass a malformed database, a bad option, or anything
+    /// else, and it prints the refusal it overrode.
+    #[arg(long, help_heading = "Database & Model Selection")]
+    force: bool,
     /// Residual in dB beyond which --verify-with calls a band a failure
     #[arg(
         long,
@@ -454,6 +462,14 @@ fn run(args: Args) -> Result<(), Error> {
         None => args.headphone.clone(),
     };
 
+    // A curve measured on one fixture and equalised to a target *defined* on another is the most
+    // likely way this program produces a confident, wrong filter, and until the fixture had a key
+    // there was nothing to compare. Checked before any file is written, for exactly the models this
+    // invocation is about to put a filter on.
+    for m in used_models(&models, &selected, args.input.is_some(), args.bypass_eq) {
+        fixture_guard(&models, m, args.force)?;
+    }
+
     if let Some(input) = args.input.clone() {
         let model_cfg = if args.bypass_eq {
             None
@@ -491,6 +507,94 @@ fn run(args: Args) -> Result<(), Error> {
         run_model(m, &args, true, &lim_cfg)?;
     }
     Ok(())
+}
+
+/// The figure's title block: the model's name, which is where a database records the fixture a
+/// measurement was made on, and the notch mode for a model that has a notch to speak of.
+///
+/// Pulled out of `run_model` so that "the figure names the fixture it assumed" is a statement a test
+/// can check on a string, rather than a restatement of `title = name.clone()`.
+fn figure_title(model: &hypreq::model::Model, notch_mode: NotchMode) -> String {
+    let mut title = model.name.clone();
+    if model.notch_range_hz.is_some() {
+        title = format!("{title} | Notch: {}", notch_mode.as_str());
+    }
+    title
+}
+
+/// The models this invocation will actually put a filter on.
+///
+/// Spelled out rather than re-derived at each check because the rule "`-H all` with `--input` means
+/// the first model, not all of them" is already implemented inline in the audio path, and a guard
+/// that guessed differently from the code it guards would either refuse runs that work or approve
+/// runs it never looked at.
+fn used_models<'a>(
+    models: &'a Database,
+    selected: &str,
+    input: bool,
+    bypass_eq: bool,
+) -> Vec<&'a hypreq::model::Model> {
+    if bypass_eq {
+        return Vec::new();
+    }
+    match selected {
+        // The audio path picks the first model and says so; a guard looking at all of them would
+        // refuse a run that only ever touches one.
+        "all" if input => models
+            .keys()
+            .first()
+            .and_then(|k| models.get(k))
+            .into_iter()
+            .collect(),
+        "all" => models.models.iter().collect(),
+        key => models.get(key).into_iter().collect(),
+    }
+}
+
+/// Refuse a measurement being equalised to a target defined on a different test fixture.
+///
+/// The check only exists when both sides recorded a fixture; a target with no recorded fixture is
+/// unknown, not compatible, and an unknown pairing is not refused — refusing on the absence of a
+/// claim would punish a database for being honest about what it does not know. `--force` lets a
+/// specific pairing through with a line saying so, because a user who re-measured on another rig may
+/// well want it, and it is their call once it is spelled out to them.
+fn fixture_guard(models: &Database, model: &Model, force: bool) -> Result<(), Error> {
+    use hypreq::fixture::{pair, Pairing};
+    let target = models.target_fixtures.get(&model.target_name).copied();
+    if pair(model.fixture, target) != Pairing::Different {
+        return Ok(());
+    }
+    // A database can record that it inherited a pairing it cannot fix — which is the honest state of
+    // every AutoEq-derived measurement equalised to a Harman target, the shipped three included.
+    // The reason is in the file, so a person reading the database sees the decision; the guard's job
+    // is to make an *unrecorded* pairing loud rather than to overrule a recorded one.
+    if model.fixture_conflict_ok.is_some() {
+        return Ok(());
+    }
+    let measured = model.fixture.expect("a Different pairing has both sides");
+    let defined = target.expect("a Different pairing has both sides");
+    let message = format!(
+        "'{}' was measured on {} (fixture: {}), but the target '{}' was defined on {} \
+         (fixture: {}). Different fixtures present different acoustic transfer impedances, so this \
+         filter would be fitting one rig's curve onto another's; a target is not portable between \
+         them. Choose a target recorded for {}, record the target's real fixture in \
+         'target_fixtures', record the pairing on the model with 'fixture_conflict_ok' and its \
+         reason, or pass --force to equalise anyway. Note that a published curve for one fixture has \
+         no free equivalent for another, which is why the shipped models carry that record.",
+        model.key,
+        measured,
+        measured.key(),
+        model.target_name,
+        defined,
+        defined.key(),
+        measured.key(),
+    );
+    if force {
+        println!("  [Note] {message}");
+        Ok(())
+    } else {
+        usage_error(message)
+    }
 }
 
 /// `--out-bits` accepts exactly these depths.
@@ -615,10 +719,7 @@ fn run_model(
     };
     let notch_mode = notch_mode(args);
 
-    let mut title = model.name.clone();
-    if model.notch_range_hz.is_some() {
-        title = format!("{title} | Notch: {}", notch_mode.as_str());
-    }
+    let title = figure_title(model, notch_mode);
 
     let (active_ctrl, reg_lines) = corrected_curve(model, args)?;
 
@@ -1929,6 +2030,8 @@ mod tests {
             .collect();
         Model {
             derivation: None,
+            fixture: None,
+            fixture_conflict_ok: None,
             key: "capfixture".to_string(),
             name: "Cap Fixture".to_string(),
             short_title: "Cap".to_string(),
@@ -2221,5 +2324,106 @@ mod realized_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+/// Which models a run would actually put a filter on — the set the fixture guard is allowed to
+/// refuse on. Wrong here means refusing a run that touches nothing it complained about, or waving
+/// through a pairing it never looked at.
+mod guard_tests {
+    use super::{figure_title, used_models, Database};
+    use hypreq::model::normalize_model_entry;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    fn db_with(keys: &[(&str, Option<&str>)]) -> Database {
+        let mut targets: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+        targets.insert(
+            "harman_2018".to_string(),
+            vec![(20.0, 0.0), (1000.0, 0.0), (10000.0, 0.0)],
+        );
+        let mut db = Database {
+            targets: targets.clone(),
+            ..Database::default()
+        };
+        for (key, fixture) in keys {
+            let mut cfg = serde_json::json!({
+                "name": key,
+                "raw_pts": [[20.0, 0.0], [1000.0, 0.0], [10000.0, 0.0]],
+                "ctrl_pts": [[20.0, 0.0], [1000.0, 0.0]],
+            });
+            if let Some(f) = fixture {
+                // The loader requires a declared fixture to be named in the model's name too, so a
+                // fixture-bearing test model has to be written the way a real one is.
+                let label = hypreq::fixture::Fixture::parse(f)
+                    .expect("test fixture")
+                    .label();
+                cfg["fixture"] = serde_json::json!(f);
+                cfg["name"] = serde_json::json!(format!("{key} [{label}]"));
+            }
+            let m = normalize_model_entry(key, cfg.as_object().unwrap(), &targets, Path::new("."))
+                .unwrap();
+            db.order.push((*key).to_string());
+            db.models.push(m);
+        }
+        db
+    }
+
+    fn names(models: Vec<&hypreq::model::Model>) -> Vec<String> {
+        models.iter().map(|m| m.key.clone()).collect()
+    }
+
+    #[test]
+    fn every_model_runs_in_model_mode_and_one_in_audio_mode() {
+        let db = db_with(&[("a", None), ("b", None)]);
+        assert_eq!(names(used_models(&db, "all", false, false)), ["a", "b"]);
+        // `-H all` with `--input` is the odd case the audio path resolves by taking the first model
+        // and printing a note about it. The guard has to read that rule the same way, or it refuses
+        // a run over a pairing belonging to a model the run never opens.
+        assert_eq!(names(used_models(&db, "all", true, false)), ["a"]);
+        assert_eq!(names(used_models(&db, "b", true, false)), ["b"]);
+    }
+
+    #[test]
+    fn a_run_that_applies_no_filter_has_no_pairing_to_refuse() {
+        let db = db_with(&[("a", None), ("b", None)]);
+        assert!(used_models(&db, "all", false, true).is_empty());
+        assert!(used_models(&db, "a", true, true).is_empty());
+        // An unresolvable key falls through to the lookup that reports it; the guard must not
+        // invent a refusal for a model that does not exist.
+        assert!(used_models(&db, "nosuch", false, false).is_empty());
+    }
+
+    #[test]
+    fn the_figure_title_carries_the_fixture_the_measurement_came_off() {
+        // The figure is the one artifact a user prints and pins next to the bench, and the fixture is
+        // the fact most likely to be forgotten about it a year later.
+        let db = db_with(&[("g", Some("gras_43ag"))]);
+        let title = figure_title(db.get("g").unwrap(), super::NotchMode::Safe);
+        assert!(
+            title.contains("GRAS 43AG"),
+            "the figure's title does not say which rig it assumed: {title}"
+        );
+        // A model with no notch talks about no notch, whatever the mode was asked for.
+        assert!(!title.contains("Notch"), "{title}");
+        let mut notched = db.get("g").unwrap().clone();
+        notched.notch_range_hz = Some((3000.0, 8000.0));
+        assert!(
+            figure_title(&notched, super::NotchMode::Safe).ends_with("| Notch: safe"),
+            "the notch suffix moved, and the parity harness compares this string"
+        );
+    }
+
+    #[test]
+    fn a_declared_fixture_survives_the_loader_with_its_identity() {
+        // If the loader silently dropped a fixture it could not match, every pairing below would read
+        // as "unknown" and the guard would go quiet without any test noticing.
+        let db = db_with(&[("g", Some("gras_43ag")), ("n", None)]);
+        assert_eq!(
+            db.get("g").and_then(|m| m.fixture.map(|f| f.key())),
+            Some("gras_43ag")
+        );
+        assert_eq!(db.get("n").and_then(|m| m.fixture), None);
     }
 }

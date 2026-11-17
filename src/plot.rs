@@ -2240,6 +2240,8 @@ mod tests {
     fn model() -> Model {
         Model {
             derivation: None,
+            fixture: None,
+            fixture_conflict_ok: None,
             key: "t".into(),
             name: "Test Set".into(),
             short_title: "TEST".into(),

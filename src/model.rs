@@ -151,6 +151,20 @@ pub struct Model {
     pub short_title: String,
     pub file_prefix: String,
     pub rig_info: String,
+    /// Which test fixture this measurement was made on, when the database says.
+    ///
+    /// `rig_info` is prose for a human; this is the same fact in a form that can be compared with
+    /// the fixture a *target curve* was defined on, which is the comparison that decides whether
+    /// equalising this measurement to that target means anything. See [`crate::fixture`].
+    pub fixture: Option<crate::fixture::Fixture>,
+    /// A recorded reason for equalising this measurement to a target defined on another fixture.
+    ///
+    /// The refusal in the CLI is for a person adding a model and picking a target off a list. This
+    /// field is for the other case: a database that *inherited* a pairing it cannot fix, because no
+    /// curve for its fixture has been published. Writing the reason down turns "the tool let it
+    /// through" into "someone decided this, and here is why", and an empty string buys nothing, so it
+    /// is refused.
+    pub fixture_conflict_ok: Option<String>,
     pub target_name: String,
     pub target_pts: Vec<(f64, f64)>,
     pub harm_offset: f64,
@@ -839,6 +853,48 @@ pub fn normalize_model_entry(
     };
 
     let name = str_opt(cfg, "name").unwrap_or_else(|| key.to_string());
+    // A fixture is a claim about the rig, so an unreadable claim is a database error rather than an
+    // absent one. The difference is load-bearing: no fixture means the pairing check switches off,
+    // and a typo must not buy that silence.
+    let fixture = match cfg.get("fixture") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => match crate::fixture::Fixture::parse(text) {
+            Some(f) => Some(f),
+            None => {
+                return err(format!(
+                    "Model '{key}' names unknown fixture '{text}' (choose from {})",
+                    crate::fixture::Fixture::keys_joined()
+                ))
+            }
+        },
+        Some(v) => {
+            return err(format!(
+                "Model '{key}': 'fixture' must be a fixture name, got {v}"
+            ))
+        }
+    };
+    // The key and the prose name are two places to write one fact, and two places is where drift
+    // lives: a model re-measured on another fixture with its key updated and its name left saying
+    // the old one would tell the user one thing while enforcing another.
+    if let Some(f) = fixture {
+        if let Some(problem) = crate::fixture::name_conflict(&name, f) {
+            return err(format!(
+                "Model '{key}' declares fixture '{}', but {problem}",
+                f.key()
+            ));
+        }
+    }
+    match cfg.get("fixture_conflict_ok") {
+        None | Some(Value::Null) => (),
+        Some(Value::String(reason)) if !reason.trim().is_empty() => (),
+        Some(other) => {
+            return err(format!(
+                "Model '{key}': 'fixture_conflict_ok' has to record the reason it accepts a \
+                 foreign-fixture target, got {other}"
+            ))
+        }
+    }
+    let fixture_conflict_ok = str_opt(cfg, "fixture_conflict_ok").filter(|s| !s.trim().is_empty());
     let short_title = str_opt(cfg, "short_title")
         .or_else(|| {
             defaults
@@ -857,6 +913,8 @@ pub fn normalize_model_entry(
         file_prefix: str_opt(cfg, "file_prefix").unwrap_or_else(|| key.to_string()),
         rig_info: str_opt(cfg, "rig_info")
             .unwrap_or_else(|| "IEC 60318-4 (711) Coupler".to_string()),
+        fixture,
+        fixture_conflict_ok,
         target_name,
         target_pts,
         harm_offset,
@@ -886,6 +944,14 @@ pub fn normalize_model_entry(
 #[derive(Default)]
 pub struct Database {
     pub targets: BTreeMap<String, Vec<(f64, f64)>>,
+    /// Which fixture each target curve was *defined* on, where the database records it.
+    ///
+    /// Read from a `target_fixtures` object beside `targets`. It is a separate key rather than a
+    /// richer target value because the reference program reads every `targets` entry as a flat list
+    /// of pairs, and wrapping them in an object would make the two programs disagree about the same
+    /// file. A target absent from this map is a target whose fixture is unknown — which is not the
+    /// same as a target that fits any measurement, and is never reported as though it were checked.
+    pub target_fixtures: BTreeMap<String, crate::fixture::Fixture>,
     /// Model key → model, kept in insertion order so `--headphone all` is
     /// reproducible and matches the Python's dict order.
     pub order: Vec<String>,
@@ -919,6 +985,38 @@ impl Database {
             .map(|&(_, t)| t)?;
         self.get(target).map(move |_| target)
     }
+}
+
+/// Read the optional `target_fixtures` object: `{"harman_2018": "gras_45ca"}`.
+///
+/// A name here that is not a fixture is a database error. Guessing would mean pairing a target with
+/// a rig nobody recorded, which is the exact mistake the key exists to prevent.
+fn target_fixtures_from(
+    raw: &Value,
+) -> Result<BTreeMap<String, crate::fixture::Fixture>, ModelError> {
+    let mut out = BTreeMap::new();
+    let Some(map) = raw.get("target_fixtures").and_then(Value::as_object) else {
+        return Ok(out);
+    };
+    for (name, value) in map {
+        let Some(text) = value.as_str() else {
+            return err(format!(
+                "Target '{name}' has a 'target_fixtures' entry that is not a fixture name: {value}"
+            ));
+        };
+        match crate::fixture::Fixture::parse(text) {
+            Some(f) => {
+                out.insert(name.clone(), f);
+            }
+            None => {
+                return err(format!(
+                    "Target '{name}' names unknown fixture '{text}' (choose from {})",
+                    crate::fixture::Fixture::keys_joined()
+                ))
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn targets_from(raw: &Value) -> BTreeMap<String, Vec<(f64, f64)>> {
@@ -965,6 +1063,7 @@ pub fn load_measurement_database(
 
     let mut db = Database {
         targets: targets.clone(),
+        target_fixtures: target_fixtures_from(&raw_db)?,
         order: Vec::new(),
         models: Vec::new(),
     };
@@ -1551,6 +1650,8 @@ mod tests {
         for k in ["jbl770nc", "dt770_80", "ft1pro"] {
             let m = Model {
                 derivation: None,
+                fixture: None,
+                fixture_conflict_ok: None,
                 key: k.to_string(),
                 name: k.to_string(),
                 short_title: k.to_string(),
@@ -1609,6 +1710,8 @@ mod tests {
         let (raw, ctrl) = notch_fixture();
         let model = Model {
             derivation: None,
+            fixture: None,
+            fixture_conflict_ok: None,
             key: "fixture".to_string(),
             name: "Fixture".to_string(),
             short_title: "Fixture".to_string(),
@@ -1839,5 +1942,145 @@ mod tests {
             "upgrade reordered the file"
         );
         fs::remove_dir_all(&dir).ok();
+    }
+    // --- the fixture a curve was measured on -------------------------------------------------
+    //
+    // A target curve belongs to the fixture it was defined on (Olive & Clark, AES 2025), so the
+    // database has to be able to say which fixture a measurement came from, and say it in a form a
+    // program can compare. These tests are about the *recording*: what counts as a valid claim, and
+    // what counts as a database that is lying about itself.
+
+    fn fixture_entry(fixture: Value, name: &str) -> Map<String, Value> {
+        cfg(json!({
+            "name": name,
+            "fixture": fixture,
+            "raw_pts": offset_raw(),
+            "ctrl_pts": [[20.0, 0.0], [1000.0, 0.0], [10000.0, 0.0]],
+        }))
+    }
+
+    fn loaded(fixture: Value, name: &str) -> Result<Model, ModelError> {
+        normalize_model_entry(
+            "t",
+            &fixture_entry(fixture, name),
+            &targets(flat_target()),
+            Path::new("."),
+        )
+    }
+
+    #[test]
+    fn a_model_can_record_the_fixture_its_rig_describes() {
+        let m = loaded(json!("gras_45ca"), "Test Set [GRAS 45CA]").unwrap();
+        assert_eq!(m.fixture, Some(crate::fixture::Fixture::Gras45ca));
+        // The label is the human string; the key is what an error message quotes.
+        assert_eq!(
+            m.fixture.map(|f| f.key()),
+            Some("gras_45ca"),
+            "the key a refusal would print is not the key the database wrote"
+        );
+    }
+
+    #[test]
+    fn a_model_that_records_no_fixture_claims_nothing() {
+        // Absent means unknown, and unknown is not "compatible with everything" — which is why the
+        // field is an `Option` rather than a fixture that defaults to something plausible.
+        let absent = normalize_model_entry(
+            "t",
+            &cfg(json!({
+                "name": "Test Set",
+                "raw_pts": offset_raw(),
+                "ctrl_pts": [[20.0, 0.0], [1000.0, 0.0]],
+            })),
+            &targets(flat_target()),
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(absent.fixture, None);
+        // An explicit null is the same absence, the way the rest of this loader reads an optional
+        // key rather than punishing the file for writing the key at all.
+        let nulled = normalize_model_entry(
+            "t",
+            &cfg(json!({
+                "name": "Test Set",
+                "fixture": null,
+                "raw_pts": offset_raw(),
+                "ctrl_pts": [[20.0, 0.0], [1000.0, 0.0]],
+            })),
+            &targets(flat_target()),
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(nulled.fixture, None);
+    }
+
+    #[test]
+    fn an_empty_fixture_string_is_refused_rather_than_read_as_absent() {
+        // The dangerous database is the half-filled one: `""` looks like an answered question to a
+        // person skimming the file and like an unanswered one to the code. Reading it as absent is
+        // how a claim goes missing quietly.
+        let e = loaded(json!(""), "Test Set").unwrap_err().to_string();
+        assert!(e.contains("unknown fixture"), "{e}");
+    }
+
+    #[test]
+    fn a_fixture_that_is_not_a_fixture_is_a_database_error_naming_the_choices() {
+        // Same shape as the unknown-target error: this is a broken database, not a bad command line.
+        let e = loaded(json!("gras_45cb"), "Test Set [GRAS 45CA]")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("gras_45cb"), "{e}");
+        assert!(
+            e.contains("gras_45ca"),
+            "the error did not list the choices: {e}"
+        );
+    }
+
+    #[test]
+    fn a_fixture_key_that_disagrees_with_the_name_is_refused() {
+        // Two places to write one fact is where drift lives. A model re-measured on another fixture
+        // with its key updated and its name left behind would tell the user one thing while the
+        // refusal logic enforced another.
+        let e = loaded(json!("gras_45ca"), "Test Set [GRAS 43AG]")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("GRAS 45CA"),
+            "the error did not name the declared fixture: {e}"
+        );
+        let both = loaded(json!("gras_45ca"), "Test Set [GRAS 45CA] [B&K 5128]")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            both.contains("B&K 5128"),
+            "the second fixture went unmentioned: {both}"
+        );
+    }
+
+    #[test]
+    fn a_fixture_written_as_a_label_is_read_as_the_same_fixture() {
+        // A hand-edited database will contain `"fixture": "GRAS 45CA"`. Making someone guess the
+        // snake_case key adds no safety.
+        let m = loaded(json!("GRAS 45CA"), "Test Set [GRAS 45CA]").unwrap();
+        assert_eq!(m.fixture, Some(crate::fixture::Fixture::Gras45ca));
+    }
+
+    #[test]
+    fn target_fixtures_are_read_and_validated() {
+        let ok = target_fixtures_from(&json!({"target_fixtures": {"harman_2018": "gras_45ca"}}))
+            .unwrap();
+        assert_eq!(
+            ok.get("harman_2018"),
+            Some(&crate::fixture::Fixture::Gras45ca)
+        );
+        // No key at all is the shipped shape, and it must stay valid.
+        assert!(target_fixtures_from(&json!({})).unwrap().is_empty());
+        let e = target_fixtures_from(&json!({"target_fixtures": {"harman_2018": "sm7422"}}))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("sm7422") && e.contains("harman_2018"), "{e}");
+        let not_a_name = target_fixtures_from(&json!({"target_fixtures": {"x": 12}}))
+            .unwrap_err()
+            .to_string();
+        assert!(not_a_name.contains("'x'"), "{not_a_name}");
     }
 }

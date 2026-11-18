@@ -283,6 +283,96 @@ struct Args {
         )
     )]
     verify_snr_db: f64,
+    /// Repeated-placement raw measurement CSV (frequency,dB); repeatable
+    #[arg(long, value_name = "CSV", help_heading = "Groundwork (opt-in)")]
+    ensemble_csv: Vec<PathBuf>,
+    /// Masiero & Fels upper-variance weight on 1/6-oct smoothed ensemble curves (0 => median)
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        allow_negative_numbers = true,
+        help_heading = "Groundwork (opt-in)"
+    )]
+    ensemble_alpha: f64,
+    /// Solve the global curvature-constrained box-QP over the 1/48-octave grid
+    #[arg(long, help_heading = "Groundwork (opt-in)")]
+    global_fit: bool,
+    /// Alternative synthesis backend alongside the default FIR
+    #[arg(
+        long,
+        value_name = "BACKEND",
+        default_value = "fir",
+        help_heading = "Groundwork (opt-in)"
+    )]
+    synth: String,
+    /// Peaking bands when --synth peq
+    #[arg(
+        long,
+        default_value_t = 8,
+        value_name = "N",
+        help_heading = "Groundwork (opt-in)"
+    )]
+    peq_bands: usize,
+    /// Target family: harman, diffuse, spatial
+    #[arg(
+        long,
+        value_name = "FAMILY",
+        default_value = "harman",
+        help_heading = "Groundwork (opt-in)"
+    )]
+    target_family: String,
+    /// Bass-shelf trim (dB) of the parameterized target
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        allow_negative_numbers = true,
+        help_heading = "Groundwork (opt-in)"
+    )]
+    target_bass: f64,
+    /// Presence-band trim (dB) of the parameterized target
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        allow_negative_numbers = true,
+        help_heading = "Groundwork (opt-in)"
+    )]
+    target_mid: f64,
+    /// Log-frequency tilt (dB/octave) of the parameterized target
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        allow_negative_numbers = true,
+        help_heading = "Groundwork (opt-in)"
+    )]
+    target_tilt: f64,
+    /// Listening level in phon for the ISO 226:2023 contour-delta compensation
+    #[arg(
+        long,
+        value_name = "PHON",
+        allow_negative_numbers = true,
+        help_heading = "Groundwork (opt-in)"
+    )]
+    listen_spl: Option<f64>,
+    /// External ISO 226:2023 Table 1 JSON (the copyrighted table is not embedded)
+    #[arg(long, value_name = "JSON", help_heading = "Groundwork (opt-in)")]
+    iso226_table: Option<PathBuf>,
+    /// Form factor used for the Harman PPR after --verify-with
+    #[arg(
+        long,
+        value_name = "MODE",
+        default_value = "over-ear",
+        help_heading = "Groundwork (opt-in)"
+    )]
+    ppr_mode: String,
+    /// Baseline target curve CSV (frequency,dB), replacing the database target for this run
+    #[arg(long, value_name = "CSV", help_heading = "Groundwork (opt-in)")]
+    target_csv: Option<PathBuf>,
+    /// Rig-target recipe JSON (baseline CSV path + published shelf constants)
+    #[arg(long, value_name = "JSON", help_heading = "Groundwork (opt-in)")]
+    target_preset: Option<PathBuf>,
+    /// Empirical rig translation JSON (delta mean and sigma, from derive_rig_calibration.py)
+    #[arg(long, value_name = "JSON", help_heading = "Groundwork (opt-in)")]
+    rig_calibration: Option<PathBuf>,
     /// Experimental: flatten the filter's group delay below <Hz>, leaving the magnitude alone
     #[arg(
         long,
@@ -370,6 +460,43 @@ fn run(args: Args) -> Result<(), Error> {
     }
     validate_choice(&args.notch_mode, &NotchMode::CHOICES, "--notch-mode");
     validate_choice(&args.stereo, &hypreq::stereo::Mode::CHOICES, "--stereo");
+    validate_choice(&args.synth, &["fir", "parallel-iir", "peq"], "--synth");
+    validate_choice(
+        &args.target_family,
+        &["harman", "diffuse", "spatial"],
+        "--target-family",
+    );
+    validate_choice(&args.ppr_mode, &["over-ear", "in-ear"], "--ppr-mode");
+    for (name, v) in [
+        ("--ensemble-alpha", args.ensemble_alpha),
+        ("--target-bass", args.target_bass),
+        ("--target-mid", args.target_mid),
+        ("--target-tilt", args.target_tilt),
+    ] {
+        if !v.is_finite() {
+            usage_error(format!("argument {name}: not a number: '{v}'"));
+        }
+    }
+    if args.ensemble_alpha < 0.0 {
+        usage_error("--ensemble-alpha cannot be negative; 0.00 selects the median");
+    }
+    if args.target_csv.is_some() && args.target_preset.is_some() {
+        usage_error(
+            "--target-csv and --target-preset cannot be combined; put the baseline CSV path in the preset",
+        );
+    }
+    if args.peq_bands == 0 || args.peq_bands > 32 {
+        usage_error("--peq-bands must be in 1..=32");
+    }
+    match (args.listen_spl, args.iso226_table.as_ref()) {
+        (Some(phon), Some(_)) if phon.is_finite() && phon > 0.0 => {}
+        (Some(phon), Some(_)) => usage_error(format!(
+            "--listen-spl must be a finite level above 0 phon (got {phon})"
+        )),
+        (Some(_), None) => usage_error("--iso226-table is required with --listen-spl"),
+        (None, Some(_)) => usage_error("--listen-spl is required with --iso226-table"),
+        (None, None) => {}
+    }
     if !args.headroom_db.is_finite() {
         usage_error(format!(
             "argument --headroom-db: not a number: '{}'",
@@ -1068,14 +1195,7 @@ fn run_model(
 
     if args.assess {
         // No audio on this path: the section describes the filter, and says so.
-        print_assessment(
-            &active_ctrl,
-            &[],
-            fs,
-            args,
-            mpv.preamp_db,
-            lim_cfg.enable,
-        );
+        print_assessment(&active_ctrl, &[], fs, args, mpv.preamp_db, lim_cfg.enable);
     }
 
     // mpv wants an absolute path with escaped separators. `absolute` is the lexical
@@ -1226,14 +1346,7 @@ fn run_audio_wav_mode(
                 l1_gain_db(&mpv.ir)
             );
             if args.assess {
-                print_assessment(
-                    &active_ctrl,
-                    &work,
-                    fs,
-                    args,
-                    mpv.preamp_db,
-                    lim_cfg.enable,
-                );
+                print_assessment(&active_ctrl, &work, fs, args, mpv.preamp_db, lim_cfg.enable);
             }
             if let Some(a) = phase.as_ref() {
                 println!("{}", "-".repeat(100));
@@ -1257,9 +1370,10 @@ fn run_audio_wav_mode(
                 // Two ears, two filters: when experimental phase is enabled, both kernels are reshaped
                 // jointly so both channels share identical impulse alignment (0 samples ITD skew)
                 // and identical filter lengths.
-                let ear_phase: Vec<(&str, hypreq::phase::Adjustment)> =
-                    if let Some(crossover) = args.experimental_phase {
-                        let (mut adj_l, mut adj_r) = hypreq::phase::linearize_band_stereo(
+                let ear_phase: Vec<(&str, hypreq::phase::Adjustment)> = if let Some(crossover) =
+                    args.experimental_phase
+                {
+                    let (mut adj_l, mut adj_r) = hypreq::phase::linearize_band_stereo(
                             &left.ir, &right.ir, fs, crossover,
                         )
                         .ok_or_else(|| {
@@ -1270,20 +1384,20 @@ fn run_audio_wav_mode(
                                 f64::from(fs) / 2.0
                             ))
                         })?;
-                        left.ir = std::mem::take(&mut adj_l.ir);
-                        left.energy_pct = adj_l.retained_energy_pct;
-                        left.windowed_floor_dbfs = adj_l.floor_dbfs;
-                        adj_l.full = Vec::new();
+                    left.ir = std::mem::take(&mut adj_l.ir);
+                    left.energy_pct = adj_l.retained_energy_pct;
+                    left.windowed_floor_dbfs = adj_l.floor_dbfs;
+                    adj_l.full = Vec::new();
 
-                        right.ir = std::mem::take(&mut adj_r.ir);
-                        right.energy_pct = adj_r.retained_energy_pct;
-                        right.windowed_floor_dbfs = adj_r.floor_dbfs;
-                        adj_r.full = Vec::new();
+                    right.ir = std::mem::take(&mut adj_r.ir);
+                    right.energy_pct = adj_r.retained_energy_pct;
+                    right.windowed_floor_dbfs = adj_r.floor_dbfs;
+                    adj_r.full = Vec::new();
 
-                        vec![("left", adj_l), ("right", adj_r)]
-                    } else {
-                        Vec::new()
-                    };
+                    vec![("left", adj_l), ("right", adj_r)]
+                } else {
+                    Vec::new()
+                };
                 for (tag, ir) in [("left", &left), ("right", &right)] {
                     // Padded to the width the shared line's `(prefix)   ` occupies, so the two
                     // variants of this line put their numbers in the same column.
@@ -1308,7 +1422,9 @@ fn run_audio_wav_mode(
                 }
                 let channels = work.len();
                 print_phase_block(&ear_phase, false);
-                let filter_lat = ear_phase.first().map_or(0, |(_, adj)| adj.added_latency_samples);
+                let filter_lat = ear_phase
+                    .first()
+                    .map_or(0, |(_, adj)| adj.added_latency_samples);
                 let trim_to_in = args.trim_tail && filter_lat == 0;
                 work = convolve_planar_pair(&work, &left.ir, &right.ir, trim_to_in)
                     .ok_or_else(|| {
@@ -1543,6 +1659,507 @@ fn regularized_ctrl(model: &Model, args: &Args) -> CurveAndReport {
     (curve, lines)
 }
 
+/// The fixture parameters a re-derivation has to reuse, so a target edit does not also silently
+/// change the sub-bass leak discount or the coupler-null taper.
+fn derivation_params(model: &Model) -> (f64, f64, f64) {
+    match model.derivation {
+        Some(d) => (
+            d.hf_taper_start_hz,
+            d.hf_bypass_hz,
+            d.subbass_leak_discount_db,
+        ),
+        None => (model.hf_bypass_hz * 0.88, model.hf_bypass_hz, 0.0),
+    }
+}
+
+/// A user-supplied rig-target recipe: published shelf constants over a baseline curve the user
+/// owns. Copyrighted target tables are never embedded in this MIT crate.
+struct TargetPreset {
+    name: String,
+    baseline: Vec<(f64, f64)>,
+    fixture: Option<hypreq::fixture::Fixture>,
+    family: String,
+    params: hypreq::target::TargetParams,
+    source: String,
+}
+
+fn load_target_preset(path: &Path) -> Result<TargetPreset, Error> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| Error::msg(format!("--target-preset '{}': {e}", path.display())))?;
+    let val: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        Error::msg(format!(
+            "--target-preset '{}': invalid JSON: {e}",
+            path.display()
+        ))
+    })?;
+    let obj = val
+        .as_object()
+        .ok_or_else(|| Error::msg("--target-preset must be a JSON object"))?;
+    let str_field = |k: &str| -> Result<String, Error> {
+        obj.get(k)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| Error::msg(format!("--target-preset needs a string '{k}'")))
+    };
+    let name = str_field("name")?;
+    let source = obj
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unattributed")
+        .to_string();
+    let baseline_rel = str_field("baseline_csv")?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let baseline_path = base_dir.join(&baseline_rel);
+    let rows = hypreq::model::load_csv_points(&baseline_path).map_err(|e| {
+        Error::msg(format!(
+            "--target-preset '{}': baseline '{}': {e}",
+            path.display(),
+            baseline_path.display()
+        ))
+    })?;
+    let baseline: Vec<(f64, f64)> = rows
+        .iter()
+        .filter_map(|p| {
+            let f = *p.first()?;
+            let g = *p.last()?;
+            (f.is_finite() && f > 0.0 && g.is_finite()).then_some((f, g))
+        })
+        .collect();
+    if baseline.len() < 2 {
+        return Err(Error::msg(format!(
+            "--target-preset '{}': baseline '{}' holds fewer than two usable points",
+            path.display(),
+            baseline_path.display()
+        )));
+    }
+    let fixture = match obj.get("fixture") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(text)) => {
+            Some(hypreq::fixture::Fixture::parse(text).ok_or_else(|| {
+                Error::msg(format!(
+                    "--target-preset '{name}' names unknown fixture '{text}' (choose from {})",
+                    hypreq::fixture::Fixture::keys_joined()
+                ))
+            })?)
+        }
+        Some(other) => {
+            return Err(Error::msg(format!(
+                "--target-preset '{name}': 'fixture' must be a string, got {other}"
+            )))
+        }
+    };
+    let family = obj
+        .get("family")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("harman")
+        .to_string();
+    validate_choice(
+        &family,
+        &["harman", "diffuse", "spatial"],
+        "--target-preset family",
+    );
+    let num = |k: &str| -> Result<f64, Error> {
+        obj.get("params")
+            .and_then(|p| p.get(k))
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| Error::msg(format!("--target-preset params.{k} must be numeric")))
+    };
+    let params = hypreq::target::TargetParams {
+        theta_bass: num("bass")?,
+        theta_mid: num("mid")?,
+        theta_tilt: num("tilt")?,
+    };
+    Ok(TargetPreset {
+        name,
+        baseline,
+        fixture,
+        family,
+        params,
+        source,
+    })
+}
+
+/// Everything target-related the curve derivation needs, after CSV/preset substitution.
+struct TargetContext {
+    baseline: Vec<(f64, f64)>,
+    family: hypreq::target::TargetFamily,
+    /// The family actually in force (a recipe may override the CLI default).
+    family_label: String,
+    params: hypreq::target::TargetParams,
+    /// Human-readable attribution of a recipe: name, rig it was defined on, published source.
+    preset_info: Option<String>,
+}
+
+fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
+    let mut baseline = model.target_pts.clone();
+    let mut family = args.target_family.clone();
+    let mut params = groundwork_target_params(args);
+    let mut preset_info: Option<String> = None;
+    if let Some(path) = args.target_csv.as_ref() {
+        let rows = hypreq::model::load_csv_points(path)
+            .map_err(|e| Error::msg(format!("--target-csv '{}': {e}", path.display())))?;
+        baseline = rows
+            .iter()
+            .filter_map(|p| {
+                let f = *p.first()?;
+                let g = *p.last()?;
+                (f.is_finite() && f > 0.0 && g.is_finite()).then_some((f, g))
+            })
+            .collect();
+        if baseline.len() < 2 {
+            return Err(Error::msg(format!(
+                "--target-csv '{}' holds fewer than two usable points",
+                path.display()
+            )));
+        }
+    }
+    if let Some(path) = args.target_preset.as_ref() {
+        let preset = load_target_preset(path)?;
+        baseline = preset.baseline;
+        if args.target_family == "harman" {
+            family = preset.family;
+        }
+        if args.target_bass == 0.0 {
+            params.theta_bass = preset.params.theta_bass;
+        }
+        if args.target_mid == 0.0 {
+            params.theta_mid = preset.params.theta_mid;
+        }
+        if args.target_tilt == 0.0 {
+            params.theta_tilt = preset.params.theta_tilt;
+        }
+        preset_info = Some(format!(
+            "{} ({}) — {}",
+            preset.name,
+            preset
+                .fixture
+                .map(|f| f.key().to_string())
+                .unwrap_or_else(|| "rig unstated".to_string()),
+            preset.source
+        ));
+    }
+    let family_enum = match family.as_str() {
+        "diffuse" => hypreq::target::TargetFamily::DiffuseField,
+        "spatial" => hypreq::target::TargetFamily::SpatialDiffuseSlope,
+        _ => hypreq::target::TargetFamily::Harman,
+    };
+    Ok(TargetContext {
+        baseline,
+        preset_info,
+        family_label: family,
+        family: family_enum,
+        params,
+    })
+}
+
+fn groundwork_target_params(args: &Args) -> hypreq::target::TargetParams {
+    hypreq::target::TargetParams {
+        theta_bass: args.target_bass,
+        theta_mid: args.target_mid,
+        theta_tilt: args.target_tilt,
+    }
+}
+
+fn target_extension_active(args: &Args) -> bool {
+    args.target_family != "harman"
+        || args.target_bass != 0.0
+        || args.target_mid != 0.0
+        || args.target_tilt != 0.0
+        || args.iso226_table.is_some()
+        || args.target_csv.is_some()
+        || args.target_preset.is_some()
+}
+
+/// Re-derive the control curve from `raw` against the (possibly edited) target.
+fn derive_with_target(
+    model: &Model,
+    args: &Args,
+    raw_override: Option<&[(f64, f64)]>,
+    ctx: &TargetContext,
+) -> Result<Vec<(f64, f64)>, Error> {
+    let (taper, bypass, discount) = derivation_params(model);
+    let f_t: Vec<f64> = ctx.baseline.iter().map(|p| p.0).collect();
+    let mut target: Vec<(f64, f64)> = ctx.baseline.clone();
+    if target_extension_active(args) {
+        let vals = hypreq::target::evaluate_target(&ctx.baseline, &f_t, ctx.family, ctx.params);
+        target = f_t.iter().copied().zip(vals).collect();
+    }
+    if let (Some(phon), Some(path)) = (args.listen_spl, args.iso226_table.as_ref()) {
+        let table = hypreq::target::Iso226Table::from_json_file(path)
+            .map_err(|e| Error::msg(format!("--iso226-table: {e}")))?;
+        let delta = table.contour_delta_db(&f_t, phon, 65.0);
+        for ((_, g), d) in target.iter_mut().zip(delta) {
+            *g += d;
+        }
+    }
+    let raw: Vec<Vec<f64>> = match raw_override {
+        Some(curve) => curve.iter().map(|&(f, g)| vec![f, g]).collect(),
+        None => model.raw_pts.clone(),
+    };
+    Ok(hypreq::model::derive_ctrl_pts_from_raw(
+        &raw,
+        &target,
+        model.harm_offset,
+        taper,
+        bypass,
+        discount,
+    ))
+}
+
+/// Result of collapsing repeated placement measurements.
+struct EnsembleOutcome {
+    /// Robust raw curve on the model's own grid, normalised at 1 kHz.
+    raw: Vec<(f64, f64)>,
+    /// `sigma_r(f)` on that grid, for the global fit's variance propagation.
+    sigma: Vec<(f64, f64)>,
+    lines: Vec<String>,
+}
+
+fn normalize_ensemble_curve(raw: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    if raw.len() < 2 {
+        return raw.to_vec();
+    }
+    let (fs, gs): (Vec<f64>, Vec<f64>) = raw.iter().copied().unzip();
+    let at_1k = hypreq::pchip::Pchip::new(&fs, &gs).eval(1000.0);
+    if at_1k.is_finite() {
+        raw.iter().map(|&(f, g)| (f, g - at_1k)).collect()
+    } else {
+        raw.to_vec()
+    }
+}
+
+fn ensemble_stage(args: &Args) -> Result<Option<EnsembleOutcome>, Error> {
+    if args.ensemble_csv.is_empty() {
+        return Ok(None);
+    }
+    let mut curves: Vec<Vec<(f64, f64)>> = Vec::new();
+    for path in &args.ensemble_csv {
+        let rows = hypreq::model::load_csv_points(path)
+            .map_err(|e| Error::msg(format!("--ensemble-csv '{}': {e}", path.display())))?;
+        let pts: Vec<(f64, f64)> = rows
+            .iter()
+            .filter_map(|p| {
+                let f = *p.first()?;
+                let g = *p.last()?;
+                (f.is_finite() && f > 0.0 && g.is_finite()).then_some((f, g))
+            })
+            .collect();
+        if pts.len() >= 2 {
+            curves.push(pts);
+        }
+    }
+    if curves.is_empty() {
+        return Err(Error::msg("--ensemble-csv: no CSV held two usable points"));
+    }
+    let f_min = curves
+        .iter()
+        .flat_map(|c| c.iter().map(|p| p.0))
+        .fold(f64::INFINITY, f64::min);
+    let f_max = curves
+        .iter()
+        .flat_map(|c| c.iter().map(|p| p.0))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let grid = hypreq::global_fit::uniform_log_grid(f_min, f_max, 48);
+    let mode = if args.ensemble_alpha > 0.0 {
+        hypreq::robust_fit::EnsembleMode::UpperVariance {
+            alpha: args.ensemble_alpha,
+        }
+    } else {
+        hypreq::robust_fit::EnsembleMode::Median
+    };
+    let stats = hypreq::robust_fit::analyze_ensemble(&curves, &grid, Some(1.0 / 6.0), mode, 400)
+        .ok_or_else(|| Error::msg("--ensemble-csv: could not resample the placement curves"))?;
+    let raw = normalize_ensemble_curve(
+        &stats
+            .f_hz
+            .iter()
+            .zip(&stats.safe_db)
+            .map(|(&f, &g)| (f, g))
+            .collect::<Vec<_>>(),
+    );
+    let sigma: Vec<(f64, f64)> = stats
+        .f_hz
+        .iter()
+        .zip(&stats.sigma_r_db)
+        .map(|(&f, &s)| (f, s))
+        .collect();
+    let worst = sigma
+        .iter()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|&(f, s)| format!("{s:.2} dB @ {}", hypreq::assess::band_name(f)))
+        .unwrap_or_else(|| "n/a".to_string());
+    let lines = vec![
+        "=== Placement Ensemble ===".to_string(),
+        format!(
+            "  Curves          : {} resampled to {} bins (1/6-oct smoothed)",
+            stats.count,
+            grid.len()
+        ),
+        format!("  Max sigma_r     : {worst}"),
+        format!(
+            "  CI_95 width     : {:.2} dB (whole-curve bootstrap)",
+            stats
+                .ci95_hi_db
+                .iter()
+                .zip(&stats.ci95_lo_db)
+                .map(|(hi, lo)| hi - lo)
+                .fold(0.0f64, f64::max)
+        ),
+    ];
+    Ok(Some(EnsembleOutcome { raw, sigma, lines }))
+}
+
+fn global_fit_stage(
+    ctrl: &[(f64, f64)],
+    model: &Model,
+    args: &Args,
+    sigma: Option<&[(f64, f64)]>,
+    rig_sigma: &[f64],
+) -> Result<CurveAndReport, Error> {
+    if !args.global_fit {
+        return Ok((ctrl.to_vec(), Vec::new()));
+    }
+    let f = hypreq::global_fit::uniform_log_grid(20.0, 20000.0, 48);
+    if f.len() < 3 || ctrl.len() < 2 {
+        return Err(Error::msg(
+            "--global-fit: not enough points to build the grid",
+        ));
+    }
+    let (cf, cg): (Vec<f64>, Vec<f64>) = ctrl.iter().copied().unzip();
+    let err = hypreq::pchip::Pchip::new(&cf, &cg).eval_grid(&f);
+    let k = f.len();
+    let sigma_r = match sigma {
+        Some(s) if s.len() >= 2 => {
+            let (sf, sg): (Vec<f64>, Vec<f64>) = s.iter().copied().unzip();
+            hypreq::fft::interp_grid(&f, &sf, &sg)
+        }
+        _ => vec![0.6; k],
+    };
+    // With an empirical calibration its delta_sigma_db is the rig term; without one, carry a
+    // small conservative allowance rather than silently assuming cross-rig uncertainty is zero.
+    const RIG_SIGMA_DB: f64 = 0.5;
+    let rig_term: Vec<f64> = if rig_sigma.len() == k {
+        rig_sigma.to_vec()
+    } else {
+        vec![RIG_SIGMA_DB; k]
+    };
+    let total_sigma: Vec<f64> = sigma_r
+        .iter()
+        .zip(&rig_term)
+        .map(|(&r, &s)| (r * r + s * s).sqrt())
+        .collect();
+    let q_max = match model.distortion.as_ref() {
+        Some(d) => d.q_max_bounds(&f, &vec![0.0; k], args.listen_spl.unwrap_or(85.0), 3.0, 6.0),
+        None => vec![6.0; k],
+    };
+    let input = hypreq::global_fit::GlobalFitInput {
+        f_hz: f.clone(),
+        raw_error_db: err,
+        total_sigma_db: total_sigma,
+        anchor_db: vec![0.0; k],
+        q_min_db: vec![-12.0; k],
+        q_max_db: q_max,
+    };
+    let res = hypreq::global_fit::solve_global_qp(
+        &input,
+        &hypreq::global_fit::GlobalFitConfig::default(),
+    )
+    .ok_or_else(|| Error::msg("--global-fit: the box-QP could not be factorized"))?;
+    let out: Vec<(f64, f64)> = res
+        .f_hz
+        .iter()
+        .copied()
+        .zip(res.q_db.iter().copied())
+        .collect();
+    let lines = vec![
+        "=== Global Curvature-Constrained Fit ===".to_string(),
+        format!(
+            "  Grid / iterations: {} bins / {} ({})",
+            k,
+            res.iterations,
+            if res.converged {
+                "converged"
+            } else {
+                "max iterations"
+            }
+        ),
+        "  Weights          : w = 1 / (sigma_r^2 + sigma_rig^2), ERB density, floor 0.30 dB"
+            .to_string(),
+    ];
+    Ok((out, lines))
+}
+
+fn synth_stage(
+    ctrl: &[(f64, f64)],
+    args: &Args,
+    fs: u32,
+    prefix: &str,
+) -> Result<CurveAndReport, Error> {
+    if args.synth == "fir" || ctrl.len() < 2 {
+        return Ok((ctrl.to_vec(), Vec::new()));
+    }
+    let (cf, cg): (Vec<f64>, Vec<f64>) = ctrl.iter().copied().unzip();
+    let grid = hypreq::fft::geomspace(20.0, (0.45 * f64::from(fs)).min(20_000.0), 240);
+    let want = hypreq::pchip::Pchip::new(&cf, &cg).eval_grid(&grid);
+    let (pred, lines) = match args.synth.as_str() {
+        "peq" => {
+            let bands = hypreq::synth_alt::fit_peq_cascade(
+                &grid,
+                &want,
+                args.peq_bands,
+                f64::from(fs),
+                1e-4,
+            );
+            let pred = hypreq::synth_alt::cascade_mag_db(&bands, &cf, f64::from(fs));
+            let path = format!("{prefix}_peq.txt");
+            std::fs::write(&path, hypreq::synth_alt::to_equalizer_apo_text(&bands, 0.0))
+                .map_err(|e| Error::msg(format!("cannot write '{path}': {e}")))?;
+            let summary = bands
+                .iter()
+                .map(|b| {
+                    format!(
+                        "{}Hz/{:+.1}dB/Q{:.1}",
+                        hypreq::assess::band_name(b.f0_hz),
+                        b.gain_db,
+                        b.q
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            (
+                pred,
+                vec![
+                    "=== Vicanek Matched PEQ Synthesis ===".to_string(),
+                    format!("  Bands           : {} ({summary})", bands.len()),
+                    format!("  APO preset      : {path}"),
+                ],
+            )
+        }
+        "parallel-iir" => {
+            let bank =
+                hypreq::synth_alt::BankParallelIir::fit_from_ctrl(ctrl, f64::from(fs), 32, 1e-8)
+                    .ok_or_else(|| {
+                        Error::msg("--synth parallel-iir: the IIR fit did not converge")
+                    })?;
+            let pred = bank.eval_mag_db(&cf);
+            (
+                pred,
+                vec![
+                    "=== Bank Fixed-Pole Parallel IIR Synthesis ===".to_string(),
+                    format!(
+                        "  Sections        : {} parallel biquads + d0 {:+.3}",
+                        bank.sections.len(),
+                        bank.d0
+                    ),
+                ],
+            )
+        }
+        other => return Err(Error::msg(format!("unknown --synth backend '{other}'"))),
+    };
+    let out: Vec<(f64, f64)> = cf.iter().copied().zip(pred).collect();
+    Ok((out, lines))
+}
+
 /// The curve to synthesize, and the lines saying what `--regularize` did to get there.
 ///
 /// Regularize first, cap second, always in that order. The cap is a ceiling on what reaches the
@@ -1552,8 +2169,69 @@ fn regularized_ctrl(model: &Model, args: &Args) -> CurveAndReport {
 /// "the regularizer already softens things", would let a boost through that the model's own
 /// metadata forbids: the regularizer shrinks toward a bypass by the *measurement's* deviation, and
 /// has no idea what `safe_cap_db` says about this model's notch.
+///
+/// The groundwork flags are all opt-in: with none of them set this returns the same
+/// `(model.ctrl_pts, empty lines)` as before, so the parity report stays byte-identical.
 fn corrected_curve(model: &Model, args: &Args) -> Result<CurveAndReport, Error> {
-    let (base_ctrl, reg_lines) = regularized_ctrl(model, args);
+    let (mut base_ctrl, mut reg_lines) = regularized_ctrl(model, args);
+    let ctx = target_context(model, args)?;
+    let ensemble = ensemble_stage(args)?;
+    if let Some(e) = ensemble.as_ref() {
+        base_ctrl = derive_with_target(model, args, Some(&e.raw), &ctx)?;
+        reg_lines.extend(e.lines.iter().cloned());
+    } else if target_extension_active(args) {
+        base_ctrl = derive_with_target(model, args, None, &ctx)?;
+        reg_lines.push("=== Parameterized Target ===".to_string());
+        reg_lines.push(format!(
+            "  Family          : {} (bass {:+.2}, mid {:+.2}, tilt {:+.2} dB/oct)",
+            ctx.family_label, ctx.params.theta_bass, ctx.params.theta_mid, ctx.params.theta_tilt
+        ));
+        if let Some(info) = ctx.preset_info.as_ref() {
+            reg_lines.push(format!("  Preset          : {info}"));
+        }
+        if args.target_csv.is_some() {
+            reg_lines.push("  Baseline        : replaced by --target-csv".to_string());
+        }
+    }
+
+    let calibration = match args.rig_calibration.as_ref() {
+        Some(path) => Some(
+            hypreq::fixture::RigCalibration::from_json_file(path)
+                .map_err(|e| Error::msg(format!("--rig-calibration: {e}")))?,
+        ),
+        None => model.rig_calibration.clone(),
+    };
+    let mut rig_sigma: Vec<f64> = Vec::new();
+    if let Some(cal) = calibration.as_ref() {
+        let f: Vec<f64> = base_ctrl.iter().map(|p| p.0).collect();
+        let (mean, sigma) = cal.on_grid(&f);
+        // delta_mean is target-rig minus source-rig for the same headphone: the raw curve moves
+        // by +delta, so the correction built from it moves by -delta.
+        base_ctrl = base_ctrl
+            .iter()
+            .zip(&mean)
+            .map(|((f, g), d)| (*f, g - d))
+            .collect();
+        rig_sigma = sigma;
+        reg_lines.push("=== Empirical Rig Translation ===".to_string());
+        reg_lines.push(format!(
+            "  {} -> {}      : delta_mean subtracted from the correction, delta_sigma feeds the QP",
+            cal.source.key(),
+            cal.target.key()
+        ));
+    }
+
+    if args.global_fit {
+        let sigma = ensemble.as_ref().map(|e| e.sigma.as_slice());
+        let (fitted, lines) = global_fit_stage(&base_ctrl, model, args, sigma, &rig_sigma)?;
+        base_ctrl = fitted;
+        reg_lines.extend(lines);
+    }
+    let fs = fs_hz(args, 48000)?;
+    let (synth_ctrl, synth_lines) = synth_stage(&base_ctrl, args, fs, &model.file_prefix)?;
+    base_ctrl = synth_ctrl;
+    reg_lines.extend(synth_lines);
+
     let active_ctrl = apply_notch_mode(
         &base_ctrl,
         notch_mode(args),
@@ -1629,7 +2307,9 @@ fn print_phase_block(items: &[(&str, hypreq::phase::Adjustment)], is_model_mode:
         println!(
             "  Note                : 'Causal Energy' and the '(after half-Kaiser fade)' floor above are "
         );
-        println!("                        the reshaped filter's; '(unwindowed)' still describes the ");
+        println!(
+            "                        the reshaped filter's; '(unwindowed)' still describes the "
+        );
         println!("                        minimum-phase filter before its tail fade.");
     }
 }
@@ -1718,7 +2398,10 @@ fn run_verification(
     let f_t_min = f_t.iter().cloned().fold(f64::INFINITY, f64::min);
     let f_t_max = f_t.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-    let top = (f64::from(fs) / 2.0).min(20000.0).min(f_raw_max).min(f_t_max);
+    let top = (f64::from(fs) / 2.0)
+        .min(20000.0)
+        .min(f_raw_max)
+        .min(f_t_max);
     let bottom = 20.0f64.max(f_raw_min).max(f_t_min).min(top);
     let grid = if bottom < top {
         hypreq::fft::geomspace(bottom, top, 1200)
@@ -1755,6 +2438,20 @@ fn run_verification(
     println!();
     for line in hypreq::verify::report_lines(&rep, Some(note)) {
         println!("{line}");
+    }
+    // The psychoacoustic read-out is only meaningful once a capture exists, so --verify-with is
+    // its gate. It is a second opinion on the same scored bands, not a replacement for the pass
+    // counts above.
+    let ppr_mode = if args.ppr_mode == "in-ear" {
+        hypreq::psycho::PprMode::InEar
+    } else {
+        hypreq::psycho::PprMode::OverEar
+    };
+    if let Some(summary) = hypreq::verify::psycho_summary(&rep, ppr_mode) {
+        println!();
+        for line in hypreq::verify::psycho_report_lines(&summary, ppr_mode) {
+            println!("{line}");
+        }
     }
     if let Some(d) = dir {
         let out = d.join(format!("{}_verification.csv", model.file_prefix));
@@ -1987,10 +2684,8 @@ pub fn default_out_path(input: &str, ir_tag: &str, limiter: Option<&str>) -> Str
 /// byte-identical reports and two that differ in one path.
 fn upgrade_target(args: &Args) -> (PathBuf, PathBuf) {
     let (data_file, _) = database_paths(args);
-    let explicitly_passed = std::env::args_os().any(|a| {
-        a == "--data-file"
-            || a.to_str().is_some_and(|s| s.starts_with("--data-file="))
-    });
+    let explicitly_passed = std::env::args_os()
+        .any(|a| a == "--data-file" || a.to_str().is_some_and(|s| s.starts_with("--data-file=")));
     if explicitly_passed {
         (args.data_file.clone(), args.data_file.clone())
     } else if data_file == Path::new(hypreq::model::DEFAULT_DATA_FILE) {
@@ -2294,6 +2989,11 @@ mod tests {
             .collect();
         Model {
             derivation: None,
+            acoustic_class: hypreq::fixture::AcousticClass::Unknown,
+            raw_ensemble: Vec::new(),
+            distortion: None,
+            excursion: None,
+            rig_calibration: None,
             fixture: None,
             fixture_conflict_ok: None,
             key: "capfixture".to_string(),
@@ -2475,6 +3175,255 @@ mod tests {
         assert_eq!(format_rate_tag(44100), "44.1k");
         assert_eq!(format_rate_tag(96000), "96k");
         assert_eq!(format_rate_tag(8000), "8k");
+    }
+
+    /// The groundwork flags are additive, not a new default: none of them appears in the
+    /// report or changes the curve on a plain run, which is what keeps parity byte-identical.
+    #[test]
+    fn groundwork_flags_are_all_off_by_default() {
+        let a = argv(&["-H", "hd6xx"]);
+        assert!(a.ensemble_csv.is_empty());
+        assert_eq!(a.ensemble_alpha, 0.0);
+        assert!(!a.global_fit);
+        assert_eq!(a.synth, "fir");
+        assert_eq!(a.peq_bands, 8);
+        assert_eq!(a.target_family, "harman");
+        assert_eq!(a.target_bass, 0.0);
+        assert_eq!(a.target_mid, 0.0);
+        assert_eq!(a.target_tilt, 0.0);
+        assert!(a.listen_spl.is_none());
+        assert!(a.iso226_table.is_none());
+    }
+
+    #[test]
+    fn target_extension_moves_bass_without_touching_the_default_path() {
+        let model = notch_cap_fixture();
+        let plain = argv(&["-H", "hd6xx"]);
+        let (base, lines) = corrected_curve(&model, &plain).expect("plain curve");
+        assert!(lines.is_empty(), "a plain run must stay silent: {lines:?}");
+
+        let tuned = argv(&["-H", "hd6xx", "--target-bass", "4.0"]);
+        let (changed, lines) = corrected_curve(&model, &tuned).expect("tuned curve");
+        assert!(
+            lines.iter().any(|l| l.contains("Parameterized Target")),
+            "the report must say the target was edited: {lines:?}"
+        );
+        let max_move = base
+            .iter()
+            .zip(&changed)
+            .map(|((_, a), (_, b))| (b - a).abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            max_move > 2.0,
+            "a +4 dB bass shelf barely moved the curve: {max_move:.3} dB"
+        );
+    }
+
+    #[test]
+    fn alternative_synth_backends_change_the_curve_and_report_it() {
+        let mut model = notch_cap_fixture();
+        model.file_prefix = format!("synth_test_{}", std::process::id());
+        let base = corrected_curve(&model, &argv(&["-H", "hd6xx"])).unwrap().0;
+
+        for (backend, banner, apo) in [
+            ("peq", "Matched PEQ", true),
+            ("parallel-iir", "Parallel IIR", false),
+        ] {
+            let args = argv(&["-H", "hd6xx", "--synth", backend, "--peq-bands", "6"]);
+            let (curve, lines) =
+                corrected_curve(&model, &args).unwrap_or_else(|e| panic!("{backend}: {e}"));
+            let joined = lines.join("\n");
+            assert!(joined.contains(banner), "{backend}: {joined}");
+            let moved = base
+                .iter()
+                .zip(&curve)
+                .map(|((_, a), (_, b))| (b - a).abs())
+                .fold(0.0f64, f64::max);
+            assert!(moved > 0.01, "{backend} left the curve unchanged");
+            if apo {
+                let path = format!("{}_peq.txt", model.file_prefix);
+                assert!(
+                    std::path::Path::new(&path).exists(),
+                    "{path} was not written"
+                );
+                std::fs::remove_file(path).ok();
+            }
+        }
+    }
+
+    #[test]
+    fn iso226_table_and_listening_level_edit_the_target() {
+        let model = notch_cap_fixture();
+        let dir = std::env::temp_dir().join(format!("hypreq-iso226-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let table = dir.join("table.json");
+        std::fs::write(
+            &table,
+            r#"[
+                {"freq_hz": 1000.0, "alpha_f": 0.30, "l_u": 0.0, "t_f": 2.4},
+                {"freq_hz": 2000.0, "alpha_f": 0.33, "l_u": 0.0, "t_f": 2.4},
+                {"freq_hz": 4000.0, "alpha_f": 0.36, "l_u": 0.0, "t_f": 2.4}
+            ]"#,
+        )
+        .unwrap();
+        let args = argv(&[
+            "-H",
+            "hd6xx",
+            "--listen-spl",
+            "75",
+            "--iso226-table",
+            table.to_str().unwrap(),
+        ]);
+        let (curve, lines) = corrected_curve(&model, &args).expect("iso226 curve");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            lines.iter().any(|l| l.contains("Parameterized Target")),
+            "the contour edit must be reported: {lines:?}"
+        );
+        assert!(curve.iter().all(|p| p.1.is_finite()));
+    }
+
+    #[test]
+    fn target_preset_and_csv_replace_the_baseline_curve() {
+        let model = notch_cap_fixture();
+        let dir = std::env::temp_dir().join(format!("hypreq-preset-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let baseline = dir.join("df.csv");
+        std::fs::write(&baseline, "20,0\n1000,0\n20000,0\n").unwrap();
+        let preset = dir.join("recipe.json");
+        std::fs::write(
+            &preset,
+            serde_json::json!({
+                "name": "test_beta", "fixture": "bk5128", "family": "diffuse",
+                "baseline_csv": "df.csv",
+                "params": {"bass": 6.4, "mid": -1.4, "tilt": 0.0},
+                "source": "unit test"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let with_preset = argv(&["-H", "hd6xx", "--target-preset", preset.to_str().unwrap()]);
+        let (curve, lines) = corrected_curve(&model, &with_preset).expect("preset curve");
+        std::fs::remove_dir_all(&dir).ok();
+        let joined = lines.join("\n");
+        assert!(joined.contains("test_beta"), "{joined}");
+        assert!(joined.contains("bk5128"), "{joined}");
+        assert!(joined.contains("Family          : diffuse"), "{joined}");
+        assert!(curve.iter().all(|p| p.1.is_finite()));
+        let bass = curve.iter().min_by(|a, b| a.0.total_cmp(&b.0)).unwrap().1;
+        assert!(bass > 5.0, "+6.4 dB shelf disappeared: {bass:.3}");
+
+        // A preset and a raw baseline are mutually exclusive in the argument phase; here we only
+        // check that --target-csv alone also changes the curve.
+        let dir2 = std::env::temp_dir().join(format!("hypreq-targetcsv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir2).unwrap();
+        let other = dir2.join("other.csv");
+        std::fs::write(&other, "20,4\n1000,0\n20000,0\n").unwrap();
+        let with_csv = argv(&["-H", "hd6xx", "--target-csv", other.to_str().unwrap()]);
+        let (csv_curve, csv_lines) = corrected_curve(&model, &with_csv).expect("csv curve");
+        std::fs::remove_dir_all(&dir2).ok();
+        assert!(csv_lines.join("\n").contains("replaced by --target-csv"));
+        let csv_bass = csv_curve
+            .iter()
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .unwrap()
+            .1;
+        assert!(csv_bass < bass, "baseline CSV should carry its own +4 dB, not the preset shelf: {csv_bass:.3} vs {bass:.3}");
+    }
+
+    #[test]
+    fn rig_calibration_shifts_the_correction_and_feeds_the_qp() {
+        let model = notch_cap_fixture();
+        let dir = std::env::temp_dir().join(format!("hypreq-rig-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cal = dir.join("cal.json");
+        std::fs::write(
+            &cal,
+            serde_json::json!({
+                "source": "gras_43ag", "target": "bk5128", "acoustic_class": "closed_back",
+                "f_hz": [20.0, 20000.0],
+                "delta_mean_db": [2.0, 2.0],
+                "delta_sigma_db": [0.8, 0.8]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // A flat, uncapped model isolates the translation: delta_mean = +2 dB means the
+        // correction must move by exactly -2 dB everywhere, with no fit or cap in the way.
+        let mut flat = model.clone();
+        flat.ctrl_pts = vec![(20.0, 0.0), (20000.0, 0.0)];
+        flat.notch_range_hz = None;
+        flat.safe_cap_db = 12.0;
+        let flat_plain = corrected_curve(&flat, &argv(&["-H", "hd6xx"])).unwrap().0;
+        let cal_only_args = argv(&["-H", "hd6xx", "--rig-calibration", cal.to_str().unwrap()]);
+        let (flat_cal, _) = corrected_curve(&flat, &cal_only_args).expect("translated curve");
+        let shift = flat_plain
+            .iter()
+            .zip(&flat_cal)
+            .map(|((_, a), (_, b))| a - b)
+            .sum::<f64>()
+            / flat_plain.len() as f64;
+        assert!(
+            (shift - 2.0).abs() < 0.05,
+            "delta_mean +2 dB should lower the correction by 2 dB, got {shift:.3}"
+        );
+
+        let plain = corrected_curve(&model, &argv(&["-H", "hd6xx"])).unwrap().0;
+        let args = argv(&[
+            "-H",
+            "hd6xx",
+            "--rig-calibration",
+            cal.to_str().unwrap(),
+            "--global-fit",
+        ]);
+        let (curve, lines) = corrected_curve(&model, &args).expect("calibrated curve");
+        std::fs::remove_dir_all(&dir).ok();
+        let joined = lines.join("\n");
+        assert!(joined.contains("Empirical Rig Translation"), "{joined}");
+        assert!(joined.contains("gras_43ag"), "{joined}");
+        assert!(
+            joined.contains("Global Curvature-Constrained Fit"),
+            "{joined}"
+        );
+        assert!(curve.iter().all(|p| p.1.is_finite()));
+        assert!(!plain.is_empty());
+    }
+
+    #[test]
+    fn ensemble_and_global_fit_flags_run_end_to_end() {
+        let model = notch_cap_fixture();
+        let dir = std::env::temp_dir().join(format!("hypreq-ensemble-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("placement.csv");
+        let mut text = String::new();
+        for &(f, g) in &[(20.0, 1.0), (1000.0, 0.0), (4000.0, -5.0), (20000.0, 0.0)] {
+            text.push_str(&format!("{f},{g}\n"));
+        }
+        std::fs::write(&csv, text).unwrap();
+        let args = argv(&[
+            "-H",
+            "hd6xx",
+            "--ensemble-csv",
+            csv.to_str().unwrap(),
+            "--ensemble-alpha",
+            "1.5",
+            "--global-fit",
+        ]);
+        let (curve, lines) = corrected_curve(&model, &args).expect("groundwork curve");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            curve.len(),
+            hypreq::global_fit::uniform_log_grid(20.0, 20000.0, 48).len()
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("Placement Ensemble"), "{joined}");
+        assert!(
+            joined.contains("Global Curvature-Constrained Fit"),
+            "{joined}"
+        );
+        assert!(curve.iter().all(|p| p.1.is_finite()));
     }
 }
 

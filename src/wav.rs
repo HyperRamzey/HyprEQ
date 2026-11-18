@@ -10,7 +10,7 @@
 //! details:
 //!
 //! * the **last** `data` chunk wins, the way Python's loop overwrites `data_bytes`
-//!   ([`crate::riff::read_info`] stops at the first one, so it is not used here — it
+//!   (`crate::riff::read_info` stops at the first one, so it is not used here — it
 //!   stays available for callers that want first-chunk semantics);
 //! * `WAVE_FORMAT_EXTENSIBLE` takes its real format from the SubFormat GUID
 //!   (`payload[24]`), so a float extensible file is still read as float;
@@ -310,9 +310,9 @@ fn decode(payload: &[u8], fmt: &Format, name: &str) -> Result<(Vec<f64>, &'stati
 /// is silently truncated at the wrap. The reference shares that arithmetic, so this is
 /// the one place the port is deliberately stricter than it (see `docs/SETUP.md`).
 fn riff_guard(name: &str, data_size: usize, hdr_len: usize) -> Result<()> {
-    let riff = data_size.checked_add(36).ok_or_else(|| {
-        Error::msg(format!("WAV output '{name}' exceeds 4 GiB RIFF limit"))
-    })?;
+    let riff = data_size
+        .checked_add(36)
+        .ok_or_else(|| Error::msg(format!("WAV output '{name}' exceeds 4 GiB RIFF limit")))?;
     if u64::try_from(riff).expect("usize fits in u64") > u64::from(u32::MAX) {
         return Err(Error::msg(format!(
             "WAV output '{name}' exceeds 4 GiB RIFF limit ({riff} bytes)"

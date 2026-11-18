@@ -11,9 +11,10 @@
 #   scripts/grab-sources.sh --out bundle.txt   # write a file instead of the clipboard
 #
 # Selection is from `git ls-files`, so nothing untracked and nothing under target/
-# is ever included. Binaries and files over 2 MB are skipped with a note on stderr.
-# Order is stable: build files, sources, tests, examples, scripts, docs, then prose,
-# so two runs of the same tree paste in the same order.
+# is ever included — `git add` a new file before bundling it. Binaries and files over
+# 2 MB are skipped with a note on stderr. Order is stable: build files, sources, tests,
+# examples, scripts, docs, target recipes, then prose, so two runs of the same tree
+# paste in the same order.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -48,13 +49,17 @@ while (($#)); do
     shift
 done
 
-# Extension sets. `sh` is here because the scripts directory is shell, and `json`
-# is only data, so it stays out until --data asks for it.
+# Extension sets. `sh` is here because the scripts directory is shell, and `json` is
+# mostly data, so it stays out until --data asks for it — with the one exception below.
 code_exts=(rs py sh toml)
 doc_exts=(md)
 data_exts=(json lock)
 # Files with no extension that are still prose a reviewer wants next to the code.
 name_allowlist=(LICENSE THIRD-PARTY-NOTICES NOTICE)
+# JSON under these prefixes is configuration, not measurement data: a target recipe is
+# the input `--target-preset` reads, so a reviewer needs it to read the loader. It is
+# bundled in code and default mode without --data; --docs still means prose only.
+config_prefixes=(targets/)
 
 # What a path must match to be selected, given the mode. Built once.
 wanted=()
@@ -83,6 +88,7 @@ order_groups=(
     "examples/"
     "scripts/"
     "docs/"
+    "targets/"
     "hypreq.py"
     "measurements.json"
     "README.md"
@@ -103,12 +109,23 @@ in_group() {
         *) [[ "$path" == "$group" ]] ;;
     esac
 }
+is_config() {
+    # Is $1 configuration that ships with the code rather than measurement data?
+    local path="$1" p
+    for p in "${config_prefixes[@]}"; do
+        [[ "$path" == "$p"* ]] && return 0
+    done
+    return 1
+}
 matches_ext() {
     local path="$1" e
     for e in "${wanted[@]}"; do
         # shellcheck disable=SC2053  # right-hand side is a pattern on purpose
         [[ "$path" == $e ]] && return 0
     done
+    if [[ "$mode" != "docs" ]] && is_config "$path"; then
+        return 0
+    fi
     if [[ "$mode" != "code" ]]; then
         local base="${path##*/}"
         for allowed in "${name_allowlist[@]}"; do

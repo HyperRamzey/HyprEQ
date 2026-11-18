@@ -7,7 +7,7 @@
 //!
 //! * [`i0`] is the **scalar** power series — the loop the polyphase true-peak bank
 //!   in [`crate::tp`] runs once per phase per tap.
-//! * [`i0_vec`] is the **element-wise** series capped at 64 terms, which is what
+//! * `i0_vec` is the **element-wise** series capped at 64 terms, which is what
 //!   the half-Kaiser tail of a 65 536-tap IR is built from. The cap is not an
 //!   optimisation: it bounds the worst case (`I0(18)` needs ~30 terms) so the
 //!   window cannot spin on a pathological `beta`.

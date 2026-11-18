@@ -98,8 +98,24 @@ pub fn convolve_planar_pair(
     let h_r = crate::fft::rfft(ir_r, n_fft_r);
 
     Some(vec![
-        channel_out_h(&planar[0], n_ir_l, &h_l, n_fft_l, block_len_l, n_in, trim_to_input),
-        channel_out_h(&planar[1], n_ir_r, &h_r, n_fft_r, block_len_r, n_in, trim_to_input),
+        channel_out_h(
+            &planar[0],
+            n_ir_l,
+            &h_l,
+            n_fft_l,
+            block_len_l,
+            n_in,
+            trim_to_input,
+        ),
+        channel_out_h(
+            &planar[1],
+            n_ir_r,
+            &h_r,
+            n_fft_r,
+            block_len_r,
+            n_in,
+            trim_to_input,
+        ),
     ])
 }
 
@@ -135,7 +151,6 @@ fn channel_out_h(
     acc.truncate(out_len.min(acc.len()));
     acc
 }
-
 
 /// `min(65536, n_in)` — split out so the clamp reads as one idea.
 fn block_bound(n_in: usize) -> usize {

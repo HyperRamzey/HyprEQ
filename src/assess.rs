@@ -1259,13 +1259,7 @@ mod tests {
         assert!(d.bands.is_empty(), "no rate, no bands");
 
         // Zero-sample channel must return empty assessment without bogus resolution line.
-        let d_empty = assess(
-            &ctrl,
-            &[vec![]],
-            48_000,
-            DEFAULT_BUDGET_DB,
-            &staging(&ctrl),
-        );
+        let d_empty = assess(&ctrl, &[vec![]], 48_000, DEFAULT_BUDGET_DB, &staging(&ctrl));
         assert_eq!(d_empty.analysed_samples, 0);
         assert_eq!(d_empty.bin_hz, 0.0);
         assert!(d_empty.bands.is_empty());

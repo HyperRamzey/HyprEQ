@@ -2302,6 +2302,11 @@ mod tests {
     fn model() -> Model {
         Model {
             derivation: None,
+            acoustic_class: crate::fixture::AcousticClass::Unknown,
+            raw_ensemble: Vec::new(),
+            distortion: None,
+            excursion: None,
+            rig_calibration: None,
             fixture: None,
             fixture_conflict_ok: None,
             key: "t".into(),
@@ -3557,7 +3562,11 @@ mod tests {
                 }
             })
             .0;
-        assert_eq!(d.mp_t_ms[peak_idx], 0.0, "peak at {} ms", d.mp_t_ms[peak_idx]);
+        assert_eq!(
+            d.mp_t_ms[peak_idx], 0.0,
+            "peak at {} ms",
+            d.mp_t_ms[peak_idx]
+        );
     }
 
     /// The small fixture used by the data-level tests.

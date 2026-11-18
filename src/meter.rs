@@ -18,7 +18,7 @@
 //! `AtomicU32` holding `f32` bits — no lock, and a torn read is impossible.
 //!
 //! The f32 storage width is deliberate and load-bearing: every stored level is rounded
-//! through `f32`, which is where the ≈1.2e-7 m^-1 slope of [`param_to_db`] near the top
+//! through `f32`, which is where the ≈1.2e-7 m^-1 slope of `param_to_db` near the top
 //! of the range comes from. Samples are `f64` everywhere else in this crate; the meter
 //! is a *display* quantity, and matching the reference behaviour matters more here than
 //! the extra 29 bits of dynamic range would.

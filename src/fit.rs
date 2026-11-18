@@ -42,7 +42,6 @@
 //! `--regularize` is left at its default, so the default output stays byte-identical to the
 //! reference program.
 
-
 /// The level of a raw measurement, which is what its magnitude has to be reduced by before the
 /// curve can stand for `S`.
 ///
@@ -432,10 +431,10 @@ pub fn regularized_gain_db(raw_db: f64, target_db: f64, beta: f64) -> f64 {
 /// Shrink an existing correction toward a bypass by the trust factor at that band.
 ///
 /// `raw_db` is the measurement relative to its own reference level, exactly as in
-/// [`regularized_gain_db`]: the load is weighed against `|S|²`, so `S` has to be a normalized
+/// `regularized_gain_db`: the load is weighed against `|S|²`, so `S` has to be a normalized
 /// transfer function rather than an absolute reading of the rig.
 ///
-/// `G_reg = (|S|²·G + β) / (|S|² + β)`. This is [`regularized_gain_db`] with the target taken
+/// `G_reg = (|S|²·G + β) / (|S|² + β)`. This is `regularized_gain_db` with the target taken
 /// to be whatever the correction already implies — `D = S·G`, the compensated response the
 /// curve is asking for — substituted into the same closed form: `|S|·|S·G| = |S|²·G`, the same
 /// numerator. That identity is asserted in the tests, and it is why one policy serves both

@@ -250,16 +250,7 @@ pub fn derived_branches(upsample: usize, taps: usize) -> Vec<Vec<f64>> {
 ///
 /// Serialises as its label (`"x4"`) so a saved settings file says what it means to a
 /// human. Both spellings parse on the command line, per [`Ratio::from_str`].
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Default,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Ratio {
     /// Half-band only. Annex 2: sufficient when the source rate is already high.
     X2,

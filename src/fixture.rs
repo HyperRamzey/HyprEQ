@@ -178,8 +178,12 @@ fn ranges(hay: &str, needle: &str) -> Vec<(usize, usize)> {
         let s = from + i;
         let e = s + needle_low.len();
         from = s + 1;
-        let start_ok = s == 0 || (!hay_bytes[s - 1].is_ascii_alphanumeric() && hay_bytes[s - 1] != b'_');
-        let end_ok = e == hay.len() || (!hay_bytes[e].is_ascii_alphanumeric() && hay_bytes[e] != b'-' && hay_bytes[e] != b'_');
+        let start_ok =
+            s == 0 || (!hay_bytes[s - 1].is_ascii_alphanumeric() && hay_bytes[s - 1] != b'_');
+        let end_ok = e == hay.len()
+            || (!hay_bytes[e].is_ascii_alphanumeric()
+                && hay_bytes[e] != b'-'
+                && hay_bytes[e] != b'_');
         if start_ok && end_ok {
             out.push((s, e));
             from = e;
@@ -224,9 +228,227 @@ pub fn name_conflict(name: &str, declared: Fixture) -> Option<String> {
     None
 }
 
+/// Broad acoustic construction of the headphone, independent of the rig it was measured on.
+///
+/// This is the stratification that decides whether a paired rig-to-rig translation curve may be
+/// borrowed across two headphones at all: the acoustic leakage path of an open-back and the seal
+/// of an in-ear are different objects, so a calibration measured on one cannot be assumed to hold
+/// for the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AcousticClass {
+    OpenBack,
+    ClosedBack,
+    InEar,
+    #[default]
+    Unknown,
+}
+
+impl AcousticClass {
+    /// Read a class from a database string (`"open"`, `"closed"`, `"in_ear"`, …).
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' '], "_")
+            .as_str()
+        {
+            "open" | "open_back" | "openback" => Some(Self::OpenBack),
+            "closed" | "closed_back" | "closedback" | "sealed" => Some(Self::ClosedBack),
+            "in_ear" | "inear" | "iem" | "in_ear_monitor" => Some(Self::InEar),
+            "unknown" | "unspecified" | "" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+}
+
+/// An empirical, impedance-stratified translation between two measurement fixtures.
+///
+/// `delta_mean_db` and `delta_sigma_db` are evaluated on `f_hz`. The mean is what the rig
+/// translation adds to the response; the sigma is the uncertainty that translation carries, and it
+/// is what the global fit must propagate rather than silently treating the translation as exact.
+#[derive(Debug, Clone)]
+pub struct RigCalibration {
+    pub source: Fixture,
+    pub target: Fixture,
+    pub acoustic_class: AcousticClass,
+    pub f_hz: Vec<f64>,
+    pub delta_mean_db: Vec<f64>,
+    pub delta_sigma_db: Vec<f64>,
+}
+
+impl RigCalibration {
+    /// Load an empirical rig translation from JSON:
+    /// `{"source": "gras_43ag", "target": "bk5128", "acoustic_class": "closed_back",
+    ///   "f_hz": [...], "delta_mean_db": [...], "delta_sigma_db": [...]}`.
+    ///
+    /// `delta_mean_db` is `response_on_target_rig − response_on_source_rig` for the *same*
+    /// headphone; `delta_sigma_db` is its uncertainty, including the spread across units and
+    /// acoustic classes. Both are arrays on `f_hz`. No data is embedded: this is user-supplied,
+    /// just like the ISO 226 table.
+    pub fn from_json_file(path: &std::path::Path) -> crate::error::Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        let val: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| crate::error::Error::msg(format!("invalid rig calibration JSON: {e}")))?;
+        Self::from_value(&val)
+    }
+
+    /// Parse a rig calibration from an already-decoded JSON value (inline database entries).
+    pub fn from_value(val: &serde_json::Value) -> crate::error::Result<Self> {
+        let obj = val
+            .as_object()
+            .ok_or_else(|| crate::error::Error::msg("rig calibration must be a JSON object"))?;
+        let fixture_of = |key: &str| -> crate::error::Result<Fixture> {
+            let text = obj
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    crate::error::Error::msg(format!("rig calibration needs a string '{key}'"))
+                })?;
+            Fixture::parse(text).ok_or_else(|| {
+                crate::error::Error::msg(format!(
+                    "rig calibration '{key}' names unknown fixture '{text}' (choose from {})",
+                    Fixture::keys_joined()
+                ))
+            })
+        };
+        let source = fixture_of("source")?;
+        let target = fixture_of("target")?;
+        let acoustic_class = match obj.get("acoustic_class") {
+            None | Some(serde_json::Value::Null) => AcousticClass::Unknown,
+            Some(serde_json::Value::String(text)) => {
+                AcousticClass::parse(text).ok_or_else(|| {
+                    crate::error::Error::msg(format!(
+                        "rig calibration names unknown acoustic_class '{text}'"
+                    ))
+                })?
+            }
+            Some(other) => {
+                return Err(crate::error::Error::msg(format!(
+                    "rig calibration 'acoustic_class' must be a string, got {other}"
+                )))
+            }
+        };
+        let numbers = |key: &str| -> crate::error::Result<Vec<f64>> {
+            let arr = obj
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    crate::error::Error::msg(format!("rig calibration needs an array '{key}'"))
+                })?;
+            arr.iter()
+                .map(|v| {
+                    v.as_f64().ok_or_else(|| {
+                        crate::error::Error::msg(format!(
+                            "rig calibration '{key}' holds a non-numeric value: {v}"
+                        ))
+                    })
+                })
+                .collect()
+        };
+        let f_hz = numbers("f_hz")?;
+        let delta_mean_db = numbers("delta_mean_db")?;
+        let delta_sigma_db = numbers("delta_sigma_db")?;
+        if f_hz.len() < 2
+            || delta_mean_db.len() != f_hz.len()
+            || delta_sigma_db.len() != f_hz.len()
+            || f_hz.windows(2).any(|w| w[1] <= w[0])
+            || f_hz.iter().any(|&f| !f.is_finite() || f <= 0.0)
+            || delta_mean_db
+                .iter()
+                .chain(&delta_sigma_db)
+                .any(|v| !v.is_finite())
+        {
+            return Err(crate::error::Error::msg(
+                "rig calibration needs >= 2 ascending positive frequencies and equal-length finite delta arrays",
+            ));
+        }
+        Ok(Self {
+            source,
+            target,
+            acoustic_class,
+            f_hz,
+            delta_mean_db,
+            delta_sigma_db,
+        })
+    }
+
+    /// Interpolate the calibration (mean and sigma) onto a query grid, clamped at the ends.
+    #[must_use]
+    pub fn on_grid(&self, f_grid: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        if self.f_hz.len() < 2
+            || self.delta_mean_db.len() != self.f_hz.len()
+            || self.delta_sigma_db.len() != self.f_hz.len()
+        {
+            return (vec![0.0; f_grid.len()], vec![0.0; f_grid.len()]);
+        }
+        (
+            crate::fft::interp_grid(f_grid, &self.f_hz, &self.delta_mean_db),
+            crate::fft::interp_grid(f_grid, &self.f_hz, &self.delta_sigma_db),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rig_calibration_parses_and_interpolates_its_delta_curves() {
+        let val = serde_json::json!({
+            "source": "gras_43ag",
+            "target": "bk5128",
+            "acoustic_class": "closed_back",
+            "f_hz": [20.0, 1000.0, 20000.0],
+            "delta_mean_db": [3.0, 1.0, -2.0],
+            "delta_sigma_db": [0.5, 0.3, 0.6],
+        });
+        let cal = RigCalibration::from_value(&val).expect("valid calibration");
+        assert_eq!(cal.source, Fixture::Gras43ag);
+        assert_eq!(cal.target, Fixture::Bk5128);
+        assert_eq!(cal.acoustic_class, AcousticClass::ClosedBack);
+        let (mean, sigma) = cal.on_grid(&[20.0, 1000.0, 20000.0]);
+        assert_eq!(mean, vec![3.0, 1.0, -2.0]);
+        assert_eq!(sigma, vec![0.5, 0.3, 0.6]);
+        let (mid_mean, _) = cal.on_grid(&[500.0]);
+        assert!(mid_mean[0] > 1.0 && mid_mean[0] < 3.0, "{}", mid_mean[0]);
+
+        let bad = serde_json::json!({
+            "source": "gras_43ag", "target": "bk5128",
+            "f_hz": [20.0, 1000.0], "delta_mean_db": [1.0], "delta_sigma_db": [0.3, 0.4],
+        });
+        assert!(
+            RigCalibration::from_value(&bad).is_err(),
+            "length mismatch must be refused"
+        );
+    }
+
+    #[test]
+    fn acoustic_class_parses_the_spellings_a_database_would_use() {
+        assert_eq!(
+            AcousticClass::parse("open_back"),
+            Some(AcousticClass::OpenBack)
+        );
+        assert_eq!(
+            AcousticClass::parse(" OPEN-BACK "),
+            Some(AcousticClass::OpenBack)
+        );
+        assert_eq!(
+            AcousticClass::parse("closed"),
+            Some(AcousticClass::ClosedBack)
+        );
+        assert_eq!(AcousticClass::parse("IEM"), Some(AcousticClass::InEar));
+        assert_eq!(
+            AcousticClass::parse("unspecified"),
+            Some(AcousticClass::Unknown)
+        );
+        assert_eq!(
+            AcousticClass::parse("unknown"),
+            Some(AcousticClass::Unknown)
+        );
+        assert_eq!(AcousticClass::parse("gibberish"), None);
+        assert_eq!(AcousticClass::default(), AcousticClass::Unknown);
+    }
 
     #[test]
     fn every_fixture_round_trips_through_its_key() {

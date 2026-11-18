@@ -1,0 +1,13 @@
+{
+  "name": "harman_beta_2024_bk5128",
+  "fixture": "bk5128",
+  "family": "diffuse",
+  "baseline_csv": "bk5128_df.csv",
+  "params": {
+    "bass": 6.4,
+    "mid": -1.4,
+    "tilt": 0.0
+  },
+  "source": "Sean Olive, CanJam NYC 2024 pilot, as reported by SoundGuys: https://www.soundguys.com/harman-research-targets-the-bruel-kjaer-5128-112247/",
+  "note": "Recipe only. The published B&K 5128 diffuse-field response is measurement data and is NOT embedded here; put your own 5128 DF curve in bk5128_df.csv beside this file (columns: frequency_hz,gain_db). The +6.4 dB shelf below 105 Hz and -1.4 dB shelf above 2.5 kHz are the constants reported for Harman Beta 2024; their realization as TargetParams' 105 Hz and 2.5 kHz basis functions is this project's implementation, not the published curve."
+}

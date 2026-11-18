@@ -700,10 +700,7 @@ mod tests {
         assert!(Ears::from_raw_pts(&[]).is_none());
 
         // Ragged rows where later rows have fewer than 4 columns must not panic.
-        let ragged = vec![
-            vec![20.0, 3.82, 1.27, 2.54],
-            vec![1000.0, -1.0],
-        ];
+        let ragged = vec![vec![20.0, 3.82, 1.27, 2.54], vec![1000.0, -1.0]];
         assert!(Ears::from_raw_pts(&ragged).is_none());
     }
 
@@ -1097,7 +1094,9 @@ mod tests {
         let t = trim(&e, &ctrl, &Policy::fixed(90.0), 6.0);
         assert_eq!(t.level_db, 6.0);
         let lines = report_lines(&m, e.len(), Some(&t));
-        assert!(lines.iter().any(|line| line.contains("balance -6.00 dB cancelled")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("balance -6.00 dB cancelled")));
     }
 
     #[test]

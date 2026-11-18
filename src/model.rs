@@ -199,6 +199,16 @@ pub struct Model {
     /// that ships hand-tuned knots (`ctrl_pts` in the database or a `ctrl_csv`), where there is
     /// no inversion to regularize and a person's curve to negotiate with instead.
     pub derivation: Option<Derivation>,
+    /// Broad acoustic construction, used to stratify empirical rig translations.
+    pub acoustic_class: crate::fixture::AcousticClass,
+    /// Repeated placement measurements, each on the model's own measurement grid.
+    pub raw_ensemble: Vec<Vec<Point>>,
+    /// Multi-SPL nonlinear-distortion sweeps, when the database records them.
+    pub distortion: Option<crate::driver::DistortionProfile>,
+    /// Sub-resonance excursion model, when the database records it.
+    pub excursion: Option<crate::driver::ExcursionModel>,
+    /// Empirical rig translation attached to this model, when the database records one.
+    pub rig_calibration: Option<crate::fixture::RigCalibration>,
 }
 
 /// The fixture shaping a derived control curve was passed through.
@@ -244,11 +254,7 @@ impl Model {
         }
         let f: Vec<f64> = self.raw_pts.iter().map(|p| p[0]).collect();
         let g: Vec<f64> = self.raw_pts.iter().map(|p| point_gain(p)).collect();
-        let raw: Vec<(f64, f64)> = self
-            .raw_pts
-            .iter()
-            .map(|p| (p[0], point_gain(p)))
-            .collect();
+        let raw: Vec<(f64, f64)> = self.raw_pts.iter().map(|p| (p[0], point_gain(p))).collect();
         let knots: Vec<f64> = self.ctrl_pts.iter().map(|&(x, _)| x).collect();
         let loads = crate::fit::beta_at_freqs(&f, &g, &knots, policy);
         // Where the knot sits on the measurement, which is what `|S|²` in the closed form needs —
@@ -357,6 +363,120 @@ fn f64_or(cfg: &Map<String, Value>, key: &str, default: f64) -> f64 {
 
 fn str_opt(cfg: &Map<String, Value>, key: &str) -> Option<String> {
     cfg.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Parse `raw_ensemble` (inline arrays of points) and/or `raw_csvs` (paths, relative to the
+/// database) into repeated-placement measurement curves. Absent keys mean an empty ensemble;
+/// existing databases therefore parse unchanged.
+fn parse_raw_ensemble(
+    key: &str,
+    cfg: &Map<String, Value>,
+    base_dir: &Path,
+) -> Result<Vec<Vec<Point>>, ModelError> {
+    let mut out: Vec<Vec<Point>> = Vec::new();
+    if let Some(arr) = cfg.get("raw_ensemble").and_then(Value::as_array) {
+        for (i, curve) in arr.iter().enumerate() {
+            let rows = curve.as_array().ok_or_else(|| {
+                ModelError(format!("Model '{key}': raw_ensemble[{i}] is not an array"))
+            })?;
+            let mut pts: Vec<Point> = rows
+                .iter()
+                .map(|row| {
+                    row.as_array()
+                        .and_then(|r| r.iter().map(as_f64).collect::<Option<Vec<f64>>>())
+                        .ok_or_else(|| {
+                            ModelError(format!(
+                                "Model '{key}': raw_ensemble[{i}] row is not numeric: {row}"
+                            ))
+                        })
+                })
+                .collect::<Result<Vec<_>, ModelError>>()?;
+            pts = sort_and_dedup_points(&pts);
+            if !pts.is_empty() {
+                out.push(pts);
+            }
+        }
+    }
+    if let Some(paths) = cfg.get("raw_csvs").and_then(Value::as_array) {
+        for (i, path) in paths.iter().enumerate() {
+            let rel = path.as_str().ok_or_else(|| {
+                ModelError(format!("Model '{key}': raw_csvs[{i}] is not a path string"))
+            })?;
+            let mut pts = load_csv_points(&base_dir.join(rel))?;
+            pts = sort_and_dedup_points(&pts);
+            if !pts.is_empty() {
+                out.push(pts);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Parse multi-SPL distortion sweeps: `[{"spl_db": 94, "points": [[f, d], ...]}, ...]`.
+fn parse_distortion(
+    key: &str,
+    cfg: &Map<String, Value>,
+) -> Result<Option<crate::driver::DistortionProfile>, ModelError> {
+    let Some(arr) = cfg.get("distortion_sweeps").and_then(Value::as_array) else {
+        return Ok(None);
+    };
+    let mut sweeps = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let spl_db = item.get("spl_db").and_then(as_f64).ok_or_else(|| {
+            ModelError(format!(
+                "Model '{key}': distortion_sweeps[{i}] has no numeric 'spl_db'"
+            ))
+        })?;
+        let pts = item
+            .get("points")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                ModelError(format!(
+                    "Model '{key}': distortion_sweeps[{i}] has no 'points' array"
+                ))
+            })?
+            .iter()
+            .map(|row| {
+                row.as_array()
+                    .and_then(|r| r.iter().map(as_f64).collect::<Option<Vec<f64>>>())
+                    .filter(|p| p.len() >= 2)
+                    .map(|p| (p[0], *p.last().unwrap()))
+                    .ok_or_else(|| {
+                        ModelError(format!(
+                            "Model '{key}': distortion_sweeps[{i}] row is not numeric: {row}"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, ModelError>>()?;
+        sweeps.push(crate::driver::DistortionSweep {
+            spl_db,
+            points: pts,
+        });
+    }
+    Ok(Some(crate::driver::DistortionProfile { sweeps }))
+}
+
+/// Parse the sub-resonance excursion model: `{"fs_hz": 45, "ref_xmax_spl_db": 96}`.
+fn parse_excursion(
+    key: &str,
+    cfg: &Map<String, Value>,
+) -> Result<Option<crate::driver::ExcursionModel>, ModelError> {
+    let Some(obj) = cfg.get("excursion").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    let fs_hz = obj
+        .get("fs_hz")
+        .and_then(as_f64)
+        .ok_or_else(|| ModelError(format!("Model '{key}': 'excursion.fs_hz' must be numeric")))?;
+    let ref_xmax_spl_db = obj.get("ref_xmax_spl_db").and_then(as_f64).ok_or_else(|| {
+        ModelError(format!(
+            "Model '{key}': 'excursion.ref_xmax_spl_db' must be numeric"
+        ))
+    })?;
+    Ok(Some(crate::driver::ExcursionModel {
+        fs_hz,
+        ref_xmax_spl_db,
+    }))
 }
 
 /// Sort measurement points by ascending frequency, last write winning on a repeated
@@ -923,9 +1043,48 @@ pub fn normalize_model_entry(
         })
         .unwrap_or_else(|| name.clone());
 
+    // Optional extensions: absent keys leave every one of these at its empty/default value, so
+    // the shipped measurements.json parses to exactly the model it always did.
+    let acoustic_class = match cfg.get("acoustic_class") {
+        None | Some(Value::Null) => crate::fixture::AcousticClass::Unknown,
+        Some(Value::String(text)) => crate::fixture::AcousticClass::parse(text)
+            .ok_or_else(|| ModelError(format!("Model '{key}': unknown acoustic_class '{text}'")))?,
+        Some(other) => {
+            return err(format!(
+                "Model '{key}': 'acoustic_class' must be a string, got {other}"
+            ))
+        }
+    };
+    let raw_ensemble = parse_raw_ensemble(key, cfg, base_dir)?;
+    let distortion = parse_distortion(key, cfg)?;
+    let excursion = parse_excursion(key, cfg)?;
+    // A calibration is either inline or a path to a user-supplied JSON file. Curves (and their
+    // uncertainty) are never embedded in this MIT crate, exactly like the ISO 226 table.
+    let rig_calibration = match cfg.get("rig_calibration") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(rel)) => Some(
+            crate::fixture::RigCalibration::from_json_file(&base_dir.join(rel))
+                .map_err(|e| ModelError(format!("Model '{key}': rig_calibration: {e}")))?,
+        ),
+        Some(Value::Object(map)) => Some(
+            crate::fixture::RigCalibration::from_value(&Value::Object(map.clone()))
+                .map_err(|e| ModelError(format!("Model '{key}': rig_calibration: {e}")))?,
+        ),
+        Some(other) => {
+            return err(format!(
+                "Model '{key}': 'rig_calibration' must be an object or a path, got {other}"
+            ))
+        }
+    };
+
     Ok(Model {
         key: key.to_string(),
         derivation,
+        acoustic_class,
+        raw_ensemble,
+        distortion,
+        excursion,
+        rig_calibration,
         plot_meta,
         name,
         short_title,
@@ -1267,11 +1426,11 @@ mod tests {
     #[test]
     fn sort_and_dedup_rejects_single_column_and_non_finite_gains() {
         let pts = vec![
-            pt(&[100.0]),               // 1-column row must be dropped
-            pt(&[200.0, f64::NAN]),     // NaN gain must be dropped
-            pt(&[300.0, f64::INFINITY]),// inf gain must be dropped
-            pt(&[400.0, 1.0, f64::NAN]),// non-finite in any gain column must be dropped
-            pt(&[500.0, 2.5]),          // valid
+            pt(&[100.0]),                // 1-column row must be dropped
+            pt(&[200.0, f64::NAN]),      // NaN gain must be dropped
+            pt(&[300.0, f64::INFINITY]), // inf gain must be dropped
+            pt(&[400.0, 1.0, f64::NAN]), // non-finite in any gain column must be dropped
+            pt(&[500.0, 2.5]),           // valid
         ];
         let got = sort_and_dedup_points(&pts);
         assert_eq!(got.len(), 1);
@@ -1503,6 +1662,57 @@ mod tests {
     }
 
     #[test]
+    fn optional_groundwork_keys_parse_and_default_to_absent() {
+        let targets = targets(flat_target());
+        let plain = normalize_model_entry(
+            "t",
+            &cfg(json!({ "raw_pts": offset_raw() })),
+            &targets,
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(plain.acoustic_class, crate::fixture::AcousticClass::Unknown);
+        assert!(plain.raw_ensemble.is_empty());
+        assert!(plain.distortion.is_none());
+        assert!(plain.excursion.is_none());
+
+        let rich = normalize_model_entry(
+            "t",
+            &cfg(json!({
+                "raw_pts": offset_raw(),
+                "acoustic_class": "open_back",
+                "raw_ensemble": [
+                    [[20, 0], [1000, 0], [20000, 0]],
+                    [[20, 1], [1000, 0.5], [20000, 1]],
+                ],
+                "distortion_sweeps": [
+                    {"spl_db": 94, "points": [[20, 1.5], [1000, 0.2]]},
+                    {"spl_db": 104, "points": [[20, 5], [1000, 0.4]]},
+                ],
+                "excursion": {"fs_hz": 45, "ref_xmax_spl_db": 96},
+                "rig_calibration": {
+                    "source": "gras_43ag", "target": "bk5128", "acoustic_class": "closed_back",
+                    "f_hz": [20, 1000, 20000],
+                    "delta_mean_db": [3.0, 1.0, -2.0],
+                    "delta_sigma_db": [0.5, 0.3, 0.6]
+                },
+            })),
+            &targets,
+            Path::new("."),
+        )
+        .unwrap();
+        assert_eq!(rich.acoustic_class, crate::fixture::AcousticClass::OpenBack);
+        assert_eq!(rich.raw_ensemble.len(), 2);
+        assert_eq!(rich.distortion.as_ref().unwrap().sweeps.len(), 2);
+        let exc = rich.excursion.unwrap();
+        assert!((exc.fs_hz - 45.0).abs() < 1e-12);
+        assert!((exc.ref_xmax_spl_db - 96.0).abs() < 1e-12);
+        let cal = rich.rig_calibration.expect("inline calibration");
+        assert_eq!(cal.source, crate::fixture::Fixture::Gras43ag);
+        assert_eq!(cal.delta_mean_db.len(), 3);
+    }
+
+    #[test]
     fn null_or_blank_ctrl_csv_is_not_a_manual_curve() {
         // `"ctrl_csv": null` / `""` names no file, so it must not switch 1 kHz
         // normalisation off the way the reference's `"ctrl_csv" in cfg` test did.
@@ -1678,6 +1888,11 @@ mod tests {
         for k in ["jbl770nc", "dt770_80", "ft1pro"] {
             let m = Model {
                 derivation: None,
+                acoustic_class: crate::fixture::AcousticClass::Unknown,
+                raw_ensemble: Vec::new(),
+                distortion: None,
+                excursion: None,
+                rig_calibration: None,
                 fixture: None,
                 fixture_conflict_ok: None,
                 key: k.to_string(),
@@ -1738,6 +1953,11 @@ mod tests {
         let (raw, ctrl) = notch_fixture();
         let model = Model {
             derivation: None,
+            acoustic_class: crate::fixture::AcousticClass::Unknown,
+            raw_ensemble: Vec::new(),
+            distortion: None,
+            excursion: None,
+            rig_calibration: None,
             fixture: None,
             fixture_conflict_ok: None,
             key: "fixture".to_string(),

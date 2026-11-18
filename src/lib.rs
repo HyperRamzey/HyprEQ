@@ -55,10 +55,12 @@
 //! | [`assess`] | Content-demand third-octave spectrum assessment against headroom |
 //! | [`convolve`] | Overlap-add FFT convolution against planar FIRs |
 //! | [`dither`] | The exact NumPy PCG64 stream that the TPDF dither is drawn from |
+//! | [`driver`] | Level-dependent distortion and sub-resonance excursion boost bounds |
 //! | [`error`] | The crate's single error type |
 //! | [`fft`] | NumPy-convention FFT wrappers over `rustfft` |
 //! | [`fit`] | Octave-band smoothing, deviation, quantile, and regularized curve inversion |
 //! | [`fixture`] | Measurement rig and target fixture compatibility detection |
+//! | [`global_fit`] | Pentadiagonal LDL^T + over-relaxed ADMM box-QP global curve fit |
 //! | [`ir`] | Hilbert-cepstral minimum-phase synthesis, notch modes, audit CSV |
 //! | [`limiter`] | Two-stage true-peak ceiling limiter with lookahead and linking |
 //! | [`limiter_cfg`] | CLI-facing limiter configuration over [`limiter`], default `x16` |
@@ -68,9 +70,13 @@
 //! | [`pchip`] | Fritsch–Carlson monotone cubic in `log10(f)` |
 //! | [`phase`] | Experimental mixed-phase band group-delay linearization |
 //! | [`plot`] | Four-panel PNG verification figure renderer |
+//! | [`psycho`] | ERB/roex excitation, Harman PPR, complex fractional-octave smoothing |
 //! | [`pyfmt`] | Python-style format string and float printer |
 //! | [`riff`] | RIFF header writer/reader, extensible channel masks |
+//! | [`robust_fit`] | Ensemble MAD statistics and whole-curve bootstrap confidence intervals |
 //! | [`stereo`] | Interaural L/R mismatch analysis, balance, and per-ear trim |
+//! | [`synth_alt`] | Vicanek matched PEQ, Bank parallel IIR, NUPOLS partition schedule |
+//! | [`target`] | Parameterized targets, Bradley–Terry preference learner, ISO 226 delta |
 //! | [`tp`] | ITU-R BS.1770-5 true-peak detector, 4x–32x polyphase interpolators |
 //! | [`verify`] | Third-octave prediction-vs-capture acoustic verifier |
 //! | [`wav`] | RIFF reader (PCM/float/extensible), IEEE-float and TPDF-dithered PCM writers |
@@ -83,10 +89,12 @@ pub mod accum;
 pub mod assess;
 pub mod convolve;
 pub mod dither;
+pub mod driver;
 pub mod error;
 pub mod fft;
 pub mod fit;
 pub mod fixture;
+pub mod global_fit;
 pub mod ir;
 pub mod limiter;
 pub mod limiter_cfg;
@@ -96,9 +104,13 @@ pub mod model;
 pub mod pchip;
 pub mod phase;
 pub mod plot;
+pub mod psycho;
 pub mod pyfmt;
 pub mod riff;
+pub mod robust_fit;
 pub mod stereo;
+pub mod synth_alt;
+pub mod target;
 pub mod tp;
 pub mod verify;
 pub mod wav;

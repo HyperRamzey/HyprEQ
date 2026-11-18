@@ -376,18 +376,21 @@ fn smallest_shift_stereo(
 ) -> Option<(usize, f64, f64)> {
     let (fl, el, kl) = window_passes(&rl.full, &rl.prefix, n, rl.energy, rl.budget_energy, 0, w);
     if fl && el {
-        let (fr, er, kr) = window_passes(&rr.full, &rr.prefix, n, rr.energy, rr.budget_energy, 0, w);
+        let (fr, er, kr) =
+            window_passes(&rr.full, &rr.prefix, n, rr.energy, rr.budget_energy, 0, w);
         if fr && er {
             return Some((0, kl, kr));
         }
     }
     for shift in 1..=max_shift {
         let s = n - shift;
-        let (fl, el, kl) = window_passes(&rl.full, &rl.prefix, n, rl.energy, rl.budget_energy, s, w);
+        let (fl, el, kl) =
+            window_passes(&rl.full, &rl.prefix, n, rl.energy, rl.budget_energy, s, w);
         if !fl || !el {
             continue;
         }
-        let (fr, er, kr) = window_passes(&rr.full, &rr.prefix, n, rr.energy, rr.budget_energy, s, w);
+        let (fr, er, kr) =
+            window_passes(&rr.full, &rr.prefix, n, rr.energy, rr.budget_energy, s, w);
         if fr && er {
             return Some((s, kl, kr));
         }
@@ -504,8 +507,14 @@ fn reshape_filter(
             integral
         };
 
-        let min_want = band_bins.iter().map(|&i| mean_gd - gd_now[i]).fold(f64::INFINITY, f64::min);
-        let max_want = band_bins.iter().map(|&i| mean_gd - gd_now[i]).fold(f64::NEG_INFINITY, f64::max);
+        let min_want = band_bins
+            .iter()
+            .map(|&i| mean_gd - gd_now[i])
+            .fold(f64::INFINITY, f64::min);
+        let max_want = band_bins
+            .iter()
+            .map(|&i| mean_gd - gd_now[i])
+            .fold(f64::NEG_INFINITY, f64::max);
         let mut lo = min_want - budget_ms - 1.0;
         let mut hi = max_want + budget_ms + 1.0;
         for _ in 0..48 {
@@ -528,7 +537,10 @@ fn reshape_filter(
             continue;
         }
         running += df_to_rad(freq[i - 1], freq[i]) * 0.5 * (correction[i] + correction[i - 1]);
-        if correction[i - 1] != 0.0 || correction[i] != 0.0 || (!band_bins.is_empty() && i <= band_bins[0]) {
+        if correction[i - 1] != 0.0
+            || correction[i] != 0.0
+            || (!band_bins.is_empty() && i <= band_bins[0])
+        {
             new_phase[i - 1] = phase_u[i - 1] + running;
         }
     }
@@ -689,12 +701,32 @@ pub fn linearize_band_stereo_with_budget(
             break;
         }
         if probe >= cap {
-            start = best_window_valid_joint(&rl.prefix, &rr.prefix, rl.energy, rr.energy, n, probe, max_shift);
+            start = best_window_valid_joint(
+                &rl.prefix, &rr.prefix, rl.energy, rr.energy, n, probe, max_shift,
+            );
         }
     }
 
-    let adj_l = build_adjustment(rl, ir_l, start, taps_after, reached_floor, fs, crossover_hz, budget_ms);
-    let adj_r = build_adjustment(rr, ir_r, start, taps_after, reached_floor, fs, crossover_hz, budget_ms);
+    let adj_l = build_adjustment(
+        rl,
+        ir_l,
+        start,
+        taps_after,
+        reached_floor,
+        fs,
+        crossover_hz,
+        budget_ms,
+    );
+    let adj_r = build_adjustment(
+        rr,
+        ir_r,
+        start,
+        taps_after,
+        reached_floor,
+        fs,
+        crossover_hz,
+        budget_ms,
+    );
     Some((adj_l, adj_r))
 }
 
@@ -727,7 +759,15 @@ pub fn linearize_band_with_budget(
             continue;
         }
         taps_after = probe;
-        if let Some((s, _)) = smallest_shift(&r.full, &r.prefix, n, r.energy, r.budget_energy, max_shift, probe) {
+        if let Some((s, _)) = smallest_shift(
+            &r.full,
+            &r.prefix,
+            n,
+            r.energy,
+            r.budget_energy,
+            max_shift,
+            probe,
+        ) {
             start = s;
             reached_floor = true;
             break;
@@ -736,7 +776,16 @@ pub fn linearize_band_with_budget(
             start = best_window_valid_prefix(&r.prefix, n, probe, max_shift);
         }
     }
-    Some(build_adjustment(r, ir, start, taps_after, reached_floor, fs, crossover_hz, budget_ms))
+    Some(build_adjustment(
+        r,
+        ir,
+        start,
+        taps_after,
+        reached_floor,
+        fs,
+        crossover_hz,
+        budget_ms,
+    ))
 }
 
 /// Report lines for a run that asked for this. Printed only when the stage ran, so the default
@@ -1161,12 +1210,22 @@ mod tests {
             (1000.0, 0.0),
             (20000.0, 0.0),
         ];
-        let ir_r = crate::ir::synthesize_minimum_phase_ir(&curve_r, 48000, 32768, 16384, 4096, -1.50, true, 16.0)
-            .expect("right synthesis")
-            .ir;
-        let (adj_l, adj_r) = linearize_band_stereo(&ir_l, &ir_r, 48000, 200.0).expect("stereo adjustment");
-        assert_eq!(adj_l.ir.len(), adj_r.ir.len(), "channels must share identical taps");
-        assert_eq!(adj_l.taps_after, adj_r.taps_after, "channels must share identical taps_after");
+        let ir_r = crate::ir::synthesize_minimum_phase_ir(
+            &curve_r, 48000, 32768, 16384, 4096, -1.50, true, 16.0,
+        )
+        .expect("right synthesis")
+        .ir;
+        let (adj_l, adj_r) =
+            linearize_band_stereo(&ir_l, &ir_r, 48000, 200.0).expect("stereo adjustment");
+        assert_eq!(
+            adj_l.ir.len(),
+            adj_r.ir.len(),
+            "channels must share identical taps"
+        );
+        assert_eq!(
+            adj_l.taps_after, adj_r.taps_after,
+            "channels must share identical taps_after"
+        );
         assert_eq!(
             adj_l.added_latency_samples, adj_r.added_latency_samples,
             "channels must share identical added_latency_samples (zero ITD skew)"

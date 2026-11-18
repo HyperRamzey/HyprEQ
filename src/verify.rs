@@ -412,16 +412,16 @@ fn measure_bands(
             let min = d.iter().cloned().fold(f64::INFINITY, f64::min);
 
             let design = t_data.map_or(f64::NAN, |t| {
-                t.iter().zip(&h).map(|(&x, &y)| x - y).fold(
-                    f64::NAN,
-                    |worst: f64, v: f64| {
+                t.iter()
+                    .zip(&h)
+                    .map(|(&x, &y)| x - y)
+                    .fold(f64::NAN, |worst: f64, v: f64| {
                         if !worst.is_finite() || v.abs() > worst.abs() {
                             v
                         } else {
                             worst
                         }
-                    },
-                )
+                    })
             });
             (m_mean, h_mean, t_mean, max - min, d, design)
         } else {
@@ -557,6 +557,75 @@ fn score(rows: &mut [BandResult], resid: &[Vec<f64>], cfg: &Config) -> Tally {
         }
     }
     t
+}
+
+/// Psychoacoustic summary of the scored bands of a verification report.
+#[derive(Clone, Debug)]
+pub struct PsychoSummary {
+    /// Olive/Welti/Khonsaripour predicted preference rating from the scored residual.
+    pub ppr: Option<crate::psycho::PprScore>,
+    /// Auditory excitation at standard centres, `(centre_hz, excitation_db)`.
+    pub excitation: Vec<(f64, f64)>,
+    /// How many bands carried a pass/fail verdict.
+    pub scored_bands: usize,
+}
+
+/// Reduce the scored bands to a Harman PPR and a Glasberg–Moore `roex(p)` excitation pattern.
+///
+/// Only pass/fail bands are used: unmeasured and uncovered bands are not evidence about the
+/// response, and folding their placeholder values into either statistic would be a finding about
+/// the capture's gaps rather than about the filter.
+#[must_use]
+pub fn psycho_summary(rep: &Report, mode: crate::psycho::PprMode) -> Option<PsychoSummary> {
+    let scored: Vec<&BandResult> = rep
+        .bands
+        .iter()
+        .filter(|b| matches!(b.status, Status::Pass | Status::Fail))
+        .collect();
+    if scored.len() < 2 {
+        return None;
+    }
+    let f: Vec<f64> = scored.iter().map(|b| b.centre_hz).collect();
+    let err: Vec<f64> = scored.iter().map(|b| b.residual_db).collect();
+    let levels: Vec<f64> = scored.iter().map(|b| b.measured_db).collect();
+    let centres = [100.0_f64, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
+    let ex = crate::psycho::roex_excitation_db(&f, &levels, &centres);
+    Some(PsychoSummary {
+        ppr: crate::psycho::harman_ppr(&f, &err, mode),
+        excitation: centres.into_iter().zip(ex).collect(),
+        scored_bands: scored.len(),
+    })
+}
+
+/// Printable form of [`psycho_summary`], in the same banner-then-pairs shape as [`report_lines`].
+#[must_use]
+pub fn psycho_report_lines(s: &PsychoSummary, mode: crate::psycho::PprMode) -> Vec<String> {
+    let mut out = Vec::new();
+    let name = match mode {
+        crate::psycho::PprMode::OverEar => "over-ear",
+        crate::psycho::PprMode::InEar => "in-ear",
+    };
+    out.push(format!(
+        "=== Psychoacoustic summary ({name}, {} scored bands) ===",
+        s.scored_bands
+    ));
+    if let Some(p) = s.ppr {
+        out.push(format!(
+            "  Harman PPR         : {:.2} (sd {:.2} dB, |slope| {:.2}, mean err {:+.2} dB)",
+            p.score, p.sd_db, p.abs_slope, p.mean_err_db
+        ));
+    } else {
+        out.push("  Harman PPR         : unavailable (need >= 2 finite residuals)".to_string());
+    }
+    let exc = s
+        .excitation
+        .iter()
+        .filter(|(_, db)| db.is_finite())
+        .map(|&(hz, db)| format!("{} Hz {:+.1} dB", crate::assess::band_name(hz), db))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push(format!("  Roex excitation    : {exc}"));
+    out
 }
 
 /// The report block, in the same shape as every other section: a banner, then aligned pairs.
@@ -1211,6 +1280,20 @@ mod tests {
         let shape: f64 = cols[7].parse().expect("shape column parses");
         assert!((shape + 4.5).abs() < 0.6, "the CSV says {shape} dB");
         assert_eq!(cols[10], "0", "a bias was flagged as noise: {row}");
+    }
+
+    #[test]
+    fn psycho_summary_scores_the_same_scored_bands_and_reports_them() {
+        let predicted = curve(|f| bump(f, 500.0, 6.0));
+        let capture = curve(|_| 0.0);
+        let r = verify(&capture, &predicted, None, &cfg()).expect("usable report");
+        let s = psycho_summary(&r, crate::psycho::PprMode::OverEar).expect("summary");
+        assert_eq!(s.scored_bands, r.scored);
+        assert!(s.ppr.is_some(), "a usable report must yield a PPR");
+        assert_eq!(s.excitation.len(), 7);
+        let lines = psycho_report_lines(&s, crate::psycho::PprMode::OverEar).join("\n");
+        assert!(lines.contains("Harman PPR"), "{lines}");
+        assert!(lines.contains("Roex excitation"), "{lines}");
     }
 
     #[test]

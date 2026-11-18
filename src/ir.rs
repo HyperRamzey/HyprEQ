@@ -629,18 +629,13 @@ mod tests {
         let l_curve = vec![(20.0, 1.0), (1000.0, 1.0), (20000.0, 1.0)];
         let r_curve = vec![(20.0, -1.0), (1000.0, -1.0), (20000.0, -1.0)];
         let (l, r) = synthesize_stereo_minimum_phase_ir(
-            &l_curve,
-            &r_curve,
-            48000,
-            4096,
-            512,
-            0,
-            -1.5,
-            false,
-            18.0,
+            &l_curve, &r_curve, 48000, 4096, 512, 0, -1.5, false, 18.0,
         )
         .unwrap();
-        assert_eq!(l.preamp_db, r.preamp_db, "preamp must be identical on both channels");
+        assert_eq!(
+            l.preamp_db, r.preamp_db,
+            "preamp must be identical on both channels"
+        );
         assert!((l.preamp_db - -2.5).abs() < 1e-9);
         let peak_l = l.ir.iter().map(|x| x.abs()).fold(0.0f64, f64::max);
         let peak_r = r.ir.iter().map(|x| x.abs()).fold(0.0f64, f64::max);

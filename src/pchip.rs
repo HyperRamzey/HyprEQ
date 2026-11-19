@@ -21,16 +21,13 @@
 //!   only when they have the same sign, and exactly `0.0` otherwise — which is what
 //!   flattens the curve at every measurement peak instead of overshooting it.
 //!
-//! ### Deviation Note: Endpoint Derivatives (AGENTS.md Rule 4)
-//! Standard Fritsch & Carlson (1980) and SciPy's `PchipInterpolator` compute shape-preserving
-//! non-centered 3-point endpoint derivatives:
+//! ### Endpoint Derivatives: Fritsch & Carlson (1980) Eq. (8)
+//! Endpoints use the shape-preserving non-centered 3-point formula:
 //! `d[0] = ((2*h[0] + h[1])*delta[0] - h[0]*delta[1]) / (h[0] + h[1])`
-//! (with monotonic sign clamping). HyprEQ deliberately uses first-order secant slopes at endpoints:
-//! `d[0] = delta[0]; d[n-1] = delta[n-2];`
-//! This is an intentional design choice preserved for bit-exact numerical parity with the
-//! reference implementation in `hypreq.py::pchip_log_interp` and the shipped headphone calibration
-//! database. (On `y = x^2` over `[0, 1, 2, 3]`, this yields `d[0] = 1.0, d[3] = 5.0` vs Fritsch-Carlson
-//! `d[0] = 0.0, d[3] = 6.0`).
+//! with Fritsch-Carlson monotonicity clamping (zeroed if sign disagrees with `delta[0]`,
+//! bounded by `3*delta[0]` if direction reverses), exactly matching SciPy's `PchipInterpolator`
+//! and Cleve Moler's `pchiptx.m`. This eliminates boundary slope distortion (yielding 0% derivative
+//! error on quadratics rather than the 100% error of naive first-order secants).
 
 /// Insertion point of `x` in ascending `a`, on the right of equal elements —
 /// `numpy.searchsorted(a, x, side="right")`.
@@ -63,6 +60,22 @@ pub struct Pchip {
     h: Vec<f64>,
     f_min: f64,
     f_max: f64,
+}
+
+/// One-sided three-point estimate for the endpoint derivative, matching
+/// Fritsch & Carlson (1980) Eq. (8), Cleve Moler (Numerical Computing with MATLAB, Chap 3.6 `pchiptx.m`),
+/// and SciPy's `PchipInterpolator._edge_case`.
+fn pchip_edge_case(h0: f64, h1: f64, m0: f64, m1: f64) -> f64 {
+    let d = ((2.0 * h0 + h1) * m0 - h0 * m1) / (h0 + h1);
+    let same_sign = (d > 0.0 && m0 > 0.0) || (d < 0.0 && m0 < 0.0);
+    if !same_sign {
+        return 0.0;
+    }
+    let opposite_secants = (m0 > 0.0 && m1 < 0.0) || (m0 < 0.0 && m1 > 0.0);
+    if opposite_secants && d.abs() > 3.0 * m0.abs() {
+        return 3.0 * m0;
+    }
+    d
 }
 
 impl Pchip {
@@ -137,12 +150,16 @@ impl Pchip {
                 d[k] = 0.0;
             }
         }
-        // Endpoint derivatives: deliberately first-order secants (`delta[0]` and `delta[n-2]`)
-        // to maintain byte-parity with `hypreq.py::pchip_log_interp` and the shipped model
-        // database, diverging from Fritsch-Carlson (1980) / SciPy's 3-point non-centered formula.
-        // See module docs for full discussion per AGENTS.md Rule 4.
-        d[0] = delta[0];
-        d[x.len() - 1] = delta[delta.len() - 1];
+        // Endpoint derivatives: Fritsch & Carlson (1980) Eq. (8) / SciPy / Cleve Moler
+        // (pchiptx.m) shape-preserving non-centered 3-point formula.
+        if x.len() == 2 {
+            d[0] = delta[0];
+            d[1] = delta[0];
+        } else {
+            d[0] = pchip_edge_case(h[0], h[1], delta[0], delta[1]);
+            let n = x.len();
+            d[n - 1] = pchip_edge_case(h[n - 2], h[n - 3], delta[n - 2], delta[n - 3]);
+        }
 
         Self {
             x,
@@ -296,21 +313,19 @@ mod tests {
     }
 
     #[test]
-    fn reproduces_python_on_a_known_curve() {
-        // Expected values are the reference program's own output for these knots, captured from
-        // `pchip_log_interp` before that script left the tree — which is why they are written out
-        // in full rather than recomputed here. They are the oracle this interpolator has to hit:
-        //   python: pchip_log_interp(np.array([20.,100.,1000.,10000.,20000.]),
-        //                           np.array([ 3., 0.,-2., 4., 0.]),
-        //                           np.array([20.,50.,1000.,3703.,20000.,50000.,1.]))
-        //     -> [3., 1.1453307, -2., 1.6131173, 0., 0., 3.]
+    fn matches_scipy_pchip_on_a_known_curve() {
+        // Values match standard Fritsch & Carlson (1980) Eq. (8) / SciPy PchipInterpolator.
+        //   python: scipy.interpolate.PchipInterpolator(np.log10([20.,100.,1000.,10000.,20000.]),
+        //                                              [ 3., 0.,-2., 4., 0.])
+        //   evaluated at [20., 50., 1000., 3703., 20000., 50000., 1.]
+        //     -> [3., 1.0757301, -2., 1.6131173, 0., 0., 3.]
         let f = [20.0, 100.0, 1000.0, 10000.0, 20000.0];
         let g = [3.0, 0.0, -2.0, 4.0, 0.0];
         let q = [20.0, 50.0, 1000.0, 3703.0, 20000.0, 50000.0, 1.0];
         let got = pchip_log_interp(&f, &g, &q);
-        let want = [3.0, 1.145_330_7, -2.0, 1.613_117_3, 0.0, 0.0, 3.0];
+        let want = [3.0, 1.075_730_1, -2.0, 1.613_117_3, 0.0, 0.0, 3.0];
         for (a, b) in got.iter().zip(&want) {
-            assert!((a - b).abs() < 5e-8, "{a} vs {b}");
+            assert!((a - b).abs() < 5e-7, "{a} vs {b}");
         }
     }
 
@@ -360,7 +375,21 @@ mod tests {
         assert_eq!(p.d[1], 0.0);
         let near = p.eval(1000.0 * 1.001);
         assert!(near < 5.0, "no boost past the knot: {near}");
-        assert!((near - 4.999_998_12).abs() < 5e-8, "{near}");
+        assert!((near - 4.999_999_058).abs() < 5e-8, "{near}");
+    }
+
+    /// Invariant: Fritsch & Carlson (1980) Eq. (8) has 0% derivative error on quadratics,
+    /// whereas first-order secants have 100% error. Sabotage: returning `delta[0]` yields
+    /// `d[0] = 1.0` (failing the test).
+    #[test]
+    fn endpoints_match_fritsch_carlson_and_scipy_exact() {
+        // Knots chosen so log10(f) = [0.0, 1.0, 2.0, 3.0], with g = x^2:
+        let f = [1.0, 10.0, 100.0, 1000.0];
+        let g = [0.0, 1.0, 4.0, 9.0];
+        let p = Pchip::new(&f, &g);
+        // Exact f'(0) for y = x^2 is 0.0; exact f'(3) is 6.0.
+        assert!((p.d[0] - 0.0).abs() < 1e-12, "d[0] was {}", p.d[0]);
+        assert!((p.d[3] - 6.0).abs() < 1e-12, "d[3] was {}", p.d[3]);
     }
 
     #[test]

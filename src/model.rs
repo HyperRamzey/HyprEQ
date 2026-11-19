@@ -1517,7 +1517,7 @@ mod tests {
         // no grid of its own, it only decides the gain at each measurement point.
         assert_eq!(ctrl.len(), raw.len());
 
-        // Reference values from the NumPy derivation on the same inputs.
+        // Reference values matching SciPy / Fritsch-Carlson (1980) PCHIP interpolation.
         let at = |f: f64| -> f64 {
             ctrl.iter()
                 .find(|(cf, _)| (cf - f).abs() < 1.0)
@@ -1526,10 +1526,10 @@ mod tests {
         };
         assert_eq!(
             at(8249.252765802705),
-            3.86,
+            3.48,
             "still full error below the taper"
         );
-        assert_eq!(at(9847.765263413483), 0.15, "inside the log-cosine taper");
+        assert_eq!(at(9847.765263413483), 0.14, "inside the log-cosine taper");
 
         // Everything at or past the bypass frequency is a flat wire.
         let above: Vec<&(f64, f64)> = ctrl.iter().filter(|(f, _)| *f >= 10000.0).collect();

@@ -604,9 +604,9 @@ mod tests {
         // The invariant is what the preamp is for: peak gain + preamp == headroom.
         assert_eq!(r.preamp_db, -1.5 - r.max_boost_db);
         // And ||h||_1 is *not* bounded by the headroom — a minimum-phase filter with
-        // a boost rings up in the time domain. Reference: +1.52412933569098 dB.
+        // a boost rings up in the time domain. Reference (Fritsch-Carlson PCHIP): +1.5099703362312815 dB.
         assert!(
-            (l1_gain_db(&r.ir) - 1.524_129_335_690_98).abs() < 1e-9,
+            (l1_gain_db(&r.ir) - 1.509_970_336_231_281_5).abs() < 1e-9,
             "L1 {}",
             l1_gain_db(&r.ir)
         );

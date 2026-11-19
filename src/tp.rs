@@ -611,6 +611,7 @@ pub struct Detector {
     /// successor yet, so it cannot be refined and waits for the next output.
     older: f64,
     newest: f64,
+    has_samples_since_reset: bool,
     /// Index from the newest input back to the sample the filter output describes: the
     /// group delay, in whole samples. The sample-peak floor is read here rather than off
     /// `x`, so it describes the same instant as the interpolation it is the floor for.
@@ -629,6 +630,7 @@ impl Detector {
             refine: ratio.refines(),
             older: 0.0,
             newest: 0.0,
+            has_samples_since_reset: false,
         }
     }
 
@@ -636,7 +638,11 @@ impl Detector {
     /// unrefined, so the last point of a stream is never dropped.
     #[must_use]
     pub fn peak(&self) -> f64 {
-        self.peak.max(self.newest)
+        if self.has_samples_since_reset {
+            self.peak.max(self.newest)
+        } else {
+            self.peak
+        }
     }
 
     /// True peak in dBTP; `-inf` for silence.
@@ -653,6 +659,7 @@ impl Detector {
         self.peak = 0.0;
         self.older = 0.0;
         self.newest = 0.0;
+        self.has_samples_since_reset = false;
     }
 
     /// Clear the reading but keep the filter state. Meters that report per group
@@ -662,16 +669,11 @@ impl Detector {
     /// **and** the two refine grid points stay. This is what makes a reset a new
     /// *reporting window over a continuous stream* — the reading after the reset equals
     /// the same window measured in one unbroken run (`a_per-group_window_equals_the_same_window_measured_unbroken`
-    /// pins it). Clearing `older`/`newest` here was tried and is wrong twice over: the
-    /// pending parabola at the seam would read through a fabricated `0.0` neighbour and
-    /// over-read a steady crest by up to +1 dB, and the filter's ringdown across the
-    /// boundary is real audio that the window is obliged to report. `peak()` still folds
-    /// in the pending `newest` — it is real signal from just before the boundary, not a
-    /// stale file. For a genuinely independent signal construct a fresh detector (or
-    /// [`Detector::clear`]), which starts the refine pair at zeros exactly as any file
-    /// start does.
+    /// pins it). `peak()` only includes the pending `newest` once new samples have been
+    /// fed into this window, preventing pre-reset values from leaking into a freshly reset window.
     pub fn reset_peak(&mut self) {
         self.peak = 0.0;
+        self.has_samples_since_reset = false;
     }
 
     /// Feed one input sample and return the largest value it finalised.
@@ -703,6 +705,7 @@ impl Detector {
     /// under-reads the hole itself and nothing else.
     #[inline]
     pub fn push(&mut self, x: f64) -> f64 {
+        self.has_samples_since_reset = true;
         let x = if x.is_finite() { x } else { 0.0 };
         let mut out = [0.0f64; MAX_STREAM];
         let n = self.stage.n_phases;
@@ -845,6 +848,13 @@ impl TruePeak {
     pub fn reset(&mut self) {
         for d in &mut self.chans {
             d.reset_peak();
+        }
+    }
+
+    /// Clear full filter state as well as accumulated reading across all channels.
+    pub fn clear(&mut self) {
+        for d in &mut self.chans {
+            d.clear();
         }
     }
 
@@ -1877,6 +1887,26 @@ mod accuracy {
             tail_split, tail_unbroken,
             "a reset changed the readings of the window it opened — the seam is measuring \
              through state it should have kept"
+        );
+    }
+
+    #[test]
+    fn reset_peak_immediately_reports_negative_infinity_until_new_samples_arrive() {
+        let mut d = Detector::new(Ratio::X16);
+        // Feed a high crest to ensure older and newest are non-zero.
+        for i in 0..100 {
+            d.push((std::f64::consts::PI * 2.0 * 11_000.0 * i as f64 / FS).sin());
+        }
+        assert!(d.peak() > 0.9);
+        assert!(d.dbtp() > -1.0);
+
+        d.reset_peak();
+        // Immediately after reset, no samples have arrived in the new window:
+        assert_eq!(d.peak(), 0.0, "peak must be 0.0 immediately after reset");
+        assert!(
+            d.dbtp().is_infinite() && d.dbtp() < 0.0,
+            "dBTP must be -inf immediately after reset: got {}",
+            d.dbtp()
         );
     }
 

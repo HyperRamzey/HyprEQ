@@ -18,14 +18,21 @@
 pub fn py_repr(value: &str) -> String {
     let has_single = value.contains('\'');
     let has_double = value.contains('"');
-    if has_single && !has_double {
-        return format!("\"{value}\"");
-    }
+    // The delimiter switch only avoids escaping a *quote*; every other escape CPython applies
+    // still applies inside double quotes. Handing the double-quote branch back unescaped lost a
+    // backslash: Python renders `\'` as `"\\'"`, and this used to print `"\'"` — a repr that no
+    // interpreter round-trips to the input.
+    let quote = if has_single && !has_double { '"' } else { '\'' };
     let mut out = String::with_capacity(value.len() + 2);
-    out.push('\'');
+    out.push(quote);
     for c in value.chars() {
         match c {
-            '\'' => out.push_str("\\'"),
+            // Only the delimiter itself needs escaping; the other quote rides along free,
+            // exactly as `"it's"` and `'say "hi"'` show.
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
@@ -33,7 +40,7 @@ pub fn py_repr(value: &str) -> String {
             other => out.push(other),
         }
     }
-    out.push('\'');
+    out.push(quote);
     out
 }
 
@@ -82,6 +89,15 @@ mod tests {
         assert_eq!(py_repr("say \"hi\""), "'say \"hi\"'");
         assert_eq!(py_repr("both ' and \""), "'both \\' and \"'");
         assert_eq!(py_repr("tab\t"), "'tab\\t'");
+        // The double-quote branch has to keep the escapes CPython keeps. Sabotage check:
+        // returning `"\"{value}\""` unescaped prints `"\'"` and fails the first line.
+        assert_eq!(py_repr("\\'"), "\"\\\\'\"", "Python: repr(chr(92)+chr(39))");
+        assert_eq!(
+            py_repr("a\\\nb'"),
+            "\"a\\\\\\nb'\"",
+            "backslash and control both survive"
+        );
+        assert_eq!(py_repr("plain \\"), "'plain \\\\'");
     }
 
     #[test]

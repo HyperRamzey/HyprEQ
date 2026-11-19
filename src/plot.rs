@@ -1177,7 +1177,7 @@ impl PlotData {
             .map(|p| crate::model::point_gain(p))
             .collect();
         let raw_avg = pchip::pchip_log_interp(&f_raw, &g_raw, &f_plot);
-        let (raw_l, raw_r) = if model.raw_pts.first().is_some_and(|p| p.len() >= 4) {
+        let (raw_l, raw_r) = if model.raw_pts.first().is_some_and(|p| p.len() >= 3) {
             let gl: Vec<f64> = model.raw_pts.iter().map(|p| p[1]).collect();
             let gr: Vec<f64> = model.raw_pts.iter().map(|p| p[2]).collect();
             (

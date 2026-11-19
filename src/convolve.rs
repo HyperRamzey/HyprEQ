@@ -49,6 +49,19 @@ pub fn convolve_planar_fft(planar: &[Vec<f64>], ir: &[f64], trim_to_input: bool)
         // empty list, and the caller zips the result against the channel names.
         return vec![Vec::new(); planar.len()];
     }
+    if ir.is_empty() {
+        return vec![
+            vec![
+                0.0;
+                if trim_to_input {
+                    n_in
+                } else {
+                    n_in.saturating_sub(1)
+                }
+            ];
+            planar.len()
+        ];
+    }
 
     let n_ir = ir.len();
     let block_len = 16384usize.max(block_bound(n_in));
@@ -85,6 +98,26 @@ pub fn convolve_planar_pair(
     let n_in = planar.first()?.len();
     if n_in == 0 {
         return Some(vec![Vec::new(); 2]);
+    }
+    if ir_l.is_empty() || ir_r.is_empty() {
+        return Some(vec![
+            vec![
+                0.0;
+                if trim_to_input {
+                    n_in
+                } else {
+                    n_in.saturating_sub(1)
+                }
+            ],
+            vec![
+                0.0;
+                if trim_to_input {
+                    n_in
+                } else {
+                    n_in.saturating_sub(1)
+                }
+            ],
+        ]);
     }
 
     let n_ir_l = ir_l.len();
@@ -129,16 +162,20 @@ fn channel_out_h(
     n_in: usize,
     trim_to_input: bool,
 ) -> Vec<f64> {
-    let out_len = if trim_to_input { n_in } else { n_in + n_ir - 1 };
+    if n_ir == 0 {
+        return vec![0.0; if trim_to_input { n_in } else { 0 }];
+    }
+    let full_len = n_in.saturating_add(n_ir).saturating_sub(1);
+    let out_len = if trim_to_input { n_in } else { full_len };
 
-    let mut acc = vec![0.0f64; n_in + n_ir - 1];
+    let mut acc = vec![0.0f64; full_len];
     let mut start = 0usize;
     // `n_in` is channel 0's length. A shorter channel simply stops early: slicing
     // `start..stop` past its end would panic, and no audio path wants a panic.
     while start < n_in && start < ch.len() {
         let stop = (start + block_len).min(n_in).min(ch.len());
         let blk = &ch[start..stop];
-        let seg_len = blk.len() + n_ir - 1;
+        let seg_len = blk.len().saturating_add(n_ir).saturating_sub(1);
         let mut spec = crate::fft::rfft(blk, n_fft);
         apply_response(&mut spec, h);
         let y = crate::fft::irfft(&spec, n_fft);
@@ -437,6 +474,11 @@ mod tests {
             .unwrap();
         assert_eq!(y.len(), 2, "n_in + n_ir - 1 samples of nothing");
         assert!(y.iter().all(|&v| v == 0.0), "{y:?}");
+        let y_trim = convolve_planar_fft(&[vec![1.0, 2.0, 3.0]], &[], true)
+            .pop()
+            .unwrap();
+        assert_eq!(y_trim.len(), 3, "trimmed to input length");
+        assert!(y_trim.iter().all(|&v| v == 0.0), "{y_trim:?}");
 
         // A block is at most 65536 samples, so a channel shorter than n_in only meets the
         // boundary when n_in crosses it: channel 0 needs to be long enough that the second

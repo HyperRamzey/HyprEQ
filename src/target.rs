@@ -15,7 +15,6 @@ pub enum TargetFamily {
     DiffuseField,
     /// Diffuse field + ~ -1.0 dB/octave spectral slope for spatial audio (Mülleder et al., AES 2025).
     SpatialDiffuseSlope,
-    Custom,
 }
 
 /// Continuous listener preference modifiers over any baseline target curve.
@@ -122,6 +121,14 @@ impl Iso226Table {
                 && e.t_f.is_finite()
         });
         entries.sort_by(|a, b| a.freq_hz.total_cmp(&b.freq_hz));
+        // Duplicate frequencies survive a hand-edited table (the same row pasted twice with
+        // updated constants). PCHIP needs strictly ascending knots: a repeated frequency is a
+        // zero-width interval, and its secant slope — the harmonic-mean tangent and every
+        // evaluation that follows — turns to inf/NaN. Collapse runs to their last row, the
+        // same "last write wins" the target-CSV loader uses.
+        entries.reverse();
+        entries.dedup_by(|a, b| a.freq_hz == b.freq_hz);
+        entries.reverse();
         (entries.len() >= 2).then_some(Self { entries })
     }
 
@@ -148,8 +155,23 @@ impl Iso226Table {
                 });
             }
         }
-        Self::from_entries(out)
-            .ok_or_else(|| crate::error::Error::msg("ISO 226 file holds fewer than 2 valid rows"))
+        let table = Self::from_entries(out).ok_or_else(|| {
+            crate::error::Error::msg("ISO 226 file holds fewer than 2 valid rows")
+        })?;
+        // The contour compensation is *defined* relative to 1 kHz — that is the unit-gain
+        // point of the equal-loudness construction. A table that does not reach 1 kHz
+        // leaves `p.eval(1000.0)` reading PCHIP's flat end clamp, and the subtraction then
+        // normalises the whole curve to a fabricated reference taken at the table's edge.
+        // Refuse the table instead of shipping the fiction.
+        let lo = table.entries[0].freq_hz;
+        let hi = table.entries[table.entries.len() - 1].freq_hz;
+        if lo > 1000.0 || hi < 1000.0 {
+            return Err(crate::error::Error::msg(format!(
+                "ISO 226 file spans {lo:.0} Hz .. {hi:.0} Hz and does not cover 1 kHz; the \
+                 contour delta is normalised there"
+            )));
+        }
+        Ok(table)
     }
 
     /// ISO 226:2023 Formula (1) pure-tone SPL (dB) at loudness level `phon`.
@@ -258,5 +280,58 @@ mod tests {
             let spl = Iso226Table::spl_at_entry(&e, phon);
             assert!((spl - phon).abs() < 1e-12, "{spl} vs {phon}");
         }
+    }
+
+    /// A hand-edited table can carry the same frequency twice; PCHIP needs strictly
+    /// ascending knots and a repeated one turns every slope, tangent and evaluation that
+    /// follows into inf/NaN. Rows collapse last-write-wins, like the CSV loaders.
+    #[test]
+    fn a_repeated_frequency_row_collapses_instead_of_poisoning_the_interpolant() {
+        let mut dupe: Vec<Iso226Entry> = [(20.0f64, 2.0f64), (1000.0, 0.0), (20000.0, 1.5)]
+            .iter()
+            .map(|&(f, l)| Iso226Entry {
+                freq_hz: f,
+                alpha_f: 0.3,
+                l_u: l,
+                t_f: 2.4,
+            })
+            .collect();
+        dupe.push(Iso226Entry {
+            freq_hz: 1000.0,
+            alpha_f: 0.3,
+            l_u: 5.0,
+            t_f: 2.4,
+        });
+        let t = Iso226Table::from_entries(dupe).expect("three distinct frequencies");
+        assert_eq!(t.entries.len(), 3, "the duplicate must collapse");
+        assert_eq!(t.entries[1].l_u, 5.0, "the later row must win");
+        let d = t.contour_delta_db(&[100.0, 1000.0, 4000.0], 65.0, 40.0);
+        assert!(d.iter().all(|v| v.is_finite()), "poisoned: {d:?}");
+    }
+
+    /// The contour delta is normalised at 1 kHz; a table that does not reach it would
+    /// normalise against PCHIP's flat end clamp — a reference the table never measured.
+    #[test]
+    fn a_table_that_does_not_reach_1khz_is_refused_not_normalised_to_its_edge() {
+        let dir = std::env::temp_dir().join(format!("hypreq-iso226-span-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("no-1k.json");
+        std::fs::write(
+            &path,
+            r#"[{"freq_hz":100.0,"alpha_f":0.3,"l_u":2.0,"t_f":2.4},
+                {"freq_hz":500.0,"alpha_f":0.3,"l_u":1.0,"t_f":2.4},
+                {"freq_hz":900.0,"alpha_f":0.3,"l_u":0.5,"t_f":2.4}]"#,
+        )
+        .unwrap();
+        let e = Iso226Table::from_json_file(&path).unwrap_err();
+        assert!(e.to_string().contains("1 kHz"), "{e}");
+        std::fs::write(
+            &path,
+            r#"[{"freq_hz":100.0,"alpha_f":0.3,"l_u":2.0,"t_f":2.4},
+                {"freq_hz":1000.0,"alpha_f":0.3,"l_u":0.0,"t_f":2.4}]"#,
+        )
+        .unwrap();
+        assert!(Iso226Table::from_json_file(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -179,12 +179,13 @@ pub fn synthesize_minimum_phase_ir(
     let fs_f = fs as f64;
     let freqs = rfftfreq(n_fft, fs_f);
     let mut target_db: Vec<f64> = freqs.iter().map(|&f| curve.eval(f)).collect();
-    // DC is the first knot's gain, not the log-interpolant's clamp: there is no
-    // log10(0), so the interpolator cannot answer, and "same as the lowest measured
-    // frequency" is the only defensible answer.
-    target_db[0] = g_nodes[0];
+    // DC is the lowest sorted knot's gain, evaluated at 0 Hz (which Pchip clamps to its
+    // lowest sorted frequency knot f_min).
+    target_db[0] = curve.eval(0.0);
 
     if gauss_apodize {
+        // Nyquist-adaptive Gaussian roll-off: w(f) = 2^(-0.5 * x^2) where x = (f - f_start) / width.
+        // In dB: -10 * log10(2) * x^2 ~= -3.0103 * x^2 dB (-3.0103 dB at x = 1).
         let f_nyq = (fs_f / 2.0).max(24000.0);
         let f_start = f_nyq * (20200.0 / 24000.0);
         let width = (f_nyq - f_start) / (3800.0 / 1650.0);
@@ -671,6 +672,23 @@ mod tests {
         assert!(
             yes.mag_lin[yes.mag_lin.len() - 1] < no.mag_lin[no.mag_lin.len() - 1],
             "Nyquist must come down"
+        );
+    }
+
+    #[test]
+    fn dc_evaluates_from_lowest_frequency_knot_regardless_of_knot_order() {
+        let descending = vec![(20000.0, 10.0), (1000.0, 5.0), (20.0, -3.0)];
+        let ascending = vec![(20.0, -3.0), (1000.0, 5.0), (20000.0, 10.0)];
+        let res_desc =
+            synthesize_minimum_phase_ir(&descending, 48000, 4096, 512, 0, 0.0, false, 18.0)
+                .unwrap();
+        let res_asc =
+            synthesize_minimum_phase_ir(&ascending, 48000, 4096, 512, 0, 0.0, false, 18.0).unwrap();
+        assert!(
+            (res_desc.mag_lin[0] - res_asc.mag_lin[0]).abs() < 1e-12,
+            "DC bin must match between sorted and unsorted knots: desc={}, asc={}",
+            res_desc.mag_lin[0],
+            res_asc.mag_lin[0]
         );
     }
 

@@ -46,10 +46,26 @@ def magnitude_db_from_ir(
     return freqs, mag
 
 
-def magnitude_db_from_tf(real: np.ndarray, imag: np.ndarray, fs: float, n_fft: int):
-    n = max(int(n_fft), 2 * (len(real) - 1))
-    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+def magnitude_db_from_tf(
+    real: np.ndarray,
+    imag: np.ndarray,
+    freqs: np.ndarray | None,
+    fs: float | None,
+) -> tuple[np.ndarray, np.ndarray]:
     spec = np.asarray(real, dtype=np.float64) + 1j * np.asarray(imag, dtype=np.float64)
+    if freqs is None:
+        if fs is None:
+            raise ValueError(
+                "TF SOFA file lacks both frequency vector 'N' and 'Data.SamplingRate'"
+            )
+        n = 2 * (len(spec) - 1)
+        freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+    else:
+        freqs = np.asarray(freqs, dtype=np.float64)
+    if len(freqs) != len(spec):
+        raise ValueError(
+            f"frequency axis length {len(freqs)} does not match TF spectrum length {len(spec)}"
+        )
     return freqs, 20.0 * np.log10(np.maximum(np.abs(spec), 1e-12))
 
 
@@ -81,10 +97,17 @@ def curves_from_sofa(
         ) from exc
 
     data = sofar.read_sofa(str(path))
-    fs = float(np.asarray(data.get("Data.SamplingRate")).ravel()[0])
+    sr_val = data.get("Data.SamplingRate")
+    fs = (
+        float(np.asarray(sr_val).ravel()[0])
+        if sr_val is not None
+        else None
+    )
 
     receivers: list[int]
     if "Data.IR" in data:
+        if fs is None:
+            raise ValueError(f"{path}: SOFA IR file lacks Data.SamplingRate")
         ir = np.asarray(data["Data.IR"], dtype=np.float64)
         if ir.ndim == 2:
             ir = ir[np.newaxis, ...]
@@ -103,8 +126,11 @@ def curves_from_sofa(
                 imag[np.newaxis, np.newaxis, ...],
             )
         n_m, n_r, _ = real.shape
+        tf_freqs = None
+        if "N" in data and data["N"] is not None:
+            tf_freqs = np.asarray(data["N"], dtype=np.float64).ravel()
         get_spectrum = lambda m, r: magnitude_db_from_tf(
-            real[m, r], imag[m, r], fs, n_fft
+            real[m, r], imag[m, r], tf_freqs, fs
         )
     else:
         raise ValueError(
@@ -175,15 +201,40 @@ def self_test(grid: np.ndarray, n_fft: int, normalise_hz: float) -> int:
         assert np.allclose(curve, 0.0, atol=1e-9), (
             "fake flat SOFA must yield flat curves"
         )
+
+    # Test TF SOFA extraction with variable N and without Data.SamplingRate
+    tf_len = 257
+    n_freqs = np.linspace(0.0, fs / 2.0, tf_len)
+    fake_tf = types.ModuleType("sofar")
+    fake_tf.read_sofa = lambda _path: {
+        "N": n_freqs,
+        "Data.Real": np.ones((1, 2, tf_len)),
+        "Data.Imag": np.zeros((1, 2, tf_len)),
+    }
+    sys.modules["sofar"] = fake_tf
+    try:
+        tf_curves = list(
+            curves_from_sofa(Path("fake_tf.sofa"), grid, n_fft, "all", normalise_hz)
+        )
+    finally:
+        if saved is None:
+            sys.modules.pop("sofar", None)
+        else:
+            sys.modules["sofar"] = saved
+    assert len(tf_curves) == 2, f"expected 1 placement × 2 ears, got {len(tf_curves)}"
+    for _, curve in tf_curves:
+        assert np.allclose(curve, 0.0, atol=1e-9), "fake TF SOFA must yield flat curves"
+
     print(
         f"self-test OK: {len(grid)} bins, {grid[0]:.1f}-{grid[-1]:.1f} Hz, "
-        f"{len(curves)} flat curves from fake SOFA"
+        f"{len(curves)} flat IR curves, {len(tf_curves)} flat TF curves from fake SOFA"
     )
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    doc_first = (__doc__ or "").splitlines()[0] if (__doc__ or "").splitlines() else ""
+    ap = argparse.ArgumentParser(description=doc_first)
     ap.add_argument(
         "sofa",
         nargs="*",

@@ -202,6 +202,16 @@ pub fn solve_global_qp(input: &GlobalFitInput, cfg: &GlobalFitConfig) -> Option<
         };
         w.push(erb_w / var);
     }
+    // A bin with no measurement must leave the fit entirely. Leaving its error mapped to
+    // `0.0` at full weight (as the rhs0 guard did on its own) is not neutral: it tells
+    // the solver the hole measured exactly 0 dB deviation, and the fit then chases flat
+    // right where nothing was measured. Zeroing the row weight drops the data term; the
+    // anchor and curvature terms legitimately still pass over the bin.
+    for (wi, &r) in w.iter_mut().zip(&input.raw_error_db) {
+        if !r.is_finite() {
+            *wi = 0.0;
+        }
+    }
 
     let rhs0: Vec<f64> = w
         .iter()
@@ -447,6 +457,52 @@ mod tests {
         );
         for (i, &q) in res.q_db.iter().enumerate() {
             assert!(q <= q_max[i] + 1e-9 && q >= -12.0 - 1e-9);
+        }
+    }
+
+    /// A non-finite error row must leave the data term entirely. Mapping it to `0.0`
+    /// at full weight fabricated a "measured 0 dB deviation" at the hole and pulled the
+    /// curve to flat exactly there; with the row's weight zeroed, the hole interpolates
+    /// between its neighbours like any unmeasured bin.
+    #[test]
+    fn a_measurement_hole_leaves_the_fit_instead_of_fabricating_a_flat_row() {
+        let f = vec![100.0, 200.0, 400.0, 800.0, 1600.0];
+        let k = f.len();
+        let solve = |err: Vec<f64>| {
+            solve_global_qp(
+                &GlobalFitInput {
+                    f_hz: f.clone(),
+                    raw_error_db: err,
+                    total_sigma_db: vec![0.3; k],
+                    anchor_db: vec![0.0; k],
+                    q_min_db: vec![-12.0; k],
+                    q_max_db: vec![12.0; k],
+                },
+                &GlobalFitConfig::default(),
+            )
+            .expect("small well-scaled system")
+        };
+        let solid = solve(vec![6.0; k]);
+        assert!(
+            solid.q_db.iter().all(|&q| q > 5.0),
+            "sanity: a flat +6 demand should fit flat-ish: {:?}",
+            solid.q_db
+        );
+        let hole = solve(vec![6.0, 6.0, f64::NAN, 6.0, 6.0]);
+        assert!(
+            hole.q_db[2] > 4.0,
+            "the hole bin was pulled toward an invented 0 dB reading: {} (neighbours {:?})",
+            hole.q_db[2],
+            hole.q_db
+        );
+        // The real bins must be untouched to solver tolerance.
+        for i in [0usize, 1, 3, 4] {
+            assert!(
+                (hole.q_db[i] - solid.q_db[i]).abs() < 0.05,
+                "hole changed real bin {i}: {} vs {}",
+                hole.q_db[i],
+                solid.q_db[i]
+            );
         }
     }
 }

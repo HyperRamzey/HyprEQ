@@ -100,6 +100,24 @@ impl Pcg64 {
     pub fn next_uniform_half(&mut self) -> f64 {
         -0.5 + self.next_double()
     }
+
+    /// Advance the generator state by `delta` steps in O(log delta) time.
+    pub fn advance(&mut self, mut delta: u128) {
+        let mut acc_mult: u128 = 1;
+        let mut acc_plus: u128 = 0;
+        let mut cur_mult: u128 = PCG64_MULTIPLIER;
+        let mut cur_plus: u128 = self.inc;
+        while delta > 0 {
+            if (delta & 1) != 0 {
+                acc_mult = acc_mult.wrapping_mul(cur_mult);
+                acc_plus = acc_plus.wrapping_mul(cur_mult).wrapping_add(cur_plus);
+            }
+            cur_plus = cur_mult.wrapping_add(1).wrapping_mul(cur_plus);
+            cur_mult = cur_mult.wrapping_mul(cur_mult);
+            delta >>= 1;
+        }
+        self.state = acc_mult.wrapping_mul(self.state).wrapping_add(acc_plus);
+    }
 }
 
 /// TPDF dither matrix for `frames` frames × `channels` channels, laid out the
@@ -211,5 +229,28 @@ mod tests {
             centre > 4 * edge,
             "triangular shape expected, centre {centre} edge {edge}"
         );
+    }
+
+    #[test]
+    fn pcg64_advance_matches_stepping() {
+        let mut r1 = Pcg64::hypreq_dither();
+        for _ in 0..500 {
+            r1.next_u64();
+        }
+        let mut r2 = Pcg64::hypreq_dither();
+        r2.advance(500);
+        assert_eq!(r1.state, r2.state);
+        assert_eq!(r1.next_u64(), r2.next_u64());
+
+        let frames = 100;
+        let channels = 2;
+        let mat = tpdf_matrix(frames, channels);
+        let mut g1 = Pcg64::hypreq_dither();
+        let mut g2 = Pcg64::hypreq_dither();
+        g2.advance((frames * channels) as u128);
+        for &expected in &mat {
+            let stream_val = g1.next_uniform_half() + g2.next_uniform_half();
+            assert_eq!(stream_val.to_bits(), expected.to_bits());
+        }
     }
 }

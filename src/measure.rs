@@ -112,10 +112,13 @@ pub fn measure_signal_block(
     let mut rms_ch_lin = Vec::with_capacity(nch);
     for (c, ch) in planar.iter().enumerate() {
         sp_ch.push(ch.iter().fold(0.0f64, |a, &v| a.max(v.abs())));
-        // Sum of squares in f64; a 24-bit/48 kHz minute of audio is ~2.9e9 terms,
-        // and the running sum stays well inside the range where f64 is exact for
-        // the magnitudes involved.
-        let mean_sq = ch.iter().fold(0.0f64, |a, &v| a + v * v) / ch.len() as f64;
+        // Compensated sum of squares. A 24-bit/48 kHz minute of audio is 2.88e6 terms per
+        // channel (not the 2.9e9 this comment once claimed — three orders of magnitude of
+        // a rate nobody counted), and while a running sum still lands inside the range
+        // where f64 is exact for the magnitudes, exactness is not the point: the naive
+        // fold loses low-order bits term by term, and `accum::sum_of_squares` is what the
+        // rest of the crate already reaches for.
+        let mean_sq = crate::accum::sum_of_squares(ch) / ch.len() as f64;
         rms_ch_lin.push(mean_sq.sqrt());
         tp_main.push_ch(c, ch);
         if let Some(tp) = &mut tp_itu {
@@ -130,10 +133,17 @@ pub fn measure_signal_block(
     // The meter model converts sample counts to time, so it needs a rate. Without one the
     // integration window is a division by zero; the peak/RMS/TP figures below are pure
     // sample statistics and stay valid, so only the meter block is skipped.
+    // `block_size` participates in both the stride and the window: taken only on the
+    // stride (`step_by(block_size.max(1))`) while the window still used the raw value, a
+    // caller passing 0 advanced one sample per round and computed `blk = end - start = 0`
+    // every round — the meters were driven for `frames` iterations and never once told a
+    // sample existed. One honest floor, used by both, so a degenerate window observes
+    // 1-sample blocks instead of nothing.
+    let bs = block_size.max(1);
     if fs > 0 {
         let mut views = vec![&[][..]; nch];
-        for start in (0..frames).step_by(block_size.max(1)) {
-            let end = (start + block_size).min(frames);
+        for start in (0..frames).step_by(bs) {
+            let end = (start + bs).min(frames);
             let blk = end - start;
             for (v, c) in views.iter_mut().zip(planar.iter()) {
                 *v = &c[start..end];
@@ -270,8 +280,16 @@ fn join_signed(xs: &[f64], dp: usize) -> String {
 ///   limiter to survive;
 /// * everything normalised so the x16 detector reads exactly 0 dBTP, which puts the
 ///   `-3 dBTP` ceiling to work immediately.
+///
+/// A zero rate returns an empty probe. Every CLI path resolves `--fs` through the
+/// positive-rate check first (argparse's own message), so this guard exists only for
+/// library callers; with it they get "nothing to measure" instead of a probe built from
+/// `i / 0.0` — a buffer whose non-first samples are all `sin(±inf)` = NaN.
 #[must_use]
 pub fn build_convolver_probe(fs: u32, duration_s: f64) -> Vec<f64> {
+    if fs == 0 {
+        return Vec::new();
+    }
     let n = ((fs as f64 * duration_s).round_ties_even() as usize).max(4096);
     let nyq_safe = 0.43 * fs as f64;
     let f_hi = 12000.0f64.min(nyq_safe);
@@ -557,5 +575,48 @@ mod tests {
             m.meter_param, 0.0,
             "nothing was metered, so nothing to report"
         );
+    }
+
+    /// A caller passing `block_size = 0` used to drive the meters for `frames`
+    /// iterations with `blk = 0` every round — the loop ran, nothing was ever
+    /// observed. The window floor has to be taken once and used by both the stride
+    /// and the window (the bug was the max landing on only the stride).
+    #[test]
+    fn a_zero_meter_block_size_still_observes_every_sample() {
+        let sig: Vec<f64> = (0..4096)
+            .map(|i| if i < 1024 { 0.9 } else { 0.0 })
+            .collect();
+        let m0 = measure_signal_block(std::slice::from_ref(&sig), 48000, Ratio::X16, 0);
+        let m_ref = measure_signal(&[sig], 48000, Ratio::X16);
+        assert!(
+            m0.meter_peak_hold_dbfs.is_finite(),
+            "block_size 0 starved the meters: hold {}",
+            m0.meter_peak_hold_dbfs
+        );
+        // The hold must track the reference hold. Not bit-equal: the peak-hold meter is
+        // the console-scale 0.30 s meter with release steps taken per observed block, so
+        // block granularity quantises the decay a hair (measured 7e-5 dB here). What the
+        // bug made impossible — never observing the sample at all, reading -inf — is what
+        // this pins.
+        assert!(
+            (m0.meter_peak_hold_dbfs - m_ref.meter_peak_hold_dbfs).abs() < 0.01,
+            "hold {} at block 0 vs {} at the default block",
+            m0.meter_peak_hold_dbfs,
+            m_ref.meter_peak_hold_dbfs
+        );
+        // True peak is a full-buffer sample statistic — no meter timing in it — so that
+        // one comparison IS exact.
+        assert_eq!(m0.true_peak_dbtp, m_ref.true_peak_dbtp);
+    }
+
+    /// Library-boundary guard: `--fs 0` is stopped upstream by the positive-rate
+    /// message, but `build_convolver_probe(0, _)` used to divide the time index by
+    /// the rate and emit a probe of NaN.
+    #[test]
+    fn the_probe_refuses_to_divide_by_a_zero_rate() {
+        assert!(build_convolver_probe(0, 0.5).is_empty());
+        let p = build_convolver_probe(48000, 0.5);
+        assert!(!p.is_empty());
+        assert!(p.iter().all(|v| v.is_finite()), "probe must be all finite");
     }
 }

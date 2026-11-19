@@ -137,7 +137,11 @@ pub fn limiter_report_lines(
             post.ratio.label(),
             sgn(post.true_peak_dbtp, 3),
             sgn(post.itu_x4_dbtp, 3),
-            if rep.within_ceiling() { "True" } else { "False" },
+            if rep.within_ceiling() && post.true_peak_dbtp <= rep.ceiling_db + 1e-9 {
+                "True"
+            } else {
+                "False"
+            },
         ),
         format!(
             "  Gain Reduction      : Max {:.3} dB (Transient {:.3} dB, Slow {:.3} dB) | Engaged: {} frames (Slow hold: {})",
@@ -305,13 +309,13 @@ mod tests {
     fn report_says_false_when_the_independent_check_disagrees() {
         let cfg = TpArgs::default().to_cfg().unwrap();
         let mut rep = report();
-        rep.post_dbtp = -2.0; // the limiter believes it is done
+        rep.post_dbtp = -3.040; // the limiter believes it is done and within ceiling (-3.0)
         let mut post = self::post();
         post.true_peak_dbtp = -2.0; // but the independent pass says otherwise
         let lines = limiter_report_lines(&rep, &post, &cfg, 48000);
         assert!(lines[4].contains("Within ceiling: False"), "{}", lines[4]);
         assert!(
-            lines[4].contains("-0.350 -> -2.000 dBTP"),
+            lines[4].contains("-0.350 -> -3.040 dBTP"),
             "pre/post must both show: {}",
             lines[4]
         );

@@ -551,6 +551,9 @@ fn reshape_filter(
             new_phase[i - 1] = phase_u[i - 1] + running;
         }
     }
+    // DC bin (bin 0) phase must strictly remain 0 or π (phase_u[0]); any nonzero
+    // net integration residual or offset would otherwise attenuate DC by cos(running).
+    new_phase[0] = phase_u[0];
 
     let shaped: Vec<Complex64> = mag
         .iter()
@@ -618,7 +621,7 @@ fn build_adjustment(
     }
     let floor = crate::ir::db_floor(&out, 100);
     let gd_span = r.requested;
-    let budget_held = max_change <= budget_ms + 1e-4;
+    let budget_held = reached_floor && max_change <= budget_ms + 1e-4;
     let kept = r.prefix[start + taps_after] - r.prefix[start];
     Adjustment {
         ir: out,
@@ -707,11 +710,11 @@ pub fn linearize_band_stereo_with_budget(
             reached_floor = true;
             break;
         }
-        if probe >= cap {
-            start = best_window_valid_joint(
-                &rl.prefix, &rr.prefix, rl.energy, rr.energy, n, probe, max_shift,
-            );
-        }
+    }
+    if !reached_floor {
+        start = best_window_valid_joint(
+            &rl.prefix, &rr.prefix, rl.energy, rr.energy, n, taps_after, max_shift,
+        );
     }
 
     let adj_l = build_adjustment(
@@ -779,9 +782,9 @@ pub fn linearize_band_with_budget(
             reached_floor = true;
             break;
         }
-        if probe >= cap {
-            start = best_window_valid_prefix(&r.prefix, n, probe, max_shift);
-        }
+    }
+    if !reached_floor {
+        start = best_window_valid_prefix(&r.prefix, n, taps_after, max_shift);
     }
     Some(build_adjustment(
         r,
@@ -810,8 +813,8 @@ pub fn report_lines(a: &Adjustment) -> Vec<String> {
             a.crossover_hz
         ),
         format!(
-            "  Band            : {:.0} Hz - {:.0} Hz, tapered to unity by {:.0} Hz (nothing above it is touched)",
-            a.f_lo_hz, a.crossover_hz, a.f_taper_hz
+            "  Band            : {:.0} Hz (tapered from {:.0} Hz) - {:.0} Hz, tapered to unity by {:.0} Hz (nothing above it is touched)",
+            a.f_lo_hz, a.f_lo_hz / 2.0, a.crossover_hz, a.f_taper_hz
         ),
         format!(
             "  Delay carried   : {:.3} ms, the band's own mean - flattening moves delay, it does not add any",
@@ -1236,6 +1239,18 @@ mod tests {
         assert_eq!(
             adj_l.added_latency_samples, adj_r.added_latency_samples,
             "channels must share identical added_latency_samples (zero ITD skew)"
+        );
+    }
+
+    #[test]
+    fn dc_phase_remains_exact_and_unattenuated() {
+        let ir = shelf_ir();
+        let adj = linearize_band(&ir, 48000, 200.0).expect("linearize_band");
+        let dc_ir = ir.iter().sum::<f64>().abs();
+        let dc_adj = adj.full.iter().sum::<f64>().abs();
+        assert!(
+            (dc_ir - dc_adj).abs() < 1e-6,
+            "DC sum must match: ir={dc_ir}, adj={dc_adj}"
         );
     }
 }

@@ -785,12 +785,6 @@ impl Limiter {
                 // [`Limiter::advance_gain`]'s caller.
                 let slot = self.slot(m);
                 self.sched_ring[c][slot] = ga;
-                if ga < 1.0 - ENGAGED_EPS {
-                    let gr = -20.0 * ga.max(f64::MIN_POSITIVE).log10();
-                    if gr > self.report.transient_reduction_db {
-                        self.report.transient_reduction_db = gr;
-                    }
-                }
             }
         }
         self.scheduled = limit;
@@ -956,25 +950,9 @@ impl Limiter {
         } else {
             next
         };
-        let mut slow_min = 1.0f64;
         for c in 0..nch {
             let gr = blend(self.g_rel[c], self.g_rel_group, self.cfg.link_release);
             self.gr_now[c] = gr;
-            if gr < slow_min {
-                slow_min = gr;
-            }
-        }
-        // `live` for the same reason as the engaged counter below, and this one was the counter
-        // that actually still mis-reported after that one was fixed: a full-scale DC file of
-        // 965 frames into a 966-frame latency delivered nothing but delay-line silence and
-        // reported 725 released frames. The slow follower really was deep — it is reading real
-        // input — but the frames it was deep for are not the frames that left the limiter.
-        if live && slow_min < 1.0 - ENGAGED_EPS {
-            self.report.release_frames += 1;
-            let db = -20.0 * slow_min.max(f64::MIN_POSITIVE).log10();
-            if db > self.report.release_reduction_db {
-                self.report.release_reduction_db = db;
-            }
         }
 
         // --- required transient gain, on the frame the peaks actually describe ----------
@@ -1048,6 +1026,8 @@ impl Limiter {
         }
         let slot = self.pos;
         let mut deepest = 1.0f64;
+        let mut slow_deepest = 1.0f64;
+        let mut fast_deepest = 1.0f64;
         // Zipped rather than indexed, but still strictly ascending in channel order: the
         // order is not an optimisation detail here, it is how the linked gains were
         // combined a few lines above, and the two have to agree.
@@ -1057,34 +1037,57 @@ impl Limiter {
             lines,
             ..
         } = self;
-        for ((g, ring), (line, buf)) in gain
+        for ((g_fast_ref, ring), (line, buf)) in gain
             .iter()
             .zip(gr_ring.iter())
             .zip(lines.iter_mut().zip(frame.iter_mut()))
         {
-            let g = *g * ring[jslot];
+            let g_fast = *g_fast_ref;
+            let g_slow = ring[jslot];
+            let g = g_fast * g_slow;
             let old = line[slot];
             line[slot] = *buf;
             *buf = old * g;
             if g < deepest {
                 deepest = g;
             }
+            if g_slow < slow_deepest {
+                slow_deepest = g_slow;
+            }
+            if g_fast < fast_deepest {
+                fast_deepest = g_fast;
+            }
         }
-        if live && deepest < 1.0 - ENGAGED_EPS {
-            // `engaged_frames` is the latch: the report says how many frames were changed, and a
-            // reader who wants "did it engage at all" asks `engaged_frames > 0`. A second bool
-            // set-once here could only ever agree with `engaged_frames > 0`, so it was a place to
-            // be wrong rather than a fact. The count is what the harness asserts on.
-            //
-            // `live` is part of the definition, not a refinement: for the first `latency` frames the
-            // delay line still holds the silence it started with, so the gain multiplies samples that
-            // were never the input. Counting them reported a file as limited on frames that carried
-            // no audio, and a first frame hot enough to pull the gain down inflated the count by the
-            // whole lookahead before a single delivered sample was touched.
-            self.report.engaged_frames += 1;
-            let db = -20.0 * deepest.max(f64::MIN_POSITIVE).log10();
-            if db > self.report.max_gain_reduction_db {
-                self.report.max_gain_reduction_db = db;
+        if live {
+            if deepest < 1.0 - ENGAGED_EPS {
+                // `engaged_frames` is the latch: the report says how many frames were changed, and a
+                // reader who wants "did it engage at all" asks `engaged_frames > 0`. A second bool
+                // set-once here could only ever agree with `engaged_frames > 0`, so it was a place to
+                // be wrong rather than a fact. The count is what the harness asserts on.
+                //
+                // `live` is part of the definition, not a refinement: for the first `latency` frames the
+                // delay line still holds the silence it started with, so the gain multiplies samples that
+                // were never the input. Counting them reported a file as limited on frames that carried
+                // no audio, and a first frame hot enough to pull the gain down inflated the count by the
+                // whole lookahead before a single delivered sample was touched.
+                self.report.engaged_frames += 1;
+                let db = -20.0 * deepest.max(f64::MIN_POSITIVE).log10();
+                if db > self.report.max_gain_reduction_db {
+                    self.report.max_gain_reduction_db = db;
+                }
+            }
+            if slow_deepest < 1.0 - ENGAGED_EPS {
+                self.report.release_frames += 1;
+                let db = -20.0 * slow_deepest.max(f64::MIN_POSITIVE).log10();
+                if db > self.report.release_reduction_db {
+                    self.report.release_reduction_db = db;
+                }
+            }
+            if fast_deepest < 1.0 - ENGAGED_EPS {
+                let db = -20.0 * fast_deepest.max(f64::MIN_POSITIVE).log10();
+                if db > self.report.transient_reduction_db {
+                    self.report.transient_reduction_db = db;
+                }
             }
         }
         self.pos = if slot + 1 >= latency.max(1) {
@@ -1492,8 +1495,8 @@ mod tests {
             "worst landing {:+.3} dB below the ceiling, at {}, where the guard band is \
              {:.3} dB: that is squashing, not limiting",
             landing.0,
-            landing.1,
-            landing.2
+            landing.2,
+            landing.1
         );
     }
 
@@ -1547,6 +1550,7 @@ mod tests {
             short_len
         );
         assert_eq!(before.max_gain_reduction_db, 0.0, "{before:?}");
+        assert_eq!(before.transient_reduction_db, 0.0, "{before:?}");
 
         // The same claim was made twice over, by two counters, and only one of them was wrong.
         // `engaged_frames` reads the gain that was applied to the sample that left the delay line;
@@ -1591,6 +1595,7 @@ mod tests {
             lat - 1
         );
         assert_eq!(slow_before.release_reduction_db, 0.0, "{slow_before:?}");
+        assert_eq!(slow_before.transient_reduction_db, 0.0, "{slow_before:?}");
         assert_eq!(slow_before.engaged_frames, 0, "{slow_before:?}");
 
         // And neither counter is simply switched off: the same material, long enough to be
@@ -1633,6 +1638,28 @@ mod tests {
             "every frame counted, including the {} silent ones: {r:?}",
             short_len
         );
+    }
+
+    #[test]
+    fn slow_stage_and_transient_report_are_strictly_aligned_at_emission() {
+        let cfg = Cfg {
+            enable: true,
+            ceiling_db: -3.0,
+            ratio: Ratio::X16,
+            lookahead_ms: 2.0,
+            ..Cfg::default()
+        };
+        let mut data = [vec![1.0f64; 100]];
+        let mut lim = Limiter::enabled(cfg, 48000, 1);
+        let mut blocks: Vec<&mut [f64]> = data.iter_mut().map(|d| &mut d[..]).collect();
+        lim.process(&mut blocks);
+        let rep = lim.report();
+        assert!(rep.latency_samples > 100);
+        assert_eq!(rep.engaged_frames, 0);
+        assert_eq!(rep.max_gain_reduction_db, 0.0);
+        assert_eq!(rep.release_frames, 0);
+        assert_eq!(rep.release_reduction_db, 0.0);
+        assert_eq!(rep.transient_reduction_db, 0.0);
     }
 
     /// A limiter that never engages must leave the signal alone apart from the delay.

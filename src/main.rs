@@ -313,14 +313,12 @@ struct Args {
         help_heading = "Groundwork (opt-in)"
     )]
     peq_bands: usize,
-    /// Target family: harman, diffuse, spatial
-    #[arg(
-        long,
-        value_name = "FAMILY",
-        default_value = "harman",
-        help_heading = "Groundwork (opt-in)"
-    )]
-    target_family: String,
+    /// Target family: harman, diffuse, spatial. Default: harman. The `Option` is load-bearing:
+    /// a recorded preset supplies its own family only when this flag was not named, and a plain
+    /// `String` defaulting to `"harman"` cannot tell "not named" apart from "named, to pull a
+    /// diffuse/spatial preset back to harman."
+    #[arg(long, value_name = "FAMILY", help_heading = "Groundwork (opt-in)")]
+    target_family: Option<String>,
     /// Bass-shelf trim (dB) of the parameterized target. An explicit value always wins over a
     /// `--target-preset`, `0.0` included: "no shelf" is a decision, not the absence of one.
     #[arg(
@@ -471,11 +469,9 @@ fn run(args: Args) -> Result<(), Error> {
     validate_choice(&args.notch_mode, &NotchMode::CHOICES, "--notch-mode");
     validate_choice(&args.stereo, &hypreq::stereo::Mode::CHOICES, "--stereo");
     validate_choice(&args.synth, &["fir", "parallel-iir", "peq"], "--synth");
-    validate_choice(
-        &args.target_family,
-        &["harman", "diffuse", "spatial"],
-        "--target-family",
-    );
+    if let Some(family) = args.target_family.as_deref() {
+        validate_choice(family, &["harman", "diffuse", "spatial"], "--target-family");
+    }
     validate_choice(&args.ppr_mode, &["over-ear", "in-ear"], "--ppr-mode");
     for (name, v) in [
         ("--ensemble-alpha", Some(args.ensemble_alpha)),
@@ -1143,7 +1139,7 @@ fn run_model(
 
     let title = figure_title(model, notch_mode);
 
-    let stages = corrected_curve_stages(model, args)?;
+    let stages = corrected_curve_stages(model, args, fs, !args.measure_only)?;
     let (active_ctrl, reg_lines) = stages.shared;
 
     // When the run replaced the target (--target-preset / --target-csv / a parameterized shelf),
@@ -1444,6 +1440,8 @@ fn run_model(
         // that writes two filters and verifies against the other one is worse than no verification.
         run_verification(
             model,
+            stages.raw_active.as_deref(),
+            stages.target.as_deref(),
             &mpv.ir,
             fs,
             mpv.preamp_db,
@@ -1502,9 +1500,16 @@ fn run_audio_wav_mode(
     // reader already knows which model and which notch policy the knots belong to. Some for
     // exactly the path that needs it: a model, and the EQ not bypassed.
     let regularized = match model_cfg {
-        Some(m) if !args.bypass_eq => Some(corrected_curve_stages(m, args)?),
+        Some(m) if !args.bypass_eq => {
+            Some(corrected_curve_stages(m, args, fs, !args.measure_only)?)
+        }
         _ => None,
     };
+    // The design curves verification has to judge against, kept before `regularized` is
+    // consumed by the filter stage below.
+    let design_curves = regularized
+        .as_ref()
+        .map(|s| (s.raw_active.clone(), s.target.clone()));
 
     // The ears, asked about the curve the filter is about to be built from — so the block prints
     // under the banner with the regularization lines, and so `split`'s pair is derived from exactly
@@ -1799,6 +1804,14 @@ fn run_audio_wav_mode(
         // the finding is about the measurement and not about the output.
         run_verification(
             model,
+            design_curves
+                .as_ref()
+                .and_then(|(r, _)| r.as_ref())
+                .map(Vec::as_slice),
+            design_curves
+                .as_ref()
+                .and_then(|(_, t)| t.as_ref())
+                .map(Vec::as_slice),
             ir,
             fs,
             *preamp_db,
@@ -1987,6 +2000,7 @@ fn derivation_params(model: &Model) -> (f64, f64, f64) {
 
 /// A user-supplied rig-target recipe: published shelf constants over a baseline curve the user
 /// owns. Copyrighted target tables are never embedded in this MIT crate.
+#[derive(Debug)]
 struct TargetPreset {
     name: String,
     baseline: Vec<(f64, f64)>,
@@ -2034,10 +2048,18 @@ fn load_target_preset(path: &Path) -> Result<TargetPreset, Error> {
         .iter()
         .filter_map(|p| {
             let f = *p.first()?;
-            let g = *p.last()?;
+            // `point_gain`, not the last column: a `[freq, L, R]` baseline is a two-ear curve,
+            // and reading the right ear as the whole curve is what `model::point_gain` exists
+            // to prevent. A two-column row still reads its second column — no change there.
+            let g = hypreq::model::point_gain(p);
             (f.is_finite() && f > 0.0 && g.is_finite()).then_some((f, g))
         })
         .collect();
+    // Sort and collapse *before* counting. Two hand-pasted rows at one frequency are one knot
+    // to every interpolant that reads this curve later, so a baseline that "counts" 2 and
+    // interpolates as 1 must not pass the gate — the count and the curve have to be the same
+    // object. Last write wins, the rule every other loader here uses.
+    let baseline = hypreq::model::sort_and_dedup_pairs(&baseline);
     if baseline.len() < 2 {
         return Err(Error::msg(format!(
             "--target-preset '{}': baseline '{}' holds fewer than two usable points",
@@ -2066,11 +2088,17 @@ fn load_target_preset(path: &Path) -> Result<TargetPreset, Error> {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("harman")
         .to_string();
-    validate_choice(
-        &family,
-        &["harman", "diffuse", "spatial"],
-        "--target-preset family",
-    );
+    // A recipe's family is data, not argv. `validate_choice` answers a bad value with
+    // `process::exit(2)` — correct for the argument parser, but inside a `Result` function it
+    // killed the process mid-call, straight past every caller's cleanup and every unit test
+    // that expects a returned error. The recipe failure leaves as an error like every other
+    // recipe failure.
+    if !["harman", "diffuse", "spatial"].contains(&family.as_str()) {
+        return Err(Error::msg(format!(
+            "--target-preset '{name}': family '{family}' is not one of \
+             'harman', 'diffuse', 'spatial'"
+        )));
+    }
     let num = |k: &str| -> Result<f64, Error> {
         obj.get("params")
             .and_then(|p| p.get(k))
@@ -2108,7 +2136,13 @@ struct TargetContext {
 
 fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
     let mut baseline = model.target_pts.clone();
-    let mut family = args.target_family.clone();
+    // The CLI default is applied here rather than by clap, so that "named `harman`" stays
+    // distinguishable from "named nothing" further down, where the preset's own family is
+    // considered.
+    let mut family = args
+        .target_family
+        .clone()
+        .unwrap_or_else(|| "harman".to_string());
     let mut params = groundwork_target_params(args);
     let mut preset_info: Option<String> = None;
     let mut preset_name: Option<String> = None;
@@ -2119,7 +2153,10 @@ fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
             .iter()
             .filter_map(|p| {
                 let f = *p.first()?;
-                let g = *p.last()?;
+                // Mean of the ears on a `[freq, L, R]` row, the same reading `model::point_gain`
+                // gives every other curve in this program; `*p.last()` silently ran the right
+                // ear as the target.
+                let g = hypreq::model::point_gain(p);
                 (f.is_finite() && f > 0.0 && g.is_finite()).then_some((f, g))
             })
             .collect();
@@ -2157,7 +2194,19 @@ fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
         })?;
         // Same rule for a recipe's `baseline_csv`: it is a file on disk like any other.
         baseline = hypreq::model::sort_and_dedup_pairs(&preset.baseline);
-        if args.target_family == "harman" {
+        if baseline.len() < 2 {
+            return Err(Error::msg(format!(
+                "--target-preset '{}': baseline collapses to fewer than two distinct frequencies",
+                path.display()
+            )));
+        }
+        // The recipe carries the family it was defined with, but only where the user named
+        // none. Comparing the *value* against "harman" (as this did while the flag defaulted
+        // to "harman" inside clap) made it impossible to take a diffuse/spatial preset back to
+        // the flat family — `--target-family harman` was indistinguishable from silence.
+        // Naming the flag, even with the default's own word, is the request; the trims below
+        // already use that rule for bass/mid/tilt.
+        if args.target_family.is_none() {
             family = preset.family;
         }
         // A preset fills in the trims the user did not name. It is not allowed to overwrite one
@@ -2237,7 +2286,7 @@ fn target_extension_active_for(model: &Model, args: &Args) -> bool {
 /// Naming one of the three trims counts even when the number is `0.0` — typing the flag is the
 /// request — which is why the flags carry an `Option` and this cannot be written as a value test.
 fn target_extension_active(args: &Args) -> bool {
-    args.target_family != "harman"
+    args.target_family.is_some()
         || args.target_bass.is_some()
         || args.target_mid.is_some()
         || args.target_tilt.is_some()
@@ -2380,8 +2429,14 @@ fn target_query_grid(f_t: &[f64], f_raw: &[f64]) -> Vec<f64> {
     let hi = grid[grid.len() - 1];
     if hi > lo {
         let steps = ((hi / lo).log2() * POINTS_PER_OCTAVE).ceil() as usize;
-        for i in 0..=steps.min(MAX_GRID) {
-            let t = i as f64 / steps.max(1) as f64;
+        // One count for both the loop bound and the divisor. Clamping only the loop bound
+        // (the old `steps.min(MAX_GRID)` against a `/ steps` denominator) stopped `t` at
+        // `MAX_GRID / steps` and left the top slice of the log span unsampled — a >85-octave
+        // axis lost its upper octaves silently. Clamping the count itself gives up density,
+        // never coverage: the grid still ends exactly at `hi`.
+        let n_steps = steps.clamp(1, MAX_GRID);
+        for i in 0..=n_steps {
+            let t = i as f64 / n_steps as f64;
             grid.push(lo * (hi / lo).powf(t));
         }
         grid.sort_by(|a, b| a.total_cmp(b));
@@ -2390,7 +2445,42 @@ fn target_query_grid(f_t: &[f64], f_raw: &[f64]) -> Vec<f64> {
     grid
 }
 
+#[cfg(test)]
+mod grid_tests {
+    use super::target_query_grid;
+
+    /// A span wider than `MAX_GRID` points must thin the grid, not truncate it: the old
+    /// code divided the clamped loop index by the unclamped step count, so `t` stopped at
+    /// `4096 / steps` and everything above `lo * (hi/lo)^(4096/steps)` silently vanished.
+    #[test]
+    fn an_overlong_span_gives_up_density_not_coverage() {
+        // 1e-24 Hz .. 100 Hz is 86.4 octaves, so the 48-points-per-octave demand exceeds
+        // MAX_GRID. The endpoints are seeded into the grid either way — what truncation
+        // silently throws away is the *interior* above `lo * (hi/lo)^(MAX_GRID/steps)`,
+        // and the largest adjacent ratio is the honest observable: 2.06 (a whole octave
+        // of nothing) under the old bound/divisor mismatch, 1.0147 (~1/48 octave) after.
+        let f_t = [1e-24, 100.0];
+        let grid = target_query_grid(&f_t, &[]);
+        assert!(grid.iter().all(|f| f.is_finite() && *f > 0.0));
+        let max_ratio = grid.windows(2).map(|w| w[1] / w[0]).fold(0.0f64, f64::max);
+        assert!(
+            max_ratio < 1.05,
+            "the interior lost an octave-sized hole: largest gap x{max_ratio}"
+        );
+        // An ordinary audio span keeps its full 1/48-octave density (unchanged behaviour;
+        // 20 Hz..20 kHz is 9.97 octaves -> 479 steps -> 480 grid points).
+        let audio = target_query_grid(&[20.0, 20000.0], &[]);
+        assert!(audio.len() >= 479, "audio span thinned: {}", audio.len());
+        let adjacent = audio[1] / audio[0];
+        assert!(
+            adjacent < (2.0f64).powf(1.0 / 47.0),
+            "audio span must keep ~1/48-octave spacing, got {adjacent}"
+        );
+    }
+}
+
 /// Result of collapsing repeated placement measurements.
+#[derive(Debug)]
 struct EnsembleOutcome {
     /// Robust raw curve on the model's own grid, normalised at 1 kHz.
     raw: Vec<(f64, f64)>,
@@ -2463,6 +2553,22 @@ fn ensemble_stage(
         }
         return Err(Error::msg("--ensemble-csv: no CSV held two usable points"));
     }
+    // The paragraph above promises "spread needs at least two curves", and a single curve is
+    // exactly what must not reach `analyze_ensemble`: its spread is zero by construction, and
+    // the stage would report a smoothed median with a flat `sigma_r = 0` and a zero-width
+    // bootstrap around a placement that was never repeated — a measured uncertainty reading of
+    // "perfect" for the one thing with no second measurement. One recorded placement proceeds
+    // on the single raw curve (`None`), the same as a model that records none; an explicit
+    // `--ensemble-csv` that delivered only one usable curve is a request that cannot be
+    // honoured, so it says so rather than silently becoming a single-curve "ensemble".
+    if curves.len() == 1 {
+        if args.ensemble_csv.is_empty() {
+            return Ok(None);
+        }
+        return Err(Error::msg(
+            "--ensemble-csv: spread needs at least two placement curves, one was usable",
+        ));
+    }
     let f_min = curves
         .iter()
         .flat_map(|c| c.iter().map(|p| p.0))
@@ -2527,7 +2633,8 @@ fn global_fit_stage(
     model: &Model,
     args: &Args,
     sigma: Option<&[(f64, f64)]>,
-    rig_sigma: &[f64],
+    rig_sigma: Option<&[(f64, f64)]>,
+    raw_active: &[(f64, f64)],
 ) -> Result<CurveAndReport, Error> {
     if !args.global_fit {
         return Ok((ctrl.to_vec(), Vec::new()));
@@ -2550,11 +2657,22 @@ fn global_fit_stage(
     };
     // With an empirical calibration its delta_sigma_db is the rig term; without one, carry a
     // small conservative allowance rather than silently assuming cross-rig uncertainty is zero.
+    //
+    // The calibration arrives as knots on the control curve's own axis (19 to 128 rows for the
+    // shipped controllers) while the QP grid is 479 bins. The old `rig_sigma.len() == k` check
+    // therefore matched only by accident — and the accident path silently replaced a measured
+    // `delta_sigma(f)` with a flat 0.5 dB under a report line that said "delta_sigma feeds the
+    // QP", while the one case where lengths did agree would have paired two different frequency
+    // axes without resampling. Interpolate the knots onto the QP grid exactly as `sigma_r`
+    // crosses over; the flat allowance belongs to "no calibration", not to "calibration sampled
+    // somewhere else".
     const RIG_SIGMA_DB: f64 = 0.5;
-    let rig_term: Vec<f64> = if rig_sigma.len() == k {
-        rig_sigma.to_vec()
-    } else {
-        vec![RIG_SIGMA_DB; k]
+    let rig_term: Vec<f64> = match rig_sigma {
+        Some(s) if s.len() >= 2 => {
+            let (rf, rs): (Vec<f64>, Vec<f64>) = s.iter().copied().unzip();
+            hypreq::fft::interp_grid(&f, &rf, &rs)
+        }
+        _ => vec![RIG_SIGMA_DB; k],
     };
     let total_sigma: Vec<f64> = sigma_r
         .iter()
@@ -2562,17 +2680,17 @@ fn global_fit_stage(
         .map(|(&r, &s)| (r * r + s * s).sqrt())
         .collect();
     // The distortion ceiling is stated in absolute SPL, so the calibration term it needs is the
-    // headphone's own response R(f) — which `Model::raw_pts` already carries, normalised to 0 dB
-    // at 1 kHz by the loader. Handing `q_max_bounds` zeros instead was not a neutral default: it
-    // over-allows by R(f) wherever the driver is already sensitive. A model with no raw curve has
-    // no calibration to contribute, and zeros are the honest answer there.
+    // headphone's own response R(f) — and it has to be *this run's* R(f): `raw_active` is the
+    // ensemble curve when one was collapsed, and it has already been moved by the rig
+    // calibration's `+delta_mean` when one is active, because the ceiling compares against the
+    // same rig coordinate the correction was built in. Reading `model.raw_pts` here instead —
+    // the old behaviour — judged the ceiling of a calibrated or ensemble run on an uncalibrated,
+    // single-placement curve. Handing `q_max_bounds` zeros was the earlier failure and is not a
+    // neutral default either: it over-allows by R(f) wherever the driver is already sensitive.
+    // No raw curve at all stays zeros: there is genuinely nothing to contribute.
     let listen_spl = args.listen_spl.unwrap_or(85.0);
-    let h_cal: Vec<f64> = if model.raw_pts.len() >= 2 {
-        let (fr, gr): (Vec<f64>, Vec<f64>) = model
-            .raw_pts
-            .iter()
-            .map(|p| (p[0], hypreq::model::point_gain(p)))
-            .unzip();
+    let h_cal: Vec<f64> = if raw_active.len() >= 2 {
+        let (fr, gr): (Vec<f64>, Vec<f64>) = raw_active.iter().copied().unzip();
         hypreq::fft::interp_grid(&f, &fr, &gr)
     } else {
         vec![0.0; k]
@@ -2654,11 +2772,20 @@ fn global_fit_stage(
     Ok((out, lines))
 }
 
+/// Synthesize a parametric filter for the curve it is handed.
+///
+/// `ctrl` must already carry the model's notch ceiling: the export is the curve the user loads
+/// into Equalizer APO, and it has to be the same filter the FIR path delivers — same boosts,
+/// same safety cap, same preamp reservation. `write_files` is `--measure-only`'s veto over the
+/// export (the report line names which happened); `headroom_db` is the convolver's steady-state
+/// headroom, mirrored into the preset's Preamp line.
 fn synth_stage(
     ctrl: &[(f64, f64)],
     args: &Args,
     fs: u32,
     prefix: &str,
+    write_files: bool,
+    headroom_db: f64,
 ) -> Result<CurveAndReport, Error> {
     if args.synth == "fir" || ctrl.len() < 2 {
         return Ok((ctrl.to_vec(), Vec::new()));
@@ -2676,9 +2803,18 @@ fn synth_stage(
                 1e-4,
             );
             let pred = hypreq::synth_alt::cascade_mag_db(&bands, &cf, f64::from(fs));
-            let path = format!("{prefix}_peq.txt");
-            std::fs::write(&path, hypreq::synth_alt::to_equalizer_apo_text(&bands, 0.0))
-                .map_err(|e| Error::msg(format!("cannot write '{path}': {e}")))?;
+            // APO applies the same filter the convolver would, so it has to keep the same
+            // staging: `headroom_db - max boost`, the rule `ir.rs` bakes into every FIR tap.
+            // A hardcoded 0.0 exported a +9 dB filter with 0 dB of preamp — the APO user
+            // clips on any input hotter than the filter's own boost, exactly what the
+            // convolver path refuses to do. `pred`, not `want`: the reservation is against
+            // the magnitude the exported bands actually realize.
+            let max_boost = pred.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let preamp_db = if max_boost.is_finite() {
+                headroom_db - max_boost
+            } else {
+                0.0
+            };
             let summary = bands
                 .iter()
                 .map(|b| {
@@ -2691,14 +2827,24 @@ fn synth_stage(
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            (
-                pred,
-                vec![
-                    "=== Vicanek Matched PEQ Synthesis ===".to_string(),
-                    format!("  Bands           : {} ({summary})", bands.len()),
-                    format!("  APO preset      : {path}"),
-                ],
-            )
+            let mut lines = vec![
+                "=== Vicanek Matched PEQ Synthesis ===".to_string(),
+                format!("  Bands           : {} ({summary})", bands.len()),
+            ];
+            if write_files {
+                let path = format!("{prefix}_peq.txt");
+                std::fs::write(
+                    &path,
+                    hypreq::synth_alt::to_equalizer_apo_text(&bands, preamp_db),
+                )
+                .map_err(|e| Error::msg(format!("cannot write '{path}': {e}")))?;
+                lines.push(format!("  APO preset      : {path}"));
+            } else {
+                lines.push(format!(
+                    "  APO preset      : not written (--measure-only), Preamp {preamp_db:.2} dB"
+                ));
+            }
+            (pred, lines)
         }
         "parallel-iir" => {
             let bank =
@@ -2739,7 +2885,18 @@ fn synth_stage(
 /// the model — this returns the same `(model.ctrl_pts, empty lines)` as before, which is what
 /// `regularize_off_hands_back_the_models_own_curve` and `groundwork_flags_are_all_off_by_default`
 /// hold shut.
-fn corrected_curve_stages(model: &Model, args: &Args) -> Result<FilterStages, Error> {
+///
+/// `fs` is the sample rate the *run* resolved to — the input file's rate in `--input` WAV mode,
+/// `--fs` (default 48000) elsewhere — because a PEQ cascade or fixed-pole bank fitted at 48 kHz
+/// is the wrong filter at 44.1 or 96 kHz: Vicanek's matched biquads and Bank's pole grid are
+/// both functions of `fs`, and only the FIR stage used to see the file's rate. `write_files` is
+/// `--measure-only`: a measurement pass exports no preset files.
+fn corrected_curve_stages(
+    model: &Model,
+    args: &Args,
+    fs: u32,
+    write_files: bool,
+) -> Result<FilterStages, Error> {
     let ctx = target_context(model, args)?;
     let ensemble = ensemble_stage(args, &model.raw_ensemble)?;
     // Which ever way the curve arrived, the lines that describe it travel with it. The target paths
@@ -2774,6 +2931,19 @@ fn corrected_curve_stages(model: &Model, args: &Args) -> Result<FilterStages, Er
         regularized_ctrl(model, args)
     };
 
+    // The raw curve this run designs against, in target-rig coordinates: the collapsed ensemble
+    // when one exists (it *is* the raw curve the fit gets), the database record otherwise, and
+    // moved by `+delta_mean` under an active calibration. The distortion ceiling and the
+    // excursion screen read R(f) in absolute SPL, so they need exactly this curve — not the
+    // shipped `raw_pts` — or a calibrated run has its ceiling computed on the rig it left.
+    let mut raw_active: Vec<(f64, f64)> = match ensemble.as_ref() {
+        Some(e) => e.raw.clone(),
+        None => model
+            .raw_pts
+            .iter()
+            .map(|p| (p[0], hypreq::model::point_gain(p)))
+            .collect(),
+    };
     let calibration = match args.rig_calibration.as_ref() {
         Some(path) => Some(
             hypreq::fixture::RigCalibration::from_json_file(path)
@@ -2781,7 +2951,12 @@ fn corrected_curve_stages(model: &Model, args: &Args) -> Result<FilterStages, Er
         ),
         None => model.rig_calibration.clone(),
     };
-    let mut rig_sigma: Vec<f64> = Vec::new();
+    // Some(...) whenever the run's design object differs from what the database record says —
+    // which is exactly when `--verify-with` and the report paths must stop reading
+    // `model.raw_pts` / `model.target_pts` and read these instead. A plain run keeps `None` and
+    // its byte-identical reference behaviour.
+    let mut diverged = target_extension_active_for(model, args) || ensemble.is_some();
+    let mut rig_sigma: Option<Vec<(f64, f64)>> = None;
     if let Some(cal) = calibration.as_ref() {
         let f: Vec<f64> = base_ctrl.iter().map(|p| p.0).collect();
         let (mean, sigma) = cal.on_grid(&f);
@@ -2792,7 +2967,16 @@ fn corrected_curve_stages(model: &Model, args: &Args) -> Result<FilterStages, Er
             .zip(&mean)
             .map(|((f, g), d)| (*f, g - d))
             .collect();
-        rig_sigma = sigma;
+        rig_sigma = Some(f.into_iter().zip(sigma).collect());
+        // And the raw curve itself crosses rigs the other way: +delta is the R(f) the SPL
+        // ceiling has to score. The correction and R(f) are the same translation seen from the
+        // two sides; translating only one leaves half of a rig move in the design.
+        let fr: Vec<f64> = raw_active.iter().map(|p| p.0).collect();
+        let (mean_raw, _) = cal.on_grid(&fr);
+        for ((_, g), d) in raw_active.iter_mut().zip(&mean_raw) {
+            *g += d;
+        }
+        diverged = true;
         reg_lines.push("=== Empirical Rig Translation ===".to_string());
         reg_lines.push(format!(
             "  {} -> {}      : delta_mean subtracted from the correction, delta_sigma feeds the QP",
@@ -2800,42 +2984,76 @@ fn corrected_curve_stages(model: &Model, args: &Args) -> Result<FilterStages, Er
             cal.target.key()
         ));
     }
+    let design_target: Option<Vec<(f64, f64)>> = diverged
+        .then(|| {
+            let f_raw: Vec<f64> = raw_active.iter().map(|p| p.0).collect();
+            run_target_curve(model, args, &ctx, &f_raw)
+        })
+        .transpose()?;
 
     if args.global_fit {
         let sigma = ensemble.as_ref().map(|e| e.sigma.as_slice());
-        let (fitted, lines) = global_fit_stage(&base_ctrl, model, args, sigma, &rig_sigma)?;
+        let (fitted, lines) = global_fit_stage(
+            &base_ctrl,
+            model,
+            args,
+            sigma,
+            rig_sigma.as_deref(),
+            &raw_active,
+        )?;
         base_ctrl = fitted;
         reg_lines.extend(lines);
     }
-    let fs = fs_hz(args, 48000)?;
-    let (synth_ctrl, synth_lines) = synth_stage(&base_ctrl, args, fs, &model.file_prefix)?;
-    base_ctrl = synth_ctrl;
-    reg_lines.extend(synth_lines);
 
-    // The ceiling is applied here, once. Capping is not idempotent: `c * tanh(g / c) < g` for every
-    // positive `g`, however far below `c`, so a curve that goes through `apply_notch_mode` twice
-    // loses level twice inside the notch band. `--stereo split` therefore starts from `pre_cap`
-    // below and caps each ear itself rather than starting from this one.
-    let active_ctrl = apply_notch_mode(
-        &base_ctrl,
+    // The ceiling lands here — once, before anything is synthesized from the curve. Capping is
+    // not idempotent: `c * tanh(g / c) < g` for every positive `g`, however far below `c`, so a
+    // curve that goes through `apply_notch_mode` twice loses level twice inside the notch band.
+    // `--stereo split` therefore starts from `pre_cap` below and caps each ear itself rather
+    // than starting from this one. It lands *before* the synthesis because the synthesis
+    // exports: an Equalizer APO preset cut from the uncapped curve promised the user the boosts
+    // the model's own `safe_cap_db` metadata forbids, while the FIR delivered the capped one.
+    // Synthesizing the capped curve makes both deliverables the same filter. `--synth fir` is
+    // the identity stage, so the default path is numerically untouched by the reordering.
+    let pre_cap = base_ctrl;
+    let capped_ctrl = apply_notch_mode(
+        &pre_cap,
         notch_mode(args),
         model.safe_cap_db,
         model.notch_range_hz,
     )
     .map_err(|e| Error::msg(e.0))?;
+    let (active_ctrl, synth_lines) = synth_stage(
+        &capped_ctrl,
+        args,
+        fs,
+        &model.file_prefix,
+        write_files,
+        args.headroom_db,
+    )?;
+    reg_lines.extend(synth_lines);
     Ok(FilterStages {
         shared: (active_ctrl, reg_lines),
-        pre_cap: base_ctrl,
+        pre_cap,
+        raw_active: diverged.then_some(raw_active),
+        target: design_target,
     })
 }
 
-/// The delivered filter, and the curve the notch ceiling was applied to.
+/// The delivered filter, and the curves this run was actually designed against.
 struct FilterStages {
-    /// What the convolver is loaded with: the derived curve with the ceiling applied once.
+    /// What the convolver is loaded with: the ceiling-capped curve (`--synth fir`), or the
+    /// parametric fit to it (`--synth peq` / `parallel-iir`).
     shared: CurveAndReport,
-    /// The same curve *before* the ceiling. A per-ear trim has to start here, because the ceiling
-    /// is the last word per ear and applying it twice is not applying it once.
+    /// The capped curve's own input — the derived curve *before* the ceiling. A per-ear trim has
+    /// to start here, because the ceiling is the last word per ear and applying it twice is not
+    /// applying it once.
     pre_cap: Vec<(f64, f64)>,
+    /// This run's raw curve (ensemble-collapsed and rig-translated), when the run diverged from
+    /// the database record. `--verify-with` reads this instead of `model.raw_pts`.
+    raw_active: Option<Vec<(f64, f64)>>,
+    /// This run's resolved target curve (preset/CSV/family/trims/contour), when the run
+    /// diverged. `--verify-with` reads this instead of `model.target_pts`.
+    target: Option<Vec<(f64, f64)>>,
 }
 
 /// The delivered filter alone, for callers that have no use for the pre-ceiling curve.
@@ -2845,7 +3063,18 @@ struct FilterStages {
 /// rather than as `corrected_curve_stages(..).shared` everywhere.
 #[cfg(test)]
 fn corrected_curve(model: &Model, args: &Args) -> Result<CurveAndReport, Error> {
-    corrected_curve_stages(model, args).map(|stages| stages.shared)
+    corrected_curve_stages(model, args, fs_hz(args, 48000)?, true).map(|stages| stages.shared)
+}
+
+/// The database record's raw curve as plain `(f, gain)` pairs, for tests that call
+/// `global_fit_stage` the way `corrected_curve_stages` does on an undiverged run.
+#[cfg(test)]
+fn raw_curve(model: &Model) -> Vec<(f64, f64)> {
+    model
+        .raw_pts
+        .iter()
+        .map(|p| (p[0], hypreq::model::point_gain(p)))
+        .collect()
 }
 
 /// Apply the experimental mixed-phase stage to a finished filter, keeping the report honest.
@@ -2958,8 +3187,18 @@ fn realized_gain_db(ir: &[f64], fs: u32, f_query: &[f64]) -> Vec<f64> {
 /// `dir` is where the per-band table goes; `None` in measure-only mode, which writes no files at
 /// all. `note` is the one thing the numbers cannot say about the run itself - which of the several
 /// filters this program can write was the one applied.
+/// `raw_active` / `target` are the curves **this run** was designed against — the collapsed
+/// ensemble and the rig-translated raw, and the preset/CSV/family/contour-resolved target —
+/// when the run replaced either. Passing `None` for both (a plain run) keeps the original
+/// behaviour of reading `model.raw_pts` and `model.target_pts` verbatim. Feeding a
+/// `--target-preset` run its database's shipped target — which is what happened before — scored
+/// the post-EQ capture against a curve the run never equalised to: the predicted response used
+/// an uncalibrated raw curve, and the shortfall and Harman PPR used the replaced-away target.
+#[allow(clippy::too_many_arguments)]
 fn run_verification(
     model: &Model,
+    raw_active: Option<&[(f64, f64)]>,
+    target: Option<&[(f64, f64)]>,
     ir: &[f64],
     fs: u32,
     preamp_db: f64,
@@ -2990,18 +3229,35 @@ fn run_verification(
     // constant before judging shape, so the preamp would vanish from the residual anyway, but it
     // would stay in the design shortfall, which is never offset-corrected, and that number is meant
     // to describe a spectral decision rather than a headroom choice.
-    let f_raw: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
-    let g_raw: Vec<f64> = model
-        .raw_pts
-        .iter()
-        .map(|p| hypreq::model::point_gain(p))
-        .collect();
-    let f_t: Vec<f64> = model.target_pts.iter().map(|p| p.0).collect();
-    let g_t: Vec<f64> = model
-        .target_pts
-        .iter()
-        .map(|p| p.1 + model.harm_offset)
-        .collect();
+    let (f_raw, g_raw): (Vec<f64>, Vec<f64>) = match raw_active {
+        Some(curve) => curve.iter().copied().unzip(),
+        None => (
+            model.raw_pts.iter().map(|p| p[0]).collect(),
+            model
+                .raw_pts
+                .iter()
+                .map(|p| hypreq::model::point_gain(p))
+                .collect(),
+        ),
+    };
+    let (f_t, g_t): (Vec<f64>, Vec<f64>) = match target {
+        Some(curve) => {
+            // `run_target_curve` deliberately does not carry the harmonic-offset constant (see
+            // its doc); this is this curve's call site, so it is added here.
+            curve
+                .iter()
+                .map(|&(f, g)| (f, g + model.harm_offset))
+                .unzip()
+        }
+        None => (
+            model.target_pts.iter().map(|p| p.0).collect(),
+            model
+                .target_pts
+                .iter()
+                .map(|p| p.1 + model.harm_offset)
+                .collect(),
+        ),
+    };
 
     let f_raw_min = f_raw.iter().cloned().fold(f64::INFINITY, f64::min);
     let f_raw_max = f_raw.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -3825,7 +4081,7 @@ mod tests {
         assert!(!a.global_fit);
         assert_eq!(a.synth, "fir");
         assert_eq!(a.peq_bands, 8);
-        assert_eq!(a.target_family, "harman");
+        assert_eq!(a.target_family, None);
         assert_eq!(a.target_bass, None);
         assert_eq!(a.target_mid, None);
         assert_eq!(a.target_tilt, None);
@@ -4235,7 +4491,8 @@ mod tests {
         // The fit is asked for +8 dB at the top, well past any ceiling.
         let ctrl = vec![(20.0, 0.0), (1000.0, 0.0), (20000.0, 8.0)];
         let args = argv(&["-H", "hd6xx", "--global-fit", "--listen-spl", "85"]);
-        let (q, lines) = global_fit_stage(&ctrl, &model, &args, None, &[]).expect("global fit");
+        let (q, lines) = global_fit_stage(&ctrl, &model, &args, None, None, &raw_curve(&model))
+            .expect("global fit");
         let joined = lines.join("\n");
         assert!(joined.contains("Boost ceiling"), "{joined}");
         let at = |probe: f64| {
@@ -4279,14 +4536,29 @@ mod tests {
             ref_xmax_spl_db: 96.0,
         });
         let args = argv(&["-H", "hd6xx", "--global-fit", "--listen-spl", "95"]);
-        let (q, lines) = global_fit_stage(&model.ctrl_pts, &model, &args, None, &[]).expect("fit");
+        let (q, lines) = global_fit_stage(
+            &model.ctrl_pts,
+            &model,
+            &args,
+            None,
+            None,
+            &raw_curve(&model),
+        )
+        .expect("fit");
         let joined = lines.join("\n");
         assert!(joined.contains("Excursion screen"), "{joined}");
         assert!(joined.contains("not a bound"), "{joined}");
 
         let plain = notch_cap_fixture();
-        let (solo, solo_lines) =
-            global_fit_stage(&plain.ctrl_pts, &plain, &args, None, &[]).expect("fit");
+        let (solo, solo_lines) = global_fit_stage(
+            &plain.ctrl_pts,
+            &plain,
+            &args,
+            None,
+            None,
+            &raw_curve(&plain),
+        )
+        .expect("fit");
         assert!(
             !solo_lines.join("\n").contains("Excursion screen"),
             "a model with no excursion record must not print the line"
@@ -4514,7 +4786,7 @@ mod tests {
         model.notch_range_hz = Some((1000.0, 8000.0));
         model.safe_cap_db = 1.5;
         let args = argv(&["-H", "hd6xx", "--stereo", "split", "--notch-mode", "safe"]);
-        let stages = corrected_curve_stages(&model, &args).expect("stages");
+        let stages = corrected_curve_stages(&model, &args, 48000, true).expect("stages");
         let shared = &stages.shared.0;
 
         // The fixture has to actually exercise the ceiling, or the equality below proves nothing.
@@ -4595,7 +4867,7 @@ mod tests {
             .map(|p| vec![p[0], 0.2, -0.2, 0.0])
             .collect();
         let args = argv(&["-H", "hd6xx", "--stereo", "split", "--notch-mode", "safe"]);
-        let stages = corrected_curve_stages(&model, &args).expect("stages");
+        let stages = corrected_curve_stages(&model, &args, 48000, true).expect("stages");
         let (lines, pair) =
             stereo_pair(&model, &args, &stages.pre_cap, hypreq::stereo::Mode::Split)
                 .expect("split");
@@ -4645,11 +4917,16 @@ mod tests {
             text.push_str(&format!("{f},{g}\n"));
         }
         std::fs::write(&csv, text).unwrap();
+        // A spread needs a second placement: one CSV is refused outright now.
+        let csv2 = dir.join("second.csv");
+        std::fs::write(&csv2, "20,1.6\n1000,0.4\n4000,-4.4\n20000,0.5\n").unwrap();
         let args = argv(&[
             "-H",
             "hd6xx",
             "--ensemble-csv",
             csv.to_str().unwrap(),
+            "--ensemble-csv",
+            csv2.to_str().unwrap(),
             "--ensemble-alpha",
             "1.5",
             "--global-fit",
@@ -4759,7 +5036,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let csv = dir.join("placement.csv");
         std::fs::write(&csv, "20,7\n1000,3\n4000,-1\n20000,5\n").unwrap();
-        let flagged = argv(&["-H", "hd6xx", "--ensemble-csv", csv.to_str().unwrap()]);
+        // Two placements, because an explicit `--ensemble-csv` with a single usable curve is
+        // now refused rather than run as a zero-spread "ensemble".
+        let csv2 = dir.join("placement2.csv");
+        std::fs::write(&csv2, "20,7.4\n1000,2.6\n4000,-0.6\n20000,5.3\n").unwrap();
+        let flagged = argv(&[
+            "-H",
+            "hd6xx",
+            "--ensemble-csv",
+            csv.to_str().unwrap(),
+            "--ensemble-csv",
+            csv2.to_str().unwrap(),
+        ]);
         let (_, flag_lines) = corrected_curve(&model, &flagged).expect("flagged ensemble");
         std::fs::remove_dir_all(&dir).ok();
         let flag_joined = flag_lines.join("\n");
@@ -4768,7 +5056,7 @@ mod tests {
             flag_joined.contains("read from --ensemble-csv"),
             "the flag must replace the recorded placements, not join them: {flag_joined}"
         );
-        assert!(flag_joined.contains("1 resampled"), "{flag_joined}");
+        assert!(flag_joined.contains("2 resampled"), "{flag_joined}");
     }
 
     /// Placement curves that carry fewer than two usable points are not an error and not an
@@ -4802,6 +5090,469 @@ mod tests {
                 "knot {i} differs from the model's own curve"
             );
         }
+    }
+
+    /// The QP runs on 479 bins; a calibration's `delta_sigma` has one value per control knot
+    /// (19 to 128 rows). The old `rig_sigma.len() == k` check therefore always lost the
+    /// comparison — except by accident, which would have aligned two different axes — and
+    /// silently substituted the flat 0.5 dB allowance under a report line that said
+    /// "delta_sigma feeds the QP". Measured on this fixture: a 9 dB uncertainty window around
+    /// 4 kHz relaxes the delivered boost from +6.0 (the box ceiling) to +1.65; the flat
+    /// fallback cannot produce any difference at all, so this test is exactly the one the old
+    /// code fails.
+    #[test]
+    fn calibrated_delta_sigma_survives_the_trip_into_the_qp() {
+        let model = notch_cap_fixture();
+        let args = argv(&["-H", "hd6xx", "--global-fit"]);
+        let rig: Vec<(f64, f64)> = model
+            .ctrl_pts
+            .iter()
+            .map(|(f, _)| {
+                (
+                    *f,
+                    if (f / 4000.0).log2().abs() < 0.5 {
+                        9.0
+                    } else {
+                        0.05
+                    },
+                )
+            })
+            .collect();
+        let (q_unc, _) = global_fit_stage(
+            &model.ctrl_pts,
+            &model,
+            &args,
+            None,
+            None,
+            &raw_curve(&model),
+        )
+        .expect("flat rig term");
+        let (q_cal, _) = global_fit_stage(
+            &model.ctrl_pts,
+            &model,
+            &args,
+            None,
+            Some(&rig),
+            &raw_curve(&model),
+        )
+        .expect("calibrated rig term");
+        let at = |probe: f64, q: &[(f64, f64)]| {
+            q.iter()
+                .min_by(|a, b| (a.0 - probe).abs().total_cmp(&(b.0 - probe).abs()))
+                .unwrap()
+                .1
+        };
+        let unc = at(4000.0, &q_unc);
+        let cal = at(4000.0, &q_cal);
+        assert!(
+            unc > 5.9,
+            "fixture sanity: demand sits on the box, got {unc}"
+        );
+        assert!(
+            unc - cal > 2.0 && cal > 0.5,
+            "a 9 dB sigma_rig at the demand changed the fit by {} dB (flat fallback reads 0): \
+             {unc} vs {cal}",
+            unc - cal
+        );
+        // Outside the uncertainty window the fit must be untouched.
+        assert!(
+            (at(2000.0, &q_unc) - at(2000.0, &q_cal)).abs() < 0.2,
+            "sigma 0.05 dB elsewhere must not move the 2 kHz demand"
+        );
+    }
+
+    /// The ceiling is stated in absolute SPL, so its R(f) has to be the curve this run designs
+    /// in. A +4 dB rig translation moves the raw curve by +4; the printed `R(f) peak` is the
+    /// observable. Measured: `+0.0 dB` before the fix (raw_pts verbatim), `+4.0 dB` after.
+    #[test]
+    fn the_distortion_ceiling_scores_the_rig_translated_raw_curve() {
+        let mut model = notch_cap_fixture();
+        model.distortion = Some(hypreq::driver::DistortionProfile {
+            sweeps: vec![hypreq::driver::DistortionSweep {
+                spl_db: 94.0,
+                points: vec![(20.0, 1.0), (1000.0, 1.0), (20000.0, 1.0)],
+            }],
+        });
+        let dir = std::env::temp_dir().join(format!("hypreq-hcal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cal = dir.join("cal.json");
+        std::fs::write(
+            &cal,
+            serde_json::json!({
+                "source": "gras_43ag", "target": "bk5128", "acoustic_class": "closed_back",
+                "f_hz": [20.0, 20000.0], "delta_mean_db": [4.0, 4.0], "delta_sigma_db": [0.8, 0.8]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let peek = |lines: &[String]| -> f64 {
+            let l = lines
+                .iter()
+                .find(|l| l.contains("Boost ceiling"))
+                .expect("ceiling line");
+            let i = l.find("R(f) peak ").expect("peak quote") + "R(f) peak ".len();
+            let tok = l[i..].split(" dB").next().expect("number");
+            tok.trim().parse().expect("quoted peak")
+        };
+        let (_, nocal) = corrected_curve(
+            &model,
+            &argv(&["-H", "hd6xx", "--global-fit", "--notch-mode", "safe"]),
+        )
+        .expect("nocal");
+        let (_, withcal) = corrected_curve(
+            &model,
+            &argv(&[
+                "-H",
+                "hd6xx",
+                "--global-fit",
+                "--notch-mode",
+                "safe",
+                "--rig-calibration",
+                cal.to_str().unwrap(),
+            ]),
+        )
+        .expect("withcal");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            peek(&nocal).abs() < 1e-9,
+            "uncalibrated run must read the record verbatim, got {}",
+            peek(&nocal)
+        );
+        assert!(
+            (peek(&withcal) - 4.0).abs() < 1e-9,
+            "the ceiling scored the source rig's R(f), not the translated one: {}",
+            peek(&withcal)
+        );
+    }
+
+    /// Same observable, ensemble side: a model recording placements on a rising raw curve must
+    /// have its ceiling scored on the collapsed ensemble, not on the single shipped `raw_pts`.
+    #[test]
+    fn the_distortion_ceiling_scores_the_ensemble_raw_curve() {
+        let mut model = notch_cap_fixture();
+        model.distortion = Some(hypreq::driver::DistortionProfile {
+            sweeps: vec![hypreq::driver::DistortionSweep {
+                spl_db: 94.0,
+                points: vec![(20.0, 1.0), (1000.0, 1.0), (20000.0, 1.0)],
+            }],
+        });
+        // Two placements, both +12 dB up top (offset slightly so the median keeps the tilt),
+        // while the record's own `raw_pts` stay flat.
+        model.raw_ensemble = vec![
+            vec![vec![20.0, 0.0], vec![1000.0, 0.0], vec![20000.0, 12.0]],
+            vec![vec![20.0, 0.3], vec![1000.0, 0.2], vec![20000.0, 12.2]],
+        ];
+        let (_, lines) = corrected_curve(
+            &model,
+            &argv(&["-H", "hd6xx", "--global-fit", "--notch-mode", "safe"]),
+        )
+        .expect("ensemble fit");
+        let l = lines
+            .iter()
+            .find(|l| l.contains("Boost ceiling"))
+            .expect("ceiling line");
+        let i = l.find("R(f) peak ").expect("peak quote");
+        let v: f64 = l[i + 10..i + 15]
+            .trim()
+            .replace('+', "")
+            .parse()
+            .expect("number");
+        assert!(
+            v > 9.0 && v < 13.0,
+            "the ensemble's +12 dB treble must raise the scored R(f) peak, read {v}: {l}"
+        );
+    }
+
+    /// Three claims about the Equalizer APO export, measured: it must be synthesized at the
+    /// sample rate the RUN resolved (the file's rate in WAV mode — the old code refitted at
+    /// 48 kHz regardless), from the ceiling-CAPPED curve (the old export shipped the uncapped
+    /// +12 dB the model's own `safe_cap_db` forbids), with the convolver's preamp staging
+    /// (the old export hardcoded `Preamp: 0.00 dB`).
+    #[test]
+    fn the_apo_export_follows_the_run_rate_the_ceiling_and_the_preamp_rule() {
+        let run = |fs: u32, extra: &[&str]| -> (Vec<(f64, f64)>, String) {
+            let mut m = notch_cap_fixture();
+            m.file_prefix = format!(
+                "apo_{fs}_{}_{}",
+                extra.join("-").replace("--", ""),
+                std::process::id()
+            );
+            let mut argv_v = vec!["-H", "hd6xx", "--synth", "peq", "--peq-bands", "4"];
+            argv_v.extend_from_slice(extra);
+            let (curve, _) = corrected_curve_stages(&m, &argv(&argv_v), fs, true)
+                .expect("peq")
+                .shared;
+            let path = format!("{}_peq.txt", m.file_prefix);
+            let text = std::fs::read_to_string(&path).expect("preset written");
+            std::fs::remove_file(&path).ok();
+            (curve, text)
+        };
+        let filters = |t: &str| -> String {
+            t.lines()
+                .filter(|l| l.starts_with("Filter"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let (c44, t44) = run(44100, &["--notch-mode", "safe"]);
+        let (c48, t48) = run(48000, &["--notch-mode", "safe"]);
+        assert_ne!(
+            filters(&t44),
+            filters(&t48),
+            "the same export at 44.1 kHz and 48 kHz — the biquads ignore the run's rate"
+        );
+        let _ = (c44, c48);
+
+        // The ceiling must be inside the exported bands, not only inside the FIR: at
+        // `--notch-mode original` the 4 kHz demand keeps its +12 dB, at `safe` it is capped
+        // to 1.5 dB. (Measured: `original` exports a net +11.9 dB band at the notch centre,
+        // `safe` exports its capped shape.)
+        let (_, t_off) = run(48000, &["--notch-mode", "original"]);
+        assert_ne!(
+            filters(&t_off),
+            filters(&t48),
+            "the exported bands are fitted to the uncapped curve — the preset ships the boost \
+             the model's safe_cap_db forbids"
+        );
+
+        // Preamp staging mirrors the convolver (`headroom_db - max boost`, ir.rs): the exact
+        // delivered curve is the one the export must reserve against.
+        let (curve, t) = run(48000, &["--notch-mode", "safe"]);
+        let headroom = argv(&["-H", "hd6xx"]).headroom_db;
+        let max_boost = curve.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+        let quoted: f64 = t
+            .lines()
+            .next()
+            .unwrap()
+            .trim_start_matches("Preamp: ")
+            .trim_end_matches(" dB")
+            .parse()
+            .expect("preamp line");
+        assert!(
+            (quoted - (headroom - max_boost)).abs() < 0.005,
+            "Preamp {quoted} != headroom {headroom} - max boost {max_boost}"
+        );
+        assert!(
+            quoted < 0.0,
+            "a curve that boosts cannot ship 0 dB of preamp: {quoted}"
+        );
+    }
+
+    /// `--measure-only` is a promise that a measurement pass writes no files; the preset
+    /// export used to ignore it. The report line has to say which happened either way.
+    #[test]
+    fn measure_only_exports_no_preset_but_says_so() {
+        let mut m = notch_cap_fixture();
+        m.file_prefix = format!("mo_export_{}", std::process::id());
+        let path = format!("{}_peq.txt", m.file_prefix);
+        std::fs::remove_file(&path).ok();
+        let (_, lines) = corrected_curve_stages(
+            &m,
+            &argv(&["-H", "hd6xx", "--synth", "peq", "--notch-mode", "safe"]),
+            48000,
+            false,
+        )
+        .expect("measure-only peq")
+        .shared;
+        assert!(
+            !std::path::Path::new(&path).exists(),
+            "{path} written despite write_files = false"
+        );
+        let line = lines.iter().find(|l| l.contains("APO")).expect("APO line");
+        assert!(line.contains("not written"), "{line}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `--verify-with` used to read `model.target_pts` even when the run had replaced the
+    /// target, scoring the capture against a curve the run never equalised to. With the run's
+    /// own target handed in, the written table's `target_db` column moves by the replacement's
+    /// exact shape.
+    #[test]
+    fn verify_with_judges_the_runs_own_target_not_the_shipped_one() {
+        let model = notch_cap_fixture(); // shipped target: flat 0 dB, harm_offset 0
+        let dir = std::env::temp_dir().join(format!("hypreq-verify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cap = dir.join("post.csv");
+        // Capture equal to the predicted response: flat raw + identity filter = 0 dB.
+        std::fs::write(&cap, "20,0\n100,0\n1000,0\n10000,0\n20000,0\n").unwrap();
+        let args = argv(&["-H", "hd6xx", "--verify-with", cap.to_str().unwrap()]);
+        let replaced: Vec<(f64, f64)> = vec![(20.0, 1.0), (1000.0, 2.0), (20000.0, 3.0)];
+        let run_to_table = |target: Option<&[(f64, f64)]>| -> Vec<(f64, f64)> {
+            run_verification(
+                &model,
+                None,
+                target,
+                &[1.0],
+                48000,
+                0.0,
+                &args,
+                Some(dir.as_path()),
+                "probe",
+            )
+            .expect("verification");
+            let out = dir.join("cap_fixture_verification.csv");
+            let text = std::fs::read_to_string(&out).expect("table");
+            text.lines()
+                .skip(1)
+                .filter_map(|l| {
+                    let cols: Vec<&str> = l.split(',').collect();
+                    Some((cols[1].parse().ok()?, cols[5].parse().ok()?))
+                })
+                .collect()
+        };
+        let shipped = run_to_table(None);
+        let own = run_to_table(Some(&replaced));
+        let at_1k = |t: &[(f64, f64)]| {
+            t.iter()
+                .min_by(|a, b| (a.0 - 1000.0).abs().total_cmp(&(b.0 - 1000.0).abs()))
+                .expect("bands")
+                .1
+        };
+        assert!(
+            at_1k(&shipped).abs() < 1e-6,
+            "shipped target is flat 0: {}",
+            at_1k(&shipped)
+        );
+        assert!(
+            (at_1k(&own) - 2.0).abs() < 0.1,
+            "the run's own 1 kHz target (2 dB) never reached the verifier: {}",
+            at_1k(&own)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stage's own doc promises "spread needs at least two curves" — a single curve is an
+    /// ensemble with sigma_r = 0 by construction. One recorded placement must fall through to
+    /// the single raw curve (`None`); an explicit `--ensemble-csv` that supplied one curve is a
+    /// request that cannot be honoured and must say so rather than launder it.
+    #[test]
+    fn a_single_placement_curve_is_not_an_ensemble() {
+        let args = argv(&["-H", "hd6xx"]);
+        let one: Vec<hypreq::model::Point> =
+            vec![vec![20.0, 0.0], vec![1000.0, 0.5], vec![20000.0, -0.5]];
+        let two: Vec<hypreq::model::Point> =
+            vec![vec![20.0, 0.2], vec![1000.0, -0.4], vec![20000.0, 0.7]];
+        assert!(
+            ensemble_stage(&args, std::slice::from_ref(&one))
+                .expect("recorded single")
+                .is_none(),
+            "a single recorded placement entered the ensemble machinery"
+        );
+        assert!(
+            ensemble_stage(&args, &[one.clone(), two.clone()])
+                .expect("recorded pair")
+                .is_some(),
+            "two placements must form an ensemble"
+        );
+        let dir = std::env::temp_dir().join(format!("hypreq-ens1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f1 = dir.join("one.csv");
+        std::fs::write(&f1, "20,0\n1000,0.5\n20000,-0.5\n").unwrap();
+        let e = ensemble_stage(
+            &argv(&["-H", "hd6xx", "--ensemble-csv", f1.to_str().unwrap()]),
+            &[],
+        )
+        .expect_err("one explicit CSV must be refused, not run as a 1-curve ensemble");
+        assert!(e.to_string().contains("at least two"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--target-family` used to default to the literal `"harman"`, and the preset-override
+    /// check compared the *value* — so naming the flag with the default's own word was
+    /// indistinguishable from silence and a diffuse/spatial recipe could never be pulled back.
+    #[test]
+    fn a_named_target_family_overrides_a_presets_own_family() {
+        let dir = std::env::temp_dir().join(format!("hypreq-fam-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("base.csv"), "20,0\n1000,0\n20000,0\n").unwrap();
+        let preset = dir.join("p.json");
+        std::fs::write(
+            &preset,
+            serde_json::json!({
+                "name": "diffuse-recipe", "baseline_csv": "base.csv", "family": "diffuse",
+                "params": {"bass": 0.0, "mid": 0.0, "tilt": 0.0}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let model = notch_cap_fixture();
+        let ctx = target_context(
+            &model,
+            &argv(&["-H", "hd6xx", "--target-preset", preset.to_str().unwrap()]),
+        )
+        .expect("preset ctx");
+        assert_eq!(ctx.family, hypreq::target::TargetFamily::DiffuseField);
+        let ctx = target_context(
+            &model,
+            &argv(&[
+                "-H",
+                "hd6xx",
+                "--target-preset",
+                preset.to_str().unwrap(),
+                "--target-family",
+                "harman",
+            ]),
+        )
+        .expect("override ctx");
+        assert_eq!(
+            ctx.family,
+            hypreq::target::TargetFamily::Harman,
+            "naming the default cannot override a preset's family"
+        );
+        // Naming any family — even the default word — is a request for the parameterized path.
+        assert!(target_extension_active(&argv(&[
+            "-H",
+            "hd6xx",
+            "--target-family",
+            "harman"
+        ])));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A recipe is data, and recipe failures must travel as errors: `validate_choice` answers
+    /// with `process::exit(2)`, which killed the whole test harness from inside
+    /// `load_target_preset`; the baseline count was taken before deduplication, so a two-row
+    /// file at one frequency passed as a curve; and a `[freq, L, R]` baseline was read as its
+    /// right ear.
+    #[test]
+    fn recipe_defects_fail_as_errors_not_as_process_exits() {
+        let dir = std::env::temp_dir().join(format!("hypreq-recipe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        let recipe = |fam: &str, base: &str| -> std::path::PathBuf {
+            write(
+                "r.json",
+                &serde_json::json!({
+                    "name": "r", "baseline_csv": base, "family": fam,
+                    "params": {"bass": 0.0, "mid": 0.0, "tilt": 0.0}
+                })
+                .to_string(),
+            )
+        };
+        // (a) An unknown family returns; it does not exit the process (old code: exit(2)
+        // straight out of the test binary).
+        write("base.csv", "20,0\n1000,0\n20000,0\n");
+        let e = load_target_preset(&recipe("bogus", "base.csv")).expect_err("family must fail");
+        assert!(e.to_string().contains("bogus"), "{e}");
+        // (b) Two rows at one frequency are one knot: refuse, after the dedup the interpolants
+        // themselves apply.
+        write("dupe.csv", "1000,1\n1000,2\n");
+        let e = load_target_preset(&recipe("harman", "dupe.csv")).expect_err("dupe must fail");
+        assert!(e.to_string().contains("fewer than two"), "{e}");
+        // (c) A three-column [freq, L, R] baseline means both ears, like every other curve
+        // in the program — not the right one.
+        write("ears.csv", "20,0,2\n1000,4,0\n20000,2,2\n");
+        let p = load_target_preset(&recipe("harman", "ears.csv")).expect("ears preset");
+        let gains: Vec<f64> = p.baseline.iter().map(|&(_, g)| g).collect();
+        assert_eq!(
+            gains,
+            vec![1.0, 2.0, 2.0],
+            "mean of the ears, not the last column"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -143,6 +143,12 @@ pub fn irfft(spec: &[Complex64], n: usize) -> Vec<f64> {
 /// `numpy.fft.rfftfreq(n, d = 1.0 / fs)`: `k·fs/n` for `k = 0..=n/2`.
 #[must_use]
 pub fn rfftfreq(n: usize, fs: f64) -> Vec<f64> {
+    if n == 0 {
+        // NumPy divides by `n * d` and raises `ZeroDivisionError`; the k = 0 term would divide
+        // 0 by 0 here and hand the caller a one-element grid of NaN. A zero-length spectrum has
+        // zero frequency bins — say so with the empty vector.
+        return Vec::new();
+    }
     (0..=n / 2).map(|k| (k as f64) * fs / (n as f64)).collect()
 }
 
@@ -172,7 +178,13 @@ pub fn geomspace(a: f64, b: f64, n: usize) -> Vec<f64> {
 #[must_use]
 pub fn interp(x: f64, xp: &[f64], fp: &[f64]) -> f64 {
     debug_assert_eq!(xp.len(), fp.len());
-    debug_assert!(!xp.is_empty());
+    if xp.is_empty() {
+        // NumPy raises `ValueError: expected non-empty sequence` here. This crate's callers all
+        // arrive from measurement files, where an empty axis means a file that held nothing —
+        // a missing answer, not a crash. Read it as NaN, the same value a missing measurement
+        // already carries through this module.
+        return f64::NAN;
+    }
     if x.is_nan() {
         // NumPy propagates NaN through `np.interp`. Every comparison against NaN is false,
         // so without this the query falls through the end clamps and lands on an interior

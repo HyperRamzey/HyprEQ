@@ -658,6 +658,18 @@ impl Detector {
     /// Clear the reading but keep the filter state. Meters that report per group
     /// must not drop state between blocks, or the first block of each group loses
     /// the filter's memory.
+    /// Forget the accumulated reading but keep the stream's memory: the filter state
+    /// **and** the two refine grid points stay. This is what makes a reset a new
+    /// *reporting window over a continuous stream* — the reading after the reset equals
+    /// the same window measured in one unbroken run (`a_per-group_window_equals_the_same_window_measured_unbroken`
+    /// pins it). Clearing `older`/`newest` here was tried and is wrong twice over: the
+    /// pending parabola at the seam would read through a fabricated `0.0` neighbour and
+    /// over-read a steady crest by up to +1 dB, and the filter's ringdown across the
+    /// boundary is real audio that the window is obliged to report. `peak()` still folds
+    /// in the pending `newest` — it is real signal from just before the boundary, not a
+    /// stale file. For a genuinely independent signal construct a fresh detector (or
+    /// [`Detector::clear`]), which starts the refine pair at zeros exactly as any file
+    /// start does.
     pub fn reset_peak(&mut self) {
         self.peak = 0.0;
     }
@@ -682,8 +694,16 @@ impl Detector {
     /// sample at a zero crossing has all-zero samples and a true peak of anything. No meter
     /// can recover it from the samples; that is why the derived banks state a band edge
     /// ([`BAND_EDGE`]) instead of claiming to be accurate up to Nyquist.
+    /// A non-finite input sample is fed to the filter bank as `0.0`. The Recommendation
+    /// describes no other reading — a NaN is not audio — and the alternative is worse than
+    /// the loss: the NaN rides the 51-tap history for `taps` samples, every bank output that
+    /// spans it comes out NaN, every comparison against it is false, and the meter reads
+    /// exactly zero while it is blind. One garbage sample therefore dimmed the peak of the
+    /// 67 samples around it, the exact thing a ceiling cannot survive. Silence at the hole
+    /// under-reads the hole itself and nothing else.
     #[inline]
     pub fn push(&mut self, x: f64) -> f64 {
+        let x = if x.is_finite() { x } else { 0.0 };
         let mut out = [0.0f64; MAX_STREAM];
         let n = self.stage.n_phases;
         let raw = self.stage.push(x, &mut out[..n]);
@@ -1594,6 +1614,8 @@ mod accuracy {
     use super::*;
     use std::f64::consts::PI;
 
+    const FS: f64 = 48_000.0;
+
     /// In-place iterative radix-2 FFT; `inverse` also scales by `1/n`.
     fn fft(re: &mut [f64], im: &mut [f64], inverse: bool) {
         let n = re.len();
@@ -1812,5 +1834,83 @@ mod accuracy {
             }
             println!("{row}");
         }
+    }
+
+    /// What `reset_peak` promises, pinned: a reset opens a new **reporting window on a
+    /// continuous stream**. The reading it produces must equal the same window measured
+    /// in one unbroken run — filter state and refine pair carried across, seam and all.
+    /// Clearing `older`/`newest` at the reset breaks the equality: the first refined
+    /// vertex reads through a fabricated zero neighbour (the x2 sweep measured +0.96 dB
+    /// of over-read that way), and zeroing the filter additionally drops real ringdown.
+    #[test]
+    fn a_per_group_window_equals_the_same_window_measured_unbroken() {
+        // A level step across the boundary: the second window opens on the ringdown of
+        // the level before it, and its own crest is a quarter-sample off the grid — both
+        // must read identically whether or not a reset sits at the boundary.
+        let mut x = Vec::with_capacity(600);
+        for i in 0..300 {
+            x.push((std::f64::consts::PI * 2.0 * 11_000.0 * i as f64 / FS).sin());
+        }
+        let off = x.len();
+        for i in 0..300 {
+            let t = (i + off) as f64;
+            x.push(0.6 * (std::f64::consts::PI * 2.0 * 11_000.0 * t / FS + 0.7).sin());
+        }
+        let mut unbroken = Detector::new(Ratio::X16);
+        let tail_unbroken: f64 = x
+            .iter()
+            .map(|&v| unbroken.push(v))
+            .enumerate()
+            .filter(|(i, _)| *i >= off)
+            .fold(0.0f64, |a, (_, r)| a.max(r));
+        let mut split = Detector::new(Ratio::X16);
+        for &v in &x[..off] {
+            split.push(v);
+        }
+        split.reset_peak();
+        let tail_split: f64 = x[off..].iter().fold(0.0f64, |a, &v| a.max(split.push(v)));
+        assert!(
+            tail_unbroken > 0.2,
+            "second window should hold real level: {tail_unbroken}"
+        );
+        assert_eq!(
+            tail_split, tail_unbroken,
+            "a reset changed the readings of the window it opened — the seam is measuring \
+             through state it should have kept"
+        );
+    }
+
+    /// One non-finite sample must not blind the window around it. The tone starts at
+    /// zero, so sanitising the hole to `0.0` is exactly the clean signal. Left to ride
+    /// the 51-tap history instead, the NaN makes every bank output spanning it NaN,
+    /// every comparison against NaN false — and the file's only crest, falling inside
+    /// that window, reads zero.
+    #[test]
+    fn one_nan_sample_does_not_blind_the_window_around_it() {
+        let run = |poison: bool| -> f64 {
+            let mut d = Detector::new(Ratio::X16);
+            for i in 0..20usize {
+                let mut v = (std::f64::consts::PI * 2.0 * 11_000.0 * i as f64 / FS).sin();
+                if i == 0 && poison {
+                    v = f64::NAN;
+                }
+                let _ = d.push(v);
+            }
+            d.peak()
+        };
+        let clean = run(false);
+        let dirty = run(true);
+        assert!(
+            clean > 0.9,
+            "the 20-sample crest should read near 1: {clean}"
+        );
+        assert!(
+            dirty > 0.9,
+            "a single NaN dimmed the file's only crest: clean {clean}, dirty {dirty}"
+        );
+        assert!(
+            (dirty - clean).abs() < 1e-15,
+            "sanitising at a zero crossing must be exactly the clean run: {clean} vs {dirty}"
+        );
     }
 }

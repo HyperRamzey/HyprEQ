@@ -97,9 +97,12 @@ pub fn header(
     float: bool,
     mask: Option<u32>,
 ) -> Result<Vec<u8>> {
+    if rate == 0 {
+        return Err(Error::msg("sample rate must be positive (got 0)"));
+    }
     let block = u32::from(block_align(channels, bits)?);
     let extensible = channels > 2 || mask.is_some_and(|m| m != guess_mask(channels));
-    let mut h = Vec::with_capacity(68);
+    let mut h = Vec::with_capacity(80);
     let tag = if float {
         WAVE_FORMAT_IEEE_FLOAT
     } else {
@@ -130,6 +133,13 @@ pub fn header(
         h.extend_from_slice(&(bits as u16).to_le_bytes()); // wValidBitsPerSample
         h.extend_from_slice(&(mask.unwrap_or_else(|| guess_mask(channels))).to_le_bytes());
         h.extend_from_slice(if float { &SUBTYPE_FLOAT } else { &SUBTYPE_PCM });
+    }
+    if float || extensible {
+        // Microsoft RIFF/WAVE: fact chunk (dwSampleLength: samples per channel) is
+        // mandatory for all non-WAVE_FORMAT_PCM formats (IEEE float and extensible).
+        h.extend_from_slice(b"fact");
+        h.extend_from_slice(&4u32.to_le_bytes());
+        h.extend_from_slice(&0u32.to_le_bytes()); // patched on finish
     }
     h.extend_from_slice(b"data");
     h.extend_from_slice(&0u32.to_le_bytes());
@@ -172,11 +182,12 @@ pub fn riff_sizes(payload: u64, hdr_len: u64) -> Result<(u32, u32)> {
 /// Streaming WAV writer: header first, sizes patched on [`finish`](WavWriter::finish).
 pub struct WavWriter {
     f: std::fs::File,
-    /// The length of the header that was actually written. Not a constant: a classic
-    /// 2-channel header is 44 bytes and a `WAVE_FORMAT_EXTENSIBLE` one is 68, and both
-    /// size fields patched at the end are measured from it.
+    /// The length of the header that was actually written.
     hdr_len: u64,
     data_len: u64,
+    channels: u16,
+    bits: u32,
+    has_fact: bool,
 }
 
 impl WavWriter {
@@ -189,17 +200,17 @@ impl WavWriter {
         mask: Option<u32>,
     ) -> Result<Self> {
         let hdr = header(rate, channels, bits, float, mask)?;
-        // Recorded rather than recomputed at the end: the header that exists and the
-        // header guessed from the channel count are different lengths as soon as a custom
-        // mask is involved, and the two size fields live at the end of whichever one was
-        // actually written.
         let hdr_len = hdr.len() as u64;
+        let has_fact = float || (channels > 2 || mask.is_some_and(|m| m != guess_mask(channels)));
         let mut f = std::fs::File::create(path)?;
         f.write_all(&hdr)?;
         Ok(Self {
             f,
             hdr_len,
             data_len: 0,
+            channels,
+            bits,
+            has_fact,
         })
     }
 
@@ -211,17 +222,16 @@ impl WavWriter {
 
     pub fn finish(mut self) -> Result<u64> {
         let total = self.data_len;
-        // RIFF chunk size = file size - 8; data chunk size = payload. Both measured from
-        // `hdr_len`, because a hard-coded 36 (the 44-byte classic header minus 8) writes a
-        // RIFF size 24 bytes short onto every 68-byte extensible file — which is every
-        // multichannel WAV this program writes. A strict parser honours that size and
-        // drops the last 24 bytes of audio, so the file plays and is quietly truncated.
         let (riff, data) = riff_sizes(total, self.hdr_len)?;
         self.f.seek(SeekFrom::Start(4))?;
         self.f.write_all(&riff.to_le_bytes())?;
-        // The header ends with "data" followed by its 4-byte size, so the size
-        // field is the last 4 bytes of the header — writing 8 bytes back would
-        // land on the "data" tag itself and ffmpeg would reject the file.
+        if self.has_fact {
+            let block = (self.channels as u64) * ((self.bits / 8) as u64);
+            let frames = total.checked_div(block).unwrap_or(0);
+            let sample_len = u32::try_from(frames).unwrap_or(u32::MAX);
+            self.f.seek(SeekFrom::Start(self.hdr_len - 12))?;
+            self.f.write_all(&sample_len.to_le_bytes())?;
+        }
         self.f.seek(SeekFrom::Start(self.hdr_len - 4))?;
         self.f.write_all(&data.to_le_bytes())?;
         self.f.flush()?;
@@ -333,13 +343,12 @@ pub fn read_info_file(f: &mut std::fs::File) -> Result<(WavInfo, u64)> {
             info.bits = u16::from_le_bytes([b[14], b[15]]) as u32;
             info.float = tag == WAVE_FORMAT_IEEE_FLOAT;
             if tag == WAVE_FORMAT_EXTENSIBLE && b.len() >= 40 {
-                // cbSize is at 16, so dwChannelMask follows the 2-byte valid-bits
-                // field at 20, and the 16-byte sub-format GUID starts at 24.
-                info.mask = Some(u32::from_le_bytes([b[20], b[21], b[22], b[23]]));
-                // The sub-format is a 16-byte GUID whose first two bytes are the old
-                // WAVE_FORMAT tag. Reading one byte would call anything starting with 0x03
-                // float; the tag is the whole 16-bit field.
-                info.float = u16::from_le_bytes([b[24], b[25]]) == WAVE_FORMAT_IEEE_FLOAT;
+                let cb_size = u16::from_le_bytes([b[16], b[17]]);
+                let valid_guid = cb_size >= 22 && b[26..40] == SUBTYPE_PCM[2..16];
+                if valid_guid {
+                    info.mask = Some(u32::from_le_bytes([b[20], b[21], b[22], b[23]]));
+                    info.float = u16::from_le_bytes([b[24], b[25]]) == WAVE_FORMAT_IEEE_FLOAT;
+                }
             } else if info.channels > 2 {
                 info.mask = Some(guess_mask(info.channels));
             }
@@ -390,10 +399,15 @@ mod tests {
         w.finish().unwrap();
         let b = std::fs::read(&p).unwrap();
         let len = b.len() as u64;
-        assert_eq!(len, 68 + pcm.len() as u64, "extensible header is 68 bytes");
-        assert_eq!(&b[60..64], b"data", "data chunk must sit at 60");
+        assert_eq!(
+            len,
+            80 + pcm.len() as u64,
+            "extensible header with fact chunk is 80 bytes"
+        );
+        assert_eq!(&b[60..64], b"fact", "fact chunk must sit at 60");
+        assert_eq!(&b[72..76], b"data", "data chunk must sit at 72");
         let riff = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as u64;
-        let data = u32::from_le_bytes([b[64], b[65], b[66], b[67]]) as u64;
+        let data = u32::from_le_bytes([b[76], b[77], b[78], b[79]]) as u64;
         assert_eq!(riff, len - 8, "RIFF size is the file minus 8");
         assert_eq!(data, pcm.len() as u64, "data size is the payload");
     }
@@ -406,7 +420,8 @@ mod tests {
         w.write(&pcm).unwrap();
         w.finish().unwrap();
         let b = std::fs::read(&p).unwrap();
-        assert_eq!(&b[60..64], b"data", "header stayed extensible");
+        assert_eq!(&b[60..64], b"fact", "fact chunk must sit at 60");
+        assert_eq!(&b[72..76], b"data", "header stayed extensible");
         assert_eq!(
             &b[44..50],
             &SUBTYPE_PCM[0..6],
@@ -414,7 +429,7 @@ mod tests {
         );
         let riff = u32::from_le_bytes([b[4], b[5], b[6], b[7]]) as u64;
         assert_eq!(riff, b.len() as u64 - 8);
-        let data = u32::from_le_bytes([b[64], b[65], b[66], b[67]]) as u64;
+        let data = u32::from_le_bytes([b[76], b[77], b[78], b[79]]) as u64;
         assert_eq!(data, pcm.len() as u64, "the real data size, not zero");
         let (info, off) = read_info(&p).unwrap();
         assert_eq!(info.mask, Some(0x4));
@@ -543,9 +558,8 @@ mod tests {
             body.extend_from_slice(&22u16.to_le_bytes()); // cbSize
             body.extend_from_slice(&bits.to_le_bytes()); // valid bits
             body.extend_from_slice(&0x4000_0003u32.to_le_bytes()); // FL|FR + mask bit
-            let mut guid = vec![0u8; 16];
+            let mut guid = SUBTYPE_PCM;
             guid[..2].copy_from_slice(&sub_low.to_le_bytes());
-            guid[6] = 0x10; // as in every KSDATAFORMAT_SUBTYPE_* GUID
             body.extend_from_slice(&guid);
 
             let mut b: Vec<u8> = b"RIFF".to_vec();
@@ -606,10 +620,10 @@ mod tests {
     fn the_measured_header_is_the_header_written() {
         for (ch, bits, float, want) in [
             (1u16, 16, false, 44usize),
-            (2, 32, true, 44),
+            (2, 32, true, 56),
             (2, 24, false, 44),
-            (3, 16, false, 68),
-            (8, 32, true, 68),
+            (3, 16, false, 80),
+            (8, 32, true, 80),
         ] {
             assert_eq!(
                 header_len(ch, bits, float).unwrap(),
@@ -671,7 +685,10 @@ mod tests {
         assert_eq!(info.rate, 48000);
         assert_eq!(info.bits, 32);
         assert_eq!(info.mask, Some(0x63f), "7.1 mask");
-        assert_eq!(off as usize, 68, "extensible header is 68 bytes");
+        assert_eq!(
+            off as usize, 80,
+            "extensible header is 80 bytes (with fact chunk)"
+        );
         assert_eq!(info.frames(), 48000);
     }
 
@@ -718,7 +735,7 @@ mod tests {
     fn f64_float_header_roundtrip() {
         let p = tmp("f64.wav");
         let h = header(48000, 8, 64, true, Some(0x63f)).unwrap();
-        assert_eq!(h.len(), 68);
+        assert_eq!(h.len(), 80);
         assert_eq!(u16::from_le_bytes([h[20], h[21]]), WAVE_FORMAT_EXTENSIBLE);
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(&h).unwrap();
@@ -730,9 +747,8 @@ mod tests {
         assert_eq!(info.mask, Some(0x63f));
     }
 
-    /// The mono/stereo path HyprEQ writes is the plain 44-byte header with
-    /// `wFormatTag` 3 (float) or 1 (PCM) and `cbSize` absent — byte-for-byte what
-    /// `hypreq.py` puts on disk.
+    /// The mono/stereo path HyprEQ writes is the plain 44-byte header for PCM, or 56-byte
+    /// with fact chunk for float.
     /// One frame's width is carried in 16 bits. Clamping a value that does not fit wrote a header
     /// whose stride disagreed with the payload — the file opened, played, and was wrong — so the
     /// builder refuses it instead.
@@ -770,7 +786,7 @@ mod tests {
     #[test]
     fn hypreq_classic_header_matches_python_layout() {
         let h = header(48000, 2, 32, true, None).unwrap();
-        assert_eq!(h.len(), 44);
+        assert_eq!(h.len(), 56);
         assert_eq!(&h[0..4], b"RIFF");
         assert_eq!(u32::from_le_bytes([h[4], h[5], h[6], h[7]]), 0);
         assert_eq!(&h[8..12], b"WAVE");
@@ -783,7 +799,10 @@ mod tests {
         assert_eq!(u32::from_le_bytes([h[28], h[29], h[30], h[31]]), 384_000);
         assert_eq!(u16::from_le_bytes([h[32], h[33]]), 8);
         assert_eq!(u16::from_le_bytes([h[34], h[35]]), 32);
-        assert_eq!(&h[36..40], b"data");
-        assert_eq!(u32::from_le_bytes([h[40], h[41], h[42], h[43]]), 0);
+        assert_eq!(&h[36..40], b"fact");
+        assert_eq!(u32::from_le_bytes([h[40], h[41], h[42], h[43]]), 4);
+        assert_eq!(u32::from_le_bytes([h[44], h[45], h[46], h[47]]), 0);
+        assert_eq!(&h[48..52], b"data");
+        assert_eq!(u32::from_le_bytes([h[52], h[53], h[54], h[55]]), 0);
     }
 }

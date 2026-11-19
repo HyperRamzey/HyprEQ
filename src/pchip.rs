@@ -20,6 +20,17 @@
 //! * the tangent at a knot is the weighted harmonic mean of the two secant slopes
 //!   only when they have the same sign, and exactly `0.0` otherwise — which is what
 //!   flattens the curve at every measurement peak instead of overshooting it.
+//!
+//! ### Deviation Note: Endpoint Derivatives (AGENTS.md Rule 4)
+//! Standard Fritsch & Carlson (1980) and SciPy's `PchipInterpolator` compute shape-preserving
+//! non-centered 3-point endpoint derivatives:
+//! `d[0] = ((2*h[0] + h[1])*delta[0] - h[0]*delta[1]) / (h[0] + h[1])`
+//! (with monotonic sign clamping). HyprEQ deliberately uses first-order secant slopes at endpoints:
+//! `d[0] = delta[0]; d[n-1] = delta[n-2];`
+//! This is an intentional design choice preserved for bit-exact numerical parity with the
+//! reference implementation in `hypreq.py::pchip_log_interp` and the shipped headphone calibration
+//! database. (On `y = x^2` over `[0, 1, 2, 3]`, this yields `d[0] = 1.0, d[3] = 5.0` vs Fritsch-Carlson
+//! `d[0] = 0.0, d[3] = 6.0`).
 
 /// Insertion point of `x` in ascending `a`, on the right of equal elements —
 /// `numpy.searchsorted(a, x, side="right")`.
@@ -126,6 +137,10 @@ impl Pchip {
                 d[k] = 0.0;
             }
         }
+        // Endpoint derivatives: deliberately first-order secants (`delta[0]` and `delta[n-2]`)
+        // to maintain byte-parity with `hypreq.py::pchip_log_interp` and the shipped model
+        // database, diverging from Fritsch-Carlson (1980) / SciPy's 3-point non-centered formula.
+        // See module docs for full discussion per AGENTS.md Rule 4.
         d[0] = delta[0];
         d[x.len() - 1] = delta[delta.len() - 1];
 

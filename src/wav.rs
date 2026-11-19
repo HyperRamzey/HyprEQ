@@ -28,7 +28,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::dither::tpdf_matrix;
+use crate::dither::Pcg64;
 use crate::error::{Error, Result};
 use crate::riff::WavWriter;
 
@@ -152,10 +152,21 @@ pub fn read_wav(path: &Path) -> Result<WavAudio> {
             let channels = u16::from_le_bytes([b[2], b[3]]);
             let fs = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
             let bits = u16::from_le_bytes([b[14], b[15]]);
-            // Extensible: the real format lives in the SubFormat GUID's first
-            // two bytes, exactly where Python reads `subformat_tag`.
+            // Extensible: validate cbSize >= 22, the full SubFormat GUID, and wValidBitsPerSample.
+            const SUBFORMAT_GUID_TAIL: [u8; 14] = [
+                0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+            ];
             let eff_tag = if tag == WAVE_FORMAT_EXTENSIBLE && size >= 40 {
-                u16::from_le_bytes([b[24], b[25]])
+                let cb_size = u16::from_le_bytes([b[16], b[17]]);
+                let valid_bits = u16::from_le_bytes([b[18], b[19]]);
+                if cb_size >= 22
+                    && b[26..40] == SUBFORMAT_GUID_TAIL
+                    && (valid_bits == 0 || valid_bits <= bits)
+                {
+                    u16::from_le_bytes([b[24], b[25]])
+                } else {
+                    tag
+                }
             } else {
                 tag
             };
@@ -352,6 +363,9 @@ fn writer(path: &Path, fs: u32, channels: usize, bits: u32, float: bool) -> Resu
 /// Values are **not** clipped or cleansed — a straight cast, as `astype('<f4')`
 /// is — and the payload is interleaved frame-major.
 pub fn write_wav_ieee_float(path: &Path, planar: &[Vec<f64>], fs: u32, bits: u32) -> Result<usize> {
+    if fs == 0 {
+        return Err(Error::msg("sample rate must be positive (got 0)"));
+    }
     if planar.is_empty() {
         return Err(Error::msg("Cannot write empty channel list"));
     }
@@ -400,12 +414,16 @@ pub fn write_wav_ieee_float(path: &Path, planar: &[Vec<f64>], fs: u32, bits: u32
 /// The PCM path mirrors `hypreq.py::write_wav_pcm_or_float`:
 /// replace non-finite samples (NaN → 0, ±Inf → ±1), add the fixed TPDF stream,
 /// round half-to-even, then clamp to the container's integer range.
+#[allow(clippy::needless_range_loop)]
 pub fn write_wav_pcm_or_float(
     path: &Path,
     planar: &[Vec<f64>],
     fs: u32,
     bits: u32,
 ) -> Result<usize> {
+    if fs == 0 {
+        return Err(Error::msg("sample rate must be positive (got 0)"));
+    }
     if planar.is_empty() {
         return Err(Error::msg("Cannot write empty channel list"));
     }
@@ -433,9 +451,11 @@ pub fn write_wav_pcm_or_float(
     } else {
         (8_388_608.0f64, -8_388_608.0f64, 8_388_607.0f64)
     };
-    // TPDF over the whole interleaved buffer, indexed frame-major, exactly as
-    // the two numpy `uniform(size=mat.shape)` draws fill it.
-    let tpdf = tpdf_matrix(frames, channels);
+    // Stream TPDF dither without upfront buffer allocation:
+    // generator 1 starts at 0, generator 2 starts at frames * channels.
+    let mut rng1 = Pcg64::hypreq_dither();
+    let mut rng2 = Pcg64::hypreq_dither();
+    rng2.advance((frames * channels) as u128);
 
     let mut w = writer(path, fs, channels, bits, false)?;
     let mut buf: Vec<u8> = Vec::with_capacity(bps * channels * 1024);
@@ -445,9 +465,8 @@ pub fn write_wav_pcm_or_float(
         for fr in f0..hi {
             for c in 0..channels {
                 let v = cleanse(planar[c][fr]);
-                let q = (v * scale + tpdf[fr * channels + c])
-                    .round_ties_even()
-                    .clamp(vmin, vmax);
+                let dither = rng1.next_uniform_half() + rng2.next_uniform_half();
+                let q = (v * scale + dither).round_ties_even().clamp(vmin, vmax);
                 let q = q as i32;
                 match bits {
                     16 => buf.extend_from_slice(&(q.clamp(-32768, 32767) as i16).to_le_bytes()),
@@ -708,9 +727,11 @@ mod tests {
             fmt_body.extend_from_slice(&22u16.to_le_bytes()); // cbSize
             fmt_body.extend_from_slice(&32u16.to_le_bytes()); // valid bits
             fmt_body.extend_from_slice(&3u32.to_le_bytes()); // channel mask
-            let mut guid = vec![0u8; 16];
+            let mut guid = [
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38,
+                0x9B, 0x71,
+            ];
             guid[..2].copy_from_slice(&subtype_low.to_le_bytes());
-            guid[6] = 0x10; // the shape of every KSDATAFORMAT_SUBTYPE_* GUID
             fmt_body.extend_from_slice(&guid);
 
             let mut b: Vec<u8> = b"RIFF".to_vec();
@@ -845,7 +866,10 @@ mod tests {
         let planar = vec![vec![0.0, 0.5, 0.25], vec![1.0, -0.5, -0.25]];
         write_wav_ieee_float(&p, &planar, 48000, 32).unwrap();
         let b = std::fs::read(&p).unwrap();
-        let got: Vec<f32> = b[44..]
+        let hdr_len = header_len_for(2, 32, true).unwrap();
+        assert_eq!(hdr_len, 56);
+        assert_eq!(&b[36..40], b"fact");
+        let got: Vec<f32> = b[hdr_len..]
             .chunks_exact(4)
             .map(|w| f32::from_le_bytes([w[0], w[1], w[2], w[3]]))
             .collect();
@@ -858,11 +882,13 @@ mod tests {
         let p = tmp("f64out.wav");
         write_wav_ieee_float(&p, &[vec![0.1, 2.0, f64::NAN]], 48000, 64).unwrap();
         let b = std::fs::read(&p).unwrap();
-        let v = f64::from_le_bytes(b[44..52].try_into().unwrap());
+        let hdr_len64 = header_len_for(1, 64, true).unwrap();
+        assert_eq!(hdr_len64, 56);
+        let v = f64::from_le_bytes(b[hdr_len64..hdr_len64 + 8].try_into().unwrap());
         assert_eq!(v, 0.1);
-        let v = f64::from_le_bytes(b[52..60].try_into().unwrap());
+        let v = f64::from_le_bytes(b[hdr_len64 + 8..hdr_len64 + 16].try_into().unwrap());
         assert_eq!(v, 2.0);
-        assert!(f64::from_le_bytes(b[60..68].try_into().unwrap()).is_nan());
+        assert!(f64::from_le_bytes(b[hdr_len64 + 16..hdr_len64 + 24].try_into().unwrap()).is_nan());
     }
 
     #[test]
@@ -1004,5 +1030,44 @@ mod tests {
         std::fs::write(&weird, &junk).unwrap();
         let e = read_wav(&weird).unwrap_err().to_string();
         assert!(e.contains('\u{fffd}'), "{e}");
+    }
+
+    #[test]
+    fn writer_refuses_zero_sample_rate() {
+        let p = tmp("zero_rate.wav");
+        let planar = vec![vec![0.0; 100]];
+        assert!(write_wav_ieee_float(&p, &planar, 0, 32).is_err());
+        assert!(write_wav_pcm_or_float(&p, &planar, 0, 16).is_err());
+    }
+
+    #[test]
+    fn extensible_with_unknown_guid_is_rejected() {
+        let p = tmp("bad_guid.wav");
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&72u32.to_le_bytes());
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"fmt ");
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&0xFFFEu16.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&48000u32.to_le_bytes());
+        b.extend_from_slice(&(48000 * 4u32).to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(&22u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&[0xFF; 14]); // bogus GUID tail
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&8u32.to_le_bytes());
+        b.extend_from_slice(&[0u8; 8]);
+        std::fs::write(&p, &b).unwrap();
+
+        assert!(
+            read_wav(&p).is_err(),
+            "bogus extensible GUID must be rejected"
+        );
     }
 }

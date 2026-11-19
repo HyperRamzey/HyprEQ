@@ -149,7 +149,7 @@ impl Ears {
     /// two-column table has no ears to compare, and returns `None` — which is not an error, it is
     /// the common case.
     pub fn from_raw_pts(pts: &[Vec<f64>]) -> Option<Ears> {
-        if pts.is_empty() || !pts.iter().all(|p| p.len() >= 4) {
+        if pts.is_empty() || !pts.iter().all(|p| p.len() >= 3) {
             return None;
         }
         let col = |i: usize| -> Vec<f64> { pts.iter().map(|p| p[i]).collect() };
@@ -158,7 +158,16 @@ impl Ears {
             l: col(1),
             r: col(2),
             #[cfg(test)]
-            avg: pts.iter().map(|p| *p.last().unwrap()).collect(),
+            avg: pts
+                .iter()
+                .map(|p| {
+                    if p.len() >= 4 {
+                        *p.last().unwrap()
+                    } else {
+                        (p[1] + p[2]) / 2.0
+                    }
+                })
+                .collect(),
         };
         (e.l.len() >= 2).then_some(e)
     }
@@ -694,6 +703,21 @@ mod tests {
         assert_eq!(e.l, vec![3.82, -1.0, -7.16]);
         assert_eq!(e.r, vec![1.27, -1.4, -6.62]);
         assert_eq!(e.avg, vec![2.54, -1.21, -6.89]);
+
+        // Three columns [freq, left, right]: average is computed as mean of left and right.
+        let three = vec![
+            vec![20.0, 3.82, 1.28],
+            vec![1000.0, -1.0, -1.4],
+            vec![20000.0, -7.16, -6.62],
+        ];
+        let e3 = Ears::from_raw_pts(&three).expect("three columns is a pair");
+        assert_eq!(e3.len(), 3);
+        assert_eq!(e3.l, vec![3.82, -1.0, -7.16]);
+        assert_eq!(e3.r, vec![1.28, -1.4, -6.62]);
+        assert_eq!(e3.avg.len(), 3);
+        assert!((e3.avg[0] - 2.55).abs() < 1e-12);
+        assert!((e3.avg[1] - (-1.2)).abs() < 1e-12);
+        assert!((e3.avg[2] - (-6.89)).abs() < 1e-12);
 
         // Two columns is the common case, not a failure: a model measured as one curve.
         let mono = vec![vec![20.0, 3.82], vec![1000.0, -1.0]];

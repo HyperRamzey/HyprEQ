@@ -197,9 +197,9 @@ Headphone coupler measurements above $8\text{ kHz} - 10\text{ kHz}$ contain non-
 - **High-Frequency Bypass:** Above $f_{\text{bypass}}$ (e.g. $9.1\text{ kHz}$ on JBL Live 770NC; $8.8\text{ kHz}$ / $15.8\text{ kHz}$ on DT 770 Pro; $9.75\text{ kHz}$ on FT1 Pro), filter gain transitions smoothly via a raised cosine into a $0.00\text{ dB}$ flat wire. On headphones with smooth high-frequency extension (`jbl770nc`), this $0.00\text{ dB}$ wire continues completely flat to Nyquist (`gauss_apodize: false`).
 - **Nyquist-Adaptive Gaussian Apodizer:** Where models carry ultrasonic coupler noise (`dt770_80` and `ft1pro` with `gauss_apodize: true`), stopband energy is attenuated smoothly toward Nyquist via:
 
-$$w(f) = \exp\left(-\frac{1}{2}\left(\frac{f - f_{\text{start}}}{\sigma}\right)^2\right), \quad f_{\text{start}} = \max\left(24000, f_{\text{nyq}}\right) \cdot \frac{20200}{24000}, \quad \sigma = 1650\text{ Hz}$$
+$$w(f) = 2^{-\frac{1}{2}\left(\frac{f - f_{\text{start}}}{\sigma}\right)^2}, \quad f_{\text{start}} = \max\left(24000, f_{\text{nyq}}\right) \cdot \frac{20200}{24000}, \quad \sigma = \max\left(24000, f_{\text{nyq}}\right) \cdot \frac{1650}{24000}$$
 
-Clamping the apodizer scale floor at $24\text{ kHz}$ ensures that sample rates at or below $48\text{ kHz}$ ($44.1\text{ kHz}$, $48\text{ kHz}$) never attenuate audible treble below $20\text{ kHz}$ (preserving flat response up to $20.2\text{ kHz}$), while eliminating stopband ringing at high rates ($96\text{ kHz}$, $192\text{ kHz}$).
+(yielding $-3.0103\text{ dB}$ attenuation at $f = f_{\text{start}} + \sigma$ and $-15.97\text{ dB}$ at $f = f_{\text{nyq}}$). Clamping the apodizer scale floor at $24\text{ kHz}$ ensures that sample rates at or below $48\text{ kHz}$ ($44.1\text{ kHz}$, $48\text{ kHz}$) never attenuate audible treble below $20\text{ kHz}$ (preserving flat response up to $20.2\text{ kHz}$), while eliminating stopband ringing at high rates ($96\text{ kHz}$, $192\text{ kHz}$).
 
 ### 5. ITU-R BS.1770-5 Polyphase True-Peak Metering
 Standard digital sample-peak meters cannot detect inter-sample peaks that emerge during digital-to-analog reconstruction or asynchronous sample rate conversion. HyprEQ integrates an ITU-R BS.1770-5 Annex 2 compliant polyphase oversampling detector:

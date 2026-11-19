@@ -24,14 +24,26 @@ pub fn roex_excitation_db(f_hz: &[f64], level_db: &[f64], centres_hz: &[f64]) ->
     if n < 2 || centres_hz.is_empty() {
         return vec![f64::NAN; centres_hz.len()];
     }
-    // Linear trapezoid spacing in Hz.
+    // Composite-trapezoid spacing in Hz: interior bins carry the mean of their two
+    // neighbour intervals, the two endpoint bins carry HALF the interval they border —
+    // that is what `np.trapz` weights are. Handing the endpoints the full interval (as
+    // this did) doubles the extreme-frequency bins against every other bin, skewing the
+    // excitation of centres near either edge of the data.
     let mut df = vec![0.0; n];
-    df[0] = (f_hz[1] - f_hz[0]).max(0.0);
+    df[0] = 0.5 * (f_hz[1] - f_hz[0]).max(0.0);
     for i in 1..n - 1 {
         df[i] = 0.5 * (f_hz[i + 1] - f_hz[i - 1]).max(0.0);
     }
-    df[n - 1] = (f_hz[n - 1] - f_hz[n - 2]).max(0.0);
+    df[n - 1] = 0.5 * (f_hz[n - 1] - f_hz[n - 2]).max(0.0);
 
+    // A non-finite level bin is missing data, not silence. Reading it as 0 power while
+    // still counting its weight in the denominator diluted every centre it overlaps —
+    // pulling excitation toward an invented noise floor. Such a bin leaves both the
+    // numerator **and** the denominator; a centre whose usable bins are all non-finite
+    // lands on the empty-denominator path below.
+    let usable: Vec<bool> = (0..n)
+        .map(|i| level_db[i].is_finite() && f_hz[i].is_finite())
+        .collect();
     let power: Vec<f64> = level_db[..n]
         .iter()
         .map(|&db| {
@@ -53,6 +65,9 @@ pub fn roex_excitation_db(f_hz: &[f64], level_db: &[f64], centres_hz: &[f64]) ->
             let mut num = crate::accum::RunningSum::new();
             let mut den = crate::accum::RunningSum::new();
             for i in 0..n {
+                if !usable[i] {
+                    continue;
+                }
                 let g = (f_hz[i] - fc).abs() / fc;
                 let w = (1.0 + p * g) * (-p * g).exp() * df[i];
                 num.add(w * power[i]);
@@ -188,6 +203,48 @@ mod tests {
         for &v in &ex {
             assert!(v.abs() < 1e-9, "flat excitation must be 0 dB, got {v}");
         }
+    }
+
+    /// A bin with no level is missing data, not silence. It must leave **both** sums:
+    /// substituting 0 power while keeping the weight dragged every centre it overlaps —
+    /// measured: a 60 dB / missing / 60 dB triple read −920 dB through the dilution.
+    #[test]
+    fn a_missing_level_bin_leaves_the_average_instead_of_diluting_it() {
+        let f = [100.0, 1000.0, 2000.0];
+        let lv = [60.0, f64::NAN, 60.0];
+        let ex = roex_excitation_db(&f, &lv, &[1000.0]);
+        assert!(
+            (ex[0] - 60.0).abs() < 1e-9,
+            "a hole at the centre must not dilute two finite 60 dB bins: {}",
+            ex[0]
+        );
+        // And the hole must not be reported as a number at all when nothing else is there.
+        let all_bad = roex_excitation_db(&f, &[f64::NAN; 3], &[1000.0]);
+        assert!(
+            all_bad[0].is_infinite() && all_bad[0] < 0.0,
+            "{:?}",
+            all_bad[0]
+        );
+    }
+
+    /// Endpoint bins border one interval and carry HALF of it under the composite
+    /// trapezoid rule; giving them the full interval doubled them against every other
+    /// bin. Both numbers below are computed, not asserted: an independent Python pass
+    /// over the same sums reproduces 54.64928534604776 exactly and puts the
+    /// full-interval variant 1.50 dB higher — the endpoint bin sitting right at the
+    /// centre is the one the skew inflates, so a centre near either edge of the data
+    /// reads hot.
+    #[test]
+    fn endpoint_bins_take_half_the_interval_they_border() {
+        let f = [20.0, 30.0, 40.0];
+        let lv = [60.0, 0.0, 0.0];
+        let ex = roex_excitation_db(&f, &lv, &[25.0]);
+        assert!(
+            (ex[0] - 54.64928534604776).abs() < 1e-9,
+            "expected the trapezoid-weighted 54.64928534604776 dB, got {ex:.17} \
+             (full-interval endpoints give 56.14707173051804)",
+            ex = ex[0]
+        );
     }
 
     /// A deviation of exactly 6 dB per decade has a slope of 6 / ln 10 = 2.602697 dB per neper when

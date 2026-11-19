@@ -507,7 +507,9 @@ reaches either one, so the harness stays green while they differ.
   bytes. The file plays and is silently truncated at the wrap. `src/wav.rs` keeps the
   reference's threshold and its exact sentence for the classic header, and adds
   `riff::riff_sizes`, which checks the payload against *both* size fields the container
-  carries. Pinned by `a_payload_too_wide_for_the_riff_field_is_refused_not_wrapped` and
+  carries and accounts for the even-alignment pad byte (included in the enclosing RIFF
+  size, excluded from the `data` `ckSize`). Pinned by
+  `a_payload_too_wide_for_the_riff_field_is_refused_not_wrapped` and
   `the_write_is_refused_before_it_can_pass_a_size_it_cannot_hold`.
 * **`--taps` far above the usable range is answered, not panicked on.** The snippet the
   report prints contains `1 << (taps * 4 - 1).bit_length()`. Python's integer is

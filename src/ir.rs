@@ -184,11 +184,21 @@ pub fn synthesize_minimum_phase_ir(
     target_db[0] = curve.eval(0.0);
 
     if gauss_apodize {
-        // Nyquist-adaptive Gaussian roll-off: w(f) = 2^(-0.5 * x^2) where x = (f - f_start) / width.
+        // Scale-clamped Gaussian roll-off: w(f) = 2^(-0.5 * x^2) where x = (f - f_start) / width.
         // In dB: -10 * log10(2) * x^2 ~= -3.0103 * x^2 dB (-3.0103 dB at x = 1).
+        // The 24 kHz scale floor keeps 44.1 kHz runs from moving f_start down to 18.559 kHz,
+        // which would attenuate audible 19-20.2 kHz treble by up to 3.521 dB. At 44.1 kHz this
+        // leaves the band up to 20.2 kHz flat and rolls off only the remaining 1.85 kHz to Nyquist.
+        // Keep the original arithmetic at 48 kHz and above so the shipped 48 kHz WAVs stay
+        // bit-identical; the algebraically equivalent max() form differs by a few ULPs in
+        // `width` and would perturb apodized 48 kHz IRs.
         let f_nyq = fs_f / 2.0;
-        let f_start = f_nyq * (20200.0 / 24000.0);
-        let width = (f_nyq - f_start) / (3800.0 / 1650.0);
+        let (f_start, width) = if f_nyq >= 24_000.0 {
+            let f_start = f_nyq * (20_200.0 / 24_000.0);
+            (f_start, (f_nyq - f_start) / (3_800.0 / 1_650.0))
+        } else {
+            (20_200.0, 1_650.0)
+        };
         for (f, db) in freqs.iter().zip(target_db.iter_mut()) {
             if *f > f_start {
                 let x = (f - f_start) / width;
@@ -391,17 +401,25 @@ pub fn notch_blend_weight(f: f64, f_lo: f64, f_hi: f64, skirt_oct: f64) -> f64 {
     let hi_start = f_hi * 2.0f64.powf(-half_skirt);
     let hi_end = f_hi * 2.0f64.powf(half_skirt);
 
-    if f <= lo_start || f >= hi_end {
+    let w_lo = if f <= lo_start {
         0.0
-    } else if f < lo_end {
+    } else if f >= lo_end {
+        1.0
+    } else {
         let t = (f / lo_start).log2() / skirt_oct;
         0.5 * (1.0 - (std::f64::consts::PI * t).cos())
-    } else if f <= hi_start {
+    };
+
+    let w_hi = if f <= hi_start {
         1.0
+    } else if f >= hi_end {
+        0.0
     } else {
         let t = (hi_end / f).log2() / skirt_oct;
         0.5 * (1.0 - (std::f64::consts::PI * t).cos())
-    }
+    };
+
+    w_lo * w_hi
 }
 
 /// Apply the concha-notch policy to a control curve.
@@ -701,6 +719,51 @@ mod tests {
     }
 
     #[test]
+    fn gauss_apodizer_keeps_44_1khz_audible_band_flat() {
+        let c = flat();
+        let no = synthesize_minimum_phase_ir(&c, 44100, 4096, 512, 0, 0.0, false, 18.0).unwrap();
+        let yes = synthesize_minimum_phase_ir(&c, 44100, 4096, 512, 0, 0.0, true, 18.0).unwrap();
+        let freqs = rfftfreq(4096, 44100.0);
+        let below = freqs.iter().position(|&f| f > 20_200.0).unwrap();
+        for (i, (&a, &b)) in no.mag_lin[1..below]
+            .iter()
+            .zip(&yes.mag_lin[1..below])
+            .enumerate()
+        {
+            assert!(
+                (a - b).abs() < 1e-15,
+                "44.1 kHz bin {} Hz changed by the apodizer",
+                freqs[i + 1]
+            );
+        }
+        assert!(
+            yes.mag_lin[yes.mag_lin.len() - 1] < no.mag_lin[no.mag_lin.len() - 1],
+            "the remaining ultrasonic band to Nyquist must still come down"
+        );
+    }
+
+    #[test]
+    fn gauss_apodizer_keeps_48khz_bit_identical_to_the_shipped_assets() {
+        let c = flat();
+        let no = synthesize_minimum_phase_ir(&c, 48000, 4096, 512, 0, 0.0, false, 18.0).unwrap();
+        let yes = synthesize_minimum_phase_ir(&c, 48000, 4096, 512, 0, 0.0, true, 18.0).unwrap();
+        let freqs = rfftfreq(4096, 48000.0);
+        // The pre-clamp formula, retained verbatim for rates at or above 48 kHz.
+        let f_nyq = 24000.0;
+        let old_start = f_nyq * (20_200.0 / 24_000.0);
+        let old_width = (f_nyq - old_start) / (3_800.0 / 1_650.0);
+        for (i, &f) in freqs.iter().enumerate() {
+            let x = (f - old_start) / old_width;
+            let apod_db = if f > old_start { -3.0103 * x * x } else { 0.0 };
+            let want = no.mag_lin[i] * 10f64.powf(apod_db / 20.0);
+            assert_eq!(
+                yes.mag_lin[i], want,
+                "48 kHz bin {f} Hz: the scale clamp must not perturb shipped 48 kHz IRs"
+            );
+        }
+    }
+
+    #[test]
     fn dc_evaluates_from_lowest_frequency_knot_regardless_of_knot_order() {
         let descending = vec![(20000.0, 10.0), (1000.0, 5.0), (20.0, -3.0)];
         let ascending = vec![(20.0, -3.0), (1000.0, 5.0), (20000.0, 10.0)];
@@ -776,6 +839,18 @@ mod tests {
         let w1 = notch_blend_weight(4100.0, f_lo, f_hi, skirt);
         let w2 = notch_blend_weight(4200.0, f_lo, f_hi, skirt);
         assert!(w1 < w2 && w2 < w_lo);
+
+        // Narrow band test (5000 to 5200 Hz, span < skirt_oct): continuous, bounded, no cliff
+        let mut prev = notch_blend_weight(4500.0, 5000.0, 5200.0, skirt);
+        for f in (4501..6000).step_by(2) {
+            let w = notch_blend_weight(f as f64, 5000.0, 5200.0, skirt);
+            assert!(
+                (w - prev).abs() < 0.02,
+                "narrow band discontinuity at {f} Hz: prev={prev}, curr={w}"
+            );
+            assert!((0.0..=1.0).contains(&w));
+            prev = w;
+        }
     }
 
     /// A ceiling that is not a positive finite number is not a ceiling. The guard read

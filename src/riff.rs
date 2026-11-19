@@ -11,8 +11,8 @@
 //!   files end up with their surrounds in the front slots.
 //! * The RIFF and `data` sizes are patched from the header length that was *actually
 //!   written*, and the `data` size lives in the last four bytes of that header. A
-//!   hard-coded 36 writes a RIFF size 24 bytes short onto every 80-byte extensible
-//!   file, and a strict parser then drops the last 24 bytes of audio: the file plays
+//!   hard-coded 36 writes a RIFF size 36 bytes short onto every 80-byte extensible
+//!   file, and a strict parser then drops the last 36 bytes of audio: the file plays
 //!   and is quietly truncated.
 //!
 //! Chunk bodies are size-capped before they are allocated, and a `data` chunk before
@@ -88,8 +88,9 @@ pub fn block_align(channels: u16, bits: u32) -> Result<u16> {
 /// otherwise the extensible header.
 ///
 /// # Errors
-/// When [`block_align`] cannot represent the frame, or the sample width is not a whole number of
-/// bytes.
+/// When the rate or channel count is zero, [`block_align`] cannot represent the frame,
+/// the sample width is not a whole number of bytes, `bits` does not fit in the 16-bit
+/// WAVEFORMATEX field, or `nAvgBytesPerSec` does not fit in its 32-bit field.
 pub fn header(
     rate: u32,
     channels: u16,
@@ -100,7 +101,21 @@ pub fn header(
     if rate == 0 {
         return Err(Error::msg("sample rate must be positive (got 0)"));
     }
-    let block = u32::from(block_align(channels, bits)?);
+    if channels == 0 {
+        return Err(Error::msg("channel count must be positive (got 0)"));
+    }
+    let bits_u16 = u16::try_from(bits).map_err(|_| {
+        Error::msg(format!(
+            "cannot write {bits}-bit samples: wBitsPerSample is a 16-bit field"
+        ))
+    })?;
+    let block_u16 = block_align(channels, bits)?;
+    let block = u32::from(block_u16);
+    let byte_rate = u32::try_from(u64::from(rate) * u64::from(block)).map_err(|_| {
+        Error::msg(format!(
+            "cannot write {rate} Hz x {channels} channels x {bits} bits: nAvgBytesPerSec exceeds u32"
+        ))
+    })?;
     let extensible = channels > 2 || mask.is_some_and(|m| m != guess_mask(channels));
     let mut h = Vec::with_capacity(80);
     let tag = if float {
@@ -129,14 +144,14 @@ pub fn header(
     h.extend_from_slice(&fmt_tag.to_le_bytes());
     h.extend_from_slice(&channels.to_le_bytes());
     h.extend_from_slice(&rate.to_le_bytes());
-    h.extend_from_slice(&(rate.saturating_mul(block)).to_le_bytes());
-    h.extend_from_slice(&(block as u16).to_le_bytes());
-    h.extend_from_slice(&(bits as u16).to_le_bytes());
+    h.extend_from_slice(&byte_rate.to_le_bytes());
+    h.extend_from_slice(&block_u16.to_le_bytes());
+    h.extend_from_slice(&bits_u16.to_le_bytes());
     if extensible {
         // wValidBitsPerSample: the container and the payload have the same width
         // here, because ffmpeg hands us exactly the precision we asked for.
         h.extend_from_slice(&22u16.to_le_bytes()); // cbSize
-        h.extend_from_slice(&(bits as u16).to_le_bytes()); // wValidBitsPerSample
+        h.extend_from_slice(&bits_u16.to_le_bytes()); // wValidBitsPerSample
         h.extend_from_slice(&(mask.unwrap_or_else(|| guess_mask(channels))).to_le_bytes());
         h.extend_from_slice(if float { &SUBTYPE_FLOAT } else { &SUBTYPE_PCM });
     } else if float {
@@ -171,11 +186,13 @@ pub fn header_len(channels: u16, bits: u32, float: bool) -> Result<usize> {
 /// The two sizes a WAV header carries, checked before either is written.
 ///
 /// `u32::MAX` is not one ceiling but two: the data chunk size, and the RIFF chunk size,
-/// which is the payload *plus the header minus 8*. Measuring only the payload lets a
-/// multichannel file pass a check it should fail, and `as u32` then wraps the RIFF size
-/// down to a few dozen bytes — a file that plays, and quietly drops the audio past the
-/// wrap. The reference shares that arithmetic, so this is one place where being correct
-/// means disagreeing with it (documented in `docs/SETUP.md`).
+/// which is the payload *plus its even-alignment pad byte, plus the header minus 8*.
+/// `ckSize` for `data` excludes the pad byte; the enclosing `RIFF` size includes it.
+/// Measuring only the payload lets a multichannel file pass a check it should fail,
+/// and `as u32` then wraps the RIFF size down to a few dozen bytes — a file that plays,
+/// and quietly drops the audio past the wrap. The reference shares that arithmetic, so
+/// this is one place where being correct means disagreeing with it (documented in
+/// `docs/SETUP.md`).
 pub fn riff_sizes(payload: u64, hdr_len: u64) -> Result<(u32, u32)> {
     let pad = payload & 1;
     let riff = payload
@@ -675,8 +692,8 @@ mod tests {
         let max = u64::from(u32::MAX);
         // Comfortably inside both fields.
         assert_eq!(riff_sizes(1000, 44).unwrap(), (1036, 1000));
-        assert_eq!(riff_sizes(1000, 68).unwrap(), (1060, 1000));
-        // Fits the data field, does not fit the RIFF field of a 68-byte header: exactly
+        assert_eq!(riff_sizes(1000, 80).unwrap(), (1072, 1000));
+        // Fits the data field, does not fit the RIFF field of an 80-byte header: exactly
         // the multichannel case a payload-only check lets through.
         let too_big = max - 50;
         assert!(
@@ -684,13 +701,23 @@ mod tests {
             "the data chunk field alone would accept it"
         );
         assert_eq!(
-            (too_big + 68 - 8) as u32,
-            9,
-            "and a truncating cast writes a 9-byte RIFF size for it"
+            (too_big + 80 - 8) as u32,
+            21,
+            "and a truncating cast writes a 21-byte RIFF size for it"
         );
         assert!(
-            riff_sizes(too_big, 68).is_err(),
-            "so this must be an error, not a 9-byte header"
+            riff_sizes(too_big, 80).is_err(),
+            "so this must be an error, not a 21-byte header"
+        );
+        // The largest payload that genuinely fits an 80-byte extensible header:
+        // hdr_len - 8 = 72. max - 73 (even) fits without pad; max - 72 (odd) adds pad and overflows.
+        assert!(
+            riff_sizes(max - 73, 80).is_ok(),
+            "max - 73 (even) is the true limit for 80-byte header"
+        );
+        assert!(
+            riff_sizes(max - 72, 80).is_err(),
+            "max - 72 (odd) adds pad byte and overflows 80-byte header"
         );
         // The largest payload that genuinely fits a classic header, at the boundary.
         // Because odd payloads require a 1-byte RIFF pad, max - 36 (odd) requires
@@ -858,6 +885,33 @@ mod tests {
         assert_eq!(bytes.len() % 2, 0);
         let riff_len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
         assert_eq!(riff_len, bytes.len() - 8);
+        let hdr_len = header_len(1, 8, false).unwrap();
+        let data_len = u32::from_le_bytes(
+            bytes[hdr_len - 4..hdr_len]
+                .try_into()
+                .expect("four data-size bytes"),
+        );
+        assert_eq!(data_len, 3, "data ckSize excludes the pad byte");
         assert_eq!(*bytes.last().unwrap(), 0u8);
+        assert_eq!(
+            riff_sizes(3, hdr_len as u64).unwrap(),
+            ((bytes.len() - 8) as u32, 3)
+        );
+    }
+
+    #[test]
+    fn header_rejects_unrepresentable_waveformatex_fields() {
+        assert!(
+            header(48000, 0, 16, false, None).is_err(),
+            "zero channels make nBlockAlign and every frame count zero"
+        );
+        assert!(
+            header(u32::MAX, 2, 16, false, None).is_err(),
+            "nAvgBytesPerSec must not saturate to u32::MAX"
+        );
+        assert!(
+            header(48000, 1, 65_544, false, None).is_err(),
+            "wBitsPerSample and wValidBitsPerSample are 16-bit fields"
+        );
     }
 }

@@ -108,9 +108,14 @@ Nothing here authorizes a commit or push.
       and guard paths failed their tests under sabotage and passed on restore (md5-checked);
       27 existing real-model invocations were pinned with `--no-target-preset` so their old
       assertions keep their old meaning. fmt/clippy(-D warnings)/doc -D warnings clean.
-      Known gap: `backup/irs/` and the README's main graphs predate the switch and describe
-      their own (labelled) harman_2018-target runs; re-baking the default IR set is a separate
-      decision.
+      Updated 2026-11-19 after upstream 7ad66f9: `backup/irs/` and both `docs/plots` families
+      were regenerated as distinct final/regularized canonical assets, and the README preamp
+      values visible in those plot titles were re-pinned. With the authors' published
+      `KB5000_7 any frequency.txt` converted to the untracked `targets/kb5000_7.csv`, all nine
+      `backup/irs/*.wav` are reproduced byte-for-byte by `-H <model> --target-preset
+      targets/harman_kb5000_7.json --regularize auto`; the plain default and regularized runs
+      reproduce the docs plot titles. Remaining gap: the CSV is user-supplied, so a fresh clone
+      cannot regenerate the KB5000_7 assets without it; the audit removes that CSV again.
 - [ ] C5. Loop closure pending: `--verify-with` needs a real capture taken after convolution on
       the target's own fixture - none of the three repo models is a KB5000 or 5128 capture, so
       all six IRs remain cross-fixture estimates until the user measures on one.

@@ -2169,11 +2169,9 @@ impl FmtCtx<'_> {
 pub fn format_number(v: f64, spec: Option<&str>) -> String {
     let spec = spec.unwrap_or("");
     let plus = spec.starts_with('+');
-    let digits = spec
-        .trim_start_matches('+')
-        .strip_suffix('f')
-        .and_then(|t| t.strip_prefix('.'))
-        .and_then(|d| d.parse::<usize>().ok());
+    let trimmed = spec.trim_start_matches('+');
+    let s = trimmed.strip_suffix('f').unwrap_or(trimmed);
+    let digits = s.strip_prefix('.').and_then(|d| d.parse::<usize>().ok());
     let mut out = match digits {
         Some(d) => format!("{v:.d$}"),
         None => format!("{v}"),
@@ -2448,12 +2446,32 @@ fn meta_annotations(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        while let Some(start) = text.find("{curve_db@") {
+            if let Some(end) = text[start..].find('}') {
+                let full_tag = text[start..start + end + 1].to_string();
+                let inside = &full_tag[10..full_tag.len() - 1]; // strip "{curve_db@" and "}"
+                let (freq_str, spec) = if let Some(colon) = inside.find(':') {
+                    (&inside[..colon], Some(&inside[colon + 1..]))
+                } else {
+                    (inside, None)
+                };
+                if let Ok(freq) = freq_str.parse::<f64>() {
+                    let val = crate::fft::interp(freq, f_plot, wav_eq);
+                    let formatted = format_number(val, spec);
+                    text = text.replace(&full_tag, &formatted);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
         if text.contains("{curve_db") {
             let curve_val = crate::fft::interp(x, f_plot, wav_eq);
             text = text
-                .replace("{curve_db:+.2f}", &format!("{curve_val:+.2}"))
-                .replace("{curve_db:+.2}", &format!("{curve_val:+.2}"))
-                .replace("{curve_db}", &format!("{curve_val:+.2}"));
+                .replace("{curve_db:+.2f}", &format_number(curve_val, Some("+.2f")))
+                .replace("{curve_db:+.2}", &format_number(curve_val, Some("+.2")))
+                .replace("{curve_db}", &format_number(curve_val, None));
         }
         out.push(Annotation {
             text,
@@ -3787,7 +3805,7 @@ mod tests {
     fn metadata_annotations_substitute_their_template_fields() {
         let mut m = model();
         m.plot_meta = serde_json::from_str(
-            r#"{"annotations":[{"text":"4. Concha Zero\n({notch_db:+.2f}dB in '{notch_mode}' mode)","xy":[3703.0,"notch_db"],"xytext":[1500.0,7.3],"color":"green"}]}"#,
+            r#"{"annotations":[{"text":"4. Concha Zero\n({notch_db:+.2}dB in '{notch_mode}' mode; {curve_db@1000.0:+.2f}dB)","xy":[3703.0,"notch_db"],"xytext":[1500.0,7.3],"color":"green"}]}"#,
         )
         .unwrap();
         let (ir, mag) = inputs_64();
@@ -3802,6 +3820,10 @@ mod tests {
             d.annotations[0].text.contains("in 'safe' mode"),
             "{:?}",
             d.annotations[0].text
+        );
+        assert!(
+            d.annotations[0].text.contains("dB @ 1000") || !d.annotations[0].text.contains("@"),
+            "curve_db@ evaluated"
         );
     }
 

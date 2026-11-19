@@ -344,7 +344,13 @@ fn window_passes(
         if v_tail > peak {
             peak = v_tail;
         }
-        if s > 0 {
+    }
+    if s > 0 {
+        // Probe only the cut-boundary margin without walking into the main impulse peak
+        // located `shift` samples into the window.
+        let shift = n - s;
+        let lead_take = (shift / 4).clamp(1, 16).min(w);
+        for i in 0..lead_take {
             let v_lead = full[(s + i) % n].abs();
             if v_lead > peak {
                 peak = v_lead;
@@ -628,8 +634,9 @@ fn build_adjustment(
     let floor = {
         let tail = crate::ir::db_floor(&out, 100);
         if start > 0 {
-            let k = 100.min(out.len());
-            let lead_peak = out[..k].iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+            let shift = r.full.len() - start;
+            let lead_take = (shift / 4).clamp(1, 16).min(out.len());
+            let lead_peak = out[..lead_take].iter().fold(0.0f64, |a, &v| a.max(v.abs()));
             let lead = 20.0 * (lead_peak + 1e-25).log10();
             tail.max(lead)
         } else {
@@ -1267,6 +1274,32 @@ mod tests {
         assert!(
             (dc_ir - dc_adj).abs() < 1e-6,
             "DC sum must match: ir={dc_ir}, adj={dc_adj}"
+        );
+    }
+
+    #[test]
+    fn small_shift_probe_does_not_walk_into_main_impulse_peak() {
+        let n = 16384;
+        let mut full = vec![0.0f64; n];
+        full[0] = 1.0; // main impulse peak
+        for i in 1..200 {
+            full[n - i] = 1e-7; // -140 dBFS pre-ringing floor
+        }
+        let mut doubled = Vec::with_capacity(2 * n);
+        for &x in &full {
+            doubled.push(x * x);
+        }
+        for &x in &full {
+            doubled.push(x * x);
+        }
+        let prefix = crate::accum::prefix_sums(&doubled);
+        let energy = prefix[n];
+        let budget_energy = 1.0;
+        let (floor_ok, _, _) =
+            window_passes(&full, &prefix, n, energy, budget_energy, n - 50, 4096);
+        assert!(
+            floor_ok,
+            "leading-edge probe must not walk into main impulse peak at shift=50"
         );
     }
 }

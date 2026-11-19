@@ -126,6 +126,12 @@ pub enum Status {
 }
 
 impl Status {
+    /// Whether this band carries a scored (pass/fail) verdict.
+    #[must_use]
+    pub fn scored(self) -> bool {
+        matches!(self, Self::Pass | Self::Fail)
+    }
+
     /// The word written in the CSV and the report.
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -361,13 +367,23 @@ pub fn verify(
     let tally = score(&mut rows, &resid, cfg);
 
     let (dense_f, dense_levels, dense_err) = {
-        let f_min = post.lo();
-        let f_max = post.hi().min(predicted.hi());
-        if f_max > f_min && f_min > 0.0 {
+        let mut f_min = post.lo().max(predicted.lo());
+        let mut f_max = post.hi().min(predicted.hi());
+        if let Some(ref tgt) = target {
+            f_min = f_min.max(tgt.lo());
+            f_max = f_max.min(tgt.hi());
+        }
+        let scored_spans: Vec<(f64, f64)> = rows
+            .iter()
+            .zip(&grid)
+            .filter(|(r, _)| r.status.scored())
+            .map(|(_, b)| (b.lo_hz, b.hi_hz))
+            .collect();
+        if f_max > f_min && f_min > 0.0 && !scored_spans.is_empty() {
             let grid_48 = crate::global_fit::uniform_log_grid(f_min, f_max, 48);
             let p_post = crate::pchip::Pchip::new(&post.f, &post.g);
-            let d_levels = p_post.eval_grid(&grid_48);
-            let d_err = if let Some(ref tgt) = target {
+            let raw_d_levels = p_post.eval_grid(&grid_48);
+            let raw_d_err = if let Some(ref tgt) = target {
                 let p_tgt = crate::pchip::Pchip::new(&tgt.f, &tgt.g);
                 let d_tgt = p_tgt.eval_grid(&grid_48);
                 let offset = if tally.offset_db.is_finite() {
@@ -375,7 +391,7 @@ pub fn verify(
                 } else {
                     0.0
                 };
-                d_levels
+                raw_d_levels
                     .iter()
                     .zip(&d_tgt)
                     .map(|(&p, &t)| p - offset - t)
@@ -383,7 +399,23 @@ pub fn verify(
             } else {
                 Vec::new()
             };
-            (grid_48, d_levels, d_err)
+            let gate = tally.gate_db;
+            let mut out_f = Vec::new();
+            let mut out_levels = Vec::new();
+            let mut out_err = Vec::new();
+            for (i, &f) in grid_48.iter().enumerate() {
+                let in_scored_span = scored_spans.iter().any(|&(lo, hi)| f >= lo && f <= hi);
+                let lvl = raw_d_levels[i];
+                let above_gate = !gate.is_finite() || lvl >= gate;
+                if in_scored_span && above_gate {
+                    out_f.push(f);
+                    out_levels.push(lvl);
+                    if !raw_d_err.is_empty() {
+                        out_err.push(raw_d_err[i]);
+                    }
+                }
+            }
+            (out_f, out_levels, out_err)
         } else {
             (Vec::new(), Vec::new(), Vec::new())
         }
@@ -1453,5 +1485,26 @@ mod tests {
             lines.contains("Note            : the filter was split per ear"),
             "{lines}"
         );
+    }
+
+    #[test]
+    fn dense_grid_stays_inside_scored_bands_and_target_bounds() {
+        let target_curve: Vec<(f64, f64)> = vec![(100.0, 0.0), (1000.0, 0.0), (8000.0, 0.0)];
+        let post: Vec<(f64, f64)> = vec![
+            (20.0, -10.0),
+            (100.0, 0.0),
+            (1000.0, 0.0),
+            (8000.0, 0.0),
+            (20000.0, -10.0),
+        ];
+        let pred: Vec<(f64, f64)> = post.clone();
+        let r = verify(&post, &pred, Some(&target_curve), &cfg()).expect("report");
+        assert!(!r.dense_f.is_empty(), "dense grid produced points");
+        for &f in &r.dense_f {
+            assert!(
+                (100.0..=8000.0).contains(&f),
+                "dense grid must not extrapolate target: got {f}"
+            );
+        }
     }
 }

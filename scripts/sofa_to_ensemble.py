@@ -85,6 +85,21 @@ def resample_normalised(
     return vals - ref
 
 
+def _sofa_value(data: object, key: str):
+    """Read a SOFA field from either a dict or a real ``sofar.Sofa`` object.
+
+    ``sofar.read_sofa()`` returns an object whose netCDF names use underscores
+    (``Data_IR``, ``Data_SamplingRate``), not a dict with dotted keys and ``.get``.
+    """
+    if isinstance(data, dict):
+        return data.get(key)
+    return getattr(data, key.replace(".", "_"), None)
+
+
+def _sofa_has(data: object, key: str) -> bool:
+    return _sofa_value(data, key) is not None
+
+
 def curves_from_sofa(
     path: Path, grid: np.ndarray, n_fft: int, ears: str, normalise_hz: float
 ):
@@ -97,27 +112,23 @@ def curves_from_sofa(
         ) from exc
 
     data = sofar.read_sofa(str(path))
-    sr_val = data.get("Data.SamplingRate")
-    fs = (
-        float(np.asarray(sr_val).ravel()[0])
-        if sr_val is not None
-        else None
-    )
+    sr_val = _sofa_value(data, "Data.SamplingRate")
+    fs = float(np.asarray(sr_val).ravel()[0]) if sr_val is not None else None
 
     receivers: list[int]
-    if "Data.IR" in data:
+    if _sofa_has(data, "Data.IR"):
         if fs is None:
             raise ValueError(f"{path}: SOFA IR file lacks Data.SamplingRate")
-        ir = np.asarray(data["Data.IR"], dtype=np.float64)
+        ir = np.asarray(_sofa_value(data, "Data.IR"), dtype=np.float64)
         if ir.ndim == 2:
             ir = ir[np.newaxis, ...]
         if ir.ndim == 1:
             ir = ir[np.newaxis, np.newaxis, ...]
         n_m, n_r, _ = ir.shape
         get_spectrum = lambda m, r: magnitude_db_from_ir(ir[m, r], fs, n_fft)
-    elif "Data.Real" in data and "Data.Imag" in data:
-        real = np.asarray(data["Data.Real"], dtype=np.float64)
-        imag = np.asarray(data["Data.Imag"], dtype=np.float64)
+    elif _sofa_has(data, "Data.Real") and _sofa_has(data, "Data.Imag"):
+        real = np.asarray(_sofa_value(data, "Data.Real"), dtype=np.float64)
+        imag = np.asarray(_sofa_value(data, "Data.Imag"), dtype=np.float64)
         if real.ndim == 2:
             real, imag = real[np.newaxis, ...], imag[np.newaxis, ...]
         if real.ndim == 1:
@@ -127,8 +138,8 @@ def curves_from_sofa(
             )
         n_m, n_r, _ = real.shape
         tf_freqs = None
-        if "N" in data and data["N"] is not None:
-            tf_freqs = np.asarray(data["N"], dtype=np.float64).ravel()
+        if _sofa_has(data, "N"):
+            tf_freqs = np.asarray(_sofa_value(data, "N"), dtype=np.float64).ravel()
         get_spectrum = lambda m, r: magnitude_db_from_tf(
             real[m, r], imag[m, r], tf_freqs, fs
         )
@@ -175,16 +186,16 @@ def self_test(grid: np.ndarray, n_fft: int, normalise_hz: float) -> int:
     )
     assert np.all(np.diff(grid) > 0)
 
-    # Exercise the SOFA extraction shape with an in-memory fake reader: no real SOFA file (or
-    # writable SOFA library) needed, and the rest of the path is the same as a PHOnA file.
+    # Exercise the SOFA extraction shape with a fake attribute object that mimics the
+    # ``sofar.Sofa`` returned by ``sofar.read_sofa()``: a dict-only reader would fail here.
     import sys
     import types
 
     fake = types.ModuleType("sofar")
-    fake.read_sofa = lambda _path: {
-        "Data.SamplingRate": np.array([fs]),
-        "Data.IR": np.tile(ir, (2, 2, 1)),  # M=2 placements, R=2 receivers
-    }
+    fake.read_sofa = lambda _path: types.SimpleNamespace(
+        Data_SamplingRate=np.array([fs]),
+        Data_IR=np.tile(ir, (2, 2, 1)),  # M=2 placements, R=2 receivers
+    )
     saved = sys.modules.get("sofar")
     sys.modules["sofar"] = fake
     try:
@@ -206,11 +217,11 @@ def self_test(grid: np.ndarray, n_fft: int, normalise_hz: float) -> int:
     tf_len = 257
     n_freqs = np.linspace(0.0, fs / 2.0, tf_len)
     fake_tf = types.ModuleType("sofar")
-    fake_tf.read_sofa = lambda _path: {
-        "N": n_freqs,
-        "Data.Real": np.ones((1, 2, tf_len)),
-        "Data.Imag": np.zeros((1, 2, tf_len)),
-    }
+    fake_tf.read_sofa = lambda _path: types.SimpleNamespace(
+        N=n_freqs,
+        Data_Real=np.ones((1, 2, tf_len)),
+        Data_Imag=np.zeros((1, 2, tf_len)),
+    )
     sys.modules["sofar"] = fake_tf
     try:
         tf_curves = list(

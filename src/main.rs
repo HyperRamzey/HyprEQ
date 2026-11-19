@@ -1242,10 +1242,10 @@ fn run_model(
         }
         mpv.preamp_db -= gr_mpv;
         mpv.unwindowed_floor_dbfs -= gr_mpv;
-        mpv.windowed_floor_dbfs = hypreq::ir::db_floor(&mpv.ir, 100);
+        mpv.windowed_floor_dbfs -= gr_mpv;
         for (label, a) in &mut phase_done {
             if *label == "mastering" {
-                a.floor_dbfs = mpv.windowed_floor_dbfs;
+                a.floor_dbfs -= gr_mpv;
             }
         }
     }
@@ -1353,10 +1353,10 @@ fn run_model(
         }
         rt.preamp_db -= gr_rt;
         rt.unwindowed_floor_dbfs -= gr_rt;
-        rt.windowed_floor_dbfs = hypreq::ir::db_floor(&rt.ir, 100);
+        rt.windowed_floor_dbfs -= gr_rt;
         for (label, a) in &mut phase_done {
             if *label == "real-time" {
-                a.floor_dbfs = rt.windowed_floor_dbfs;
+                a.floor_dbfs -= gr_rt;
             }
         }
     }
@@ -1643,7 +1643,7 @@ fn run_audio_wav_mode(
         };
         let phase = if per_ear.is_none() {
             if let Some(mpv) = mpv_filter.as_mut() {
-                let p = phase_stage(mpv, fs, "applied", args)?;
+                let mut p = phase_stage(mpv, fs, "applied", args)?;
                 let gr = limit_ir(&mut mpv.ir, lim_cfg, args.headroom_db);
                 if gr > 0.0 {
                     let scale = 10.0f64.powf(-gr / 20.0);
@@ -1651,6 +1651,11 @@ fn run_audio_wav_mode(
                         *m *= scale;
                     }
                     mpv.preamp_db -= gr;
+                    mpv.unwindowed_floor_dbfs -= gr;
+                    mpv.windowed_floor_dbfs -= gr;
+                    if let Some(ref mut adj) = p {
+                        adj.floor_dbfs -= gr;
+                    }
                 }
                 p
             } else {
@@ -1695,7 +1700,7 @@ fn run_audio_wav_mode(
                 // Two ears, two filters: when experimental phase is enabled, both kernels are reshaped
                 // jointly so both channels share identical impulse alignment (0 samples ITD skew)
                 // and identical filter lengths.
-                let ear_phase: Vec<(&str, hypreq::phase::Adjustment)> = if let Some(crossover) =
+                let mut ear_phase: Vec<(&str, hypreq::phase::Adjustment)> = if let Some(crossover) =
                     args.experimental_phase
                 {
                     let (mut adj_l, mut adj_r) = hypreq::phase::linearize_band_stereo(
@@ -1731,10 +1736,19 @@ fn run_audio_wav_mode(
                         *m *= scale;
                     }
                     left.preamp_db -= gr_shared;
+                    left.unwindowed_floor_dbfs -= gr_shared;
+                    left.windowed_floor_dbfs -= gr_shared;
+
                     for m in &mut right.mag_lin {
                         *m *= scale;
                     }
                     right.preamp_db -= gr_shared;
+                    right.unwindowed_floor_dbfs -= gr_shared;
+                    right.windowed_floor_dbfs -= gr_shared;
+
+                    for (_, adj) in &mut ear_phase {
+                        adj.floor_dbfs -= gr_shared;
+                    }
                 }
                 for (tag, ir) in [("left", &left), ("right", &right)] {
                     // Padded to the width the shared line's `(prefix)   ` occupies, so the two
@@ -2917,7 +2931,7 @@ fn synth_stage(
                 let path = format!("{prefix}_peq.txt");
                 std::fs::write(
                     &path,
-                    hypreq::synth_alt::to_equalizer_apo_text(&bands, preamp_db),
+                    hypreq::synth_alt::to_equalizer_apo_text(&bands, preamp_db, f64::from(fs)),
                 )
                 .map_err(|e| Error::msg(format!("cannot write '{path}': {e}")))?;
                 lines.push(format!("  APO preset      : {path}"));

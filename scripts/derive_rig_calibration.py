@@ -39,6 +39,12 @@ CLASSES = {"open_back", "closed_back", "in_ear", "unknown", ""}
 
 
 def read_curve(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Read ``f,g`` or ``f,L,R`` rows; average every gain column after the frequency.
+
+    Taking ``numbers[-1]`` silently discarded the left channel of common three-column
+    exports. Averaging L/R is an explicit policy for this calibration helper, not a
+    claim about any external database's channel convention.
+    """
     f, g = [], []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -49,9 +55,9 @@ def read_curve(path: Path) -> tuple[np.ndarray, np.ndarray]:
             numbers = [float(c) for c in cells]
         except ValueError:
             continue
-        if len(numbers) >= 2 and numbers[0] > 0 and np.isfinite(numbers[-1]):
+        if len(numbers) >= 2 and numbers[0] > 0 and np.all(np.isfinite(numbers)):
             f.append(numbers[0])
-            g.append(numbers[-1])
+            g.append(float(np.mean(numbers[1:])))
     if len(f) < 2:
         raise ValueError(f"{path}: need at least two numeric rows")
     f = np.asarray(f, dtype=np.float64)
@@ -119,14 +125,32 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.self_test:
         # derive() reads files; exercise the aggregation math directly with two constant offsets.
+        import tempfile
+
         b = np.full_like(grid, 3.0)
         matrix = np.vstack([b, b + 0.5])
         mean, sigma = matrix.mean(axis=0), matrix.std(axis=0, ddof=1)
         assert np.allclose(mean, 3.25), mean[:3]
         assert np.allclose(sigma, 0.25 * np.sqrt(2.0)), sigma[:3]
         assert np.all(np.diff(grid) > 0)
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "lr.csv"
+            p.write_text(
+                "# frequency_hz,left_db,right_db\n20,0,10\n1000,2,4\n20000,-2,2\n",
+                encoding="utf-8",
+            )
+            f, g = read_curve(p)
+            assert np.allclose(f, [20.0, 1000.0, 20000.0]), f
+            assert np.allclose(g, [5.0, 3.0, 0.0]), (
+                f"three-column CSV must average L/R, got {g}"
+            )
+            p.write_text("20,7\n1000,7\n20000,7\n", encoding="utf-8")
+            _, g2 = read_curve(p)
+            assert np.allclose(g2, 7.0), g2
         print(
-            f"self-test OK: mean={mean[0]:.2f} dB, sigma={sigma[0]:.2f} dB, {len(grid)} bins"
+            f"self-test OK: mean={mean[0]:.2f} dB, sigma={sigma[0]:.2f} dB, {len(grid)} bins, "
+            "L/R CSV averaging OK"
         )
         return 0
 

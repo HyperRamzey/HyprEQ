@@ -7,8 +7,8 @@ All target curves and headphone measurement datasets are decoupled from the DSP 
 ## Implementation
 
 The DSP is a single self-contained Rust crate — a library plus a `hypreq` binary — with no
-external service, plugin host, or path dependency, covered by an extensive 458-test suite
-(`cargo test --all-targets`). The behaviour is pinned inside the crate rather than by a second
+external service, plugin host, or path dependency, covered by a 466-test suite
+(`cargo test --all-targets`: 464 executed, 2 explicitly ignored). The behaviour is pinned inside the crate rather than by a second
 implementation: the reference program this was ported from and the harness that used to diff the
 two side by side are no longer in the tree, so the tests — byte comparisons of stdout, WAV
 containers and payloads, audit CSVs, and usage errors — are the contract a change has to satisfy.
@@ -37,7 +37,7 @@ cargo build --release
    **Adaptive Regularized Verification (`--regularize auto`):**
    <img width="1950" height="1725" alt="jbl770nc_regularized_verification" src="docs/plots/jbl770nc_regularized_verification.png" />
 
-   > **What Adaptive Regularization Gives:** Evaluates local spectral deviation against a half-octave smoothed envelope with an adaptive knee at $4.29\text{ dB}$. Moves 26 of 94 knots, softening the cut at $8.48\text{ kHz}$ from $-2.02\text{ dB}$ to $-1.54\text{ dB}$ (a $+0.48\text{ dB}$ shift toward bypass) where the narrow dip is partly an artificial pinna coupling artifact, while completely preserving fundamental acoustic driver corrections: the $-6.60\text{ dB}$ cup mode at $160\text{ Hz}$, the $+2.60\text{ dB}$ boost at $455\text{ Hz}$, and the $-2.45\text{ dB}$ nasal cut at $1.05\text{ kHz}$. Total preamp moves from $-10.21\text{ dB}$ to $-10.20\text{ dB}$.
+   > **What Adaptive Regularization Gives:** Evaluates local spectral deviation against a half-octave smoothed envelope with an adaptive knee at $4.29\text{ dB}$. Moves 26 of 94 knots, softening the cut at $8.48\text{ kHz}$ from $-2.02\text{ dB}$ to $-1.54\text{ dB}$ (a $+0.48\text{ dB}$ shift toward bypass) where the narrow dip is partly an artificial pinna coupling artifact, while completely preserving fundamental acoustic driver corrections: the $-6.60\text{ dB}$ cup mode at $160\text{ Hz}$, the $+2.60\text{ dB}$ boost at $455\text{ Hz}$, and the $-2.45\text{ dB}$ nasal cut at $1.05\text{ kHz}$. Total preamp moves from $-8.53\text{ dB}$ to $-8.52\text{ dB}$.
 
 2. **Beyerdynamic DT 770 Pro (80 Ω)** — `--headphone dt770_80`
    - **Measurement Source:** **Crinacle** (Genuine `GRAS 43AG-7` fixture: `RA0402` high-frequency 711 coupler + `KB500X` anthropometric pinna), via AutoEq.
@@ -65,20 +65,22 @@ cargo build --release
 
 ### Reference Model Profiles & Convolver Metrics
 
-| Model Key | Target Profile / Mode | Max Boost | Preamp | Truncation Floor ($f_{64}$) | Causal Energy | HF Taper | Generated Convolvers / Notes |
+| Model Key | Target Profile / Mode | Max Boost | Preamp | Truncation Floor ($f_{64}$, after half-Kaiser fade) | Causal Energy | HF Taper | Generated Convolvers / Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`jbl770nc`** | **KB5000_7 Baseline (Shipped Default)** | $+8.71\text{ dB}$ | $-10.21\text{ dB}$ | $-296.84\text{ dBFS}$ | $99.9999999984\%$ | $0.00\text{ dB}$ HF Wire | `targets/harman_kb5000_7.json` default; IR Peak $-9.32\text{ dBTP}$ |
-| **`jbl770nc`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+8.70\text{ dB}$ | $-10.20\text{ dB}$ | $-296.82\text{ dBFS}$ | $99.9999999984\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$, 26 knots moved ($8.48\text{k}$ softened) |
-| **`jbl770nc`** | Harman 2018 Baseline (`--no-target-preset`) | $+5.00\text{ dB}$ | $-6.50\text{ dB}$ | $-319.21\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | `jbl770nc_f64_48k.wav`<br>`jbl770nc_mastering_mono_48k.wav`<br>`jbl770nc_mastering_stereo_48k.wav` |
-| **`jbl770nc`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+5.00\text{ dB}$ | $-6.50\text{ dB}$ | $-319.20\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$, 20 knots moved ($8.48\text{k}$ softened) |
-| **`dt770_80`** | **KB5000_7 Baseline (Shipped Default)** | $+4.54\text{ dB}$ | $-6.04\text{ dB}$ | $-287.67\text{ dBFS}$ | $99.9999999977\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json` default; IR Peak $-7.26\text{ dBTP}$ |
+| **`jbl770nc`** | **KB5000_7 Baseline (Shipped Default)** | $+7.03\text{ dB}$ | $-8.53\text{ dB}$ | $-295.18\text{ dBFS}$ | $99.9999999982\%$ | $0.00\text{ dB}$ HF Wire | `targets/harman_kb5000_7.json` default; IR Peak $-7.800\text{ dBTP}$ (x16) |
+| **`jbl770nc`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+7.02\text{ dB}$ | $-8.52\text{ dB}$ | $-295.16\text{ dBFS}$ | $99.9999999982\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$, 26 knots moved ($8.48\text{k}$ softened); IR Peak $-7.783\text{ dBTP}$ (x16) |
+| **`jbl770nc`** | Harman 2018 Baseline (`--no-target-preset`) | $+4.97\text{ dB}$ | $-6.47\text{ dB}$ | $-319.24\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | `jbl770nc_f64_48k.wav`<br>`jbl770nc_mastering_mono_48k.wav`<br>`jbl770nc_mastering_stereo_48k.wav` |
+| **`jbl770nc`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+4.97\text{ dB}$ | $-6.47\text{ dB}$ | $-319.23\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$, 20 knots moved ($8.48\text{k}$ softened) |
+| **`dt770_80`** | **KB5000_7 Baseline (Shipped Default)** | $+4.54\text{ dB}$ | $-6.04\text{ dB}$ | $-288.43\text{ dBFS}$ | $99.9999999970\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json` default; IR Peak $-6.989\text{ dBTP}$ (x16) |
 | **`dt770_80`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+4.50\text{ dB}$ | $-6.00\text{ dB}$ | $-288.23\text{ dBFS}$ | $99.9999999969\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $4.27\text{ dB}$, 38 knots moved ($3.78\text{k}$ concha null bypassed $+0.57\text{ dB}$) |
 | **`dt770_80`** | Harman 2018 Baseline (`--no-target-preset`) | $+4.10\text{ dB}$ | $-5.60\text{ dB}$ | $-293.39\text{ dBFS}$ | $99.9999999981\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `dt770_80ohm_f64_48k.wav`<br>`dt770_80ohm_mastering_mono_48k.wav`<br>`dt770_80ohm_mastering_stereo_48k.wav` |
 | **`dt770_80`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+4.06\text{ dB}$ | $-5.56\text{ dB}$ | $-293.36\text{ dBFS}$ | $99.9999999982\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $4.27\text{ dB}$, $3.7\text{k}$ concha null bypassed ($+0.10\text{ dB}$) |
-| **`ft1pro`** | **KB5000_7 Baseline (Shipped Default)** | $+3.97\text{ dB}$ | $-5.47\text{ dB}$ | $-301.19\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json` default; IR Peak $-5.56\text{ dBTP}$ |
-| **`ft1pro`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+3.95\text{ dB}$ | $-5.45\text{ dB}$ | $-300.90\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 67 knots moved ($9.18\text{k}$ moderated) |
+| **`ft1pro`** | **KB5000_7 Baseline (Shipped Default)** | $+3.97\text{ dB}$ | $-5.47\text{ dB}$ | $-301.22\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json` default; IR Peak $-5.565\text{ dBTP}$ (x16) |
+| **`ft1pro`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+3.95\text{ dB}$ | $-5.45\text{ dB}$ | $-300.93\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 67 knots moved ($9.18\text{k}$ moderated); IR Peak $-5.561\text{ dBTP}$ (x16) |
 | **`ft1pro`** | Harman 2018 Baseline (`--no-target-preset`) | $+4.07\text{ dB}$ | $-5.57\text{ dB}$ | $-311.60\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `ft1pro_f64_48k.wav`<br>`ft1pro_mastering_mono_48k.wav`<br>`ft1pro_mastering_stereo_48k.wav` |
 | **`ft1pro`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+4.03\text{ dB}$ | $-5.53\text{ dB}$ | $-311.45\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 62 knots moved ($9.18\text{k}$ moderated) |
+
+> **Asset provenance (measured 2026-11-19):** with the authors' published `KB5000_7 any frequency.txt` converted to `targets/kb5000_7.csv`, `hypreq -H <model> --target-preset targets/harman_kb5000_7.json --regularize auto` reproduces all nine `backup/irs/*.wav` byte-for-byte, while the plain default and `--regularize auto` runs produce the `docs/plots` final and regularized titles respectively. The CSV itself is deliberately untracked, so a fresh clone still cannot regenerate the KB5000_7 assets until the user supplies it. The Harman 2018 rows use `--no-target-preset`. PNG byte hashes are not a reproducibility test: local font rasterisation changes text pixels while the plotted DSP curves and title numbers match.
 
 ### Acoustic Scope & Limitations
 A coupler measurement captures one unit on one artificial pinna/ear simulator. Pad wear, seal leakage, and individual pinna geometry shift sub-bass (`<60 Hz`) and high-frequency pinna interference notches (`>3 kHz`) by several dB from ear to ear. For example, even between the Left and Right earcups of the measured DT 770 Pro 80 Ω unit on Crinacle's GRAS 43AG-7 rig, the `~3.76 kHz` concha reflection null shifts by `135 Hz` and `6.6 dB` (`-2.16 dBr` Left vs. `-8.78 dBr` Right at `3,838 Hz`), while the FiiO FT1 Pro exhibits a `4.05 dB` L/R channel split across its `~3.84–4.05 kHz` concha/driver notch (`+4.32 dBr` Left vs. `+8.37 dBr` Right at `3,839 Hz`).
@@ -162,7 +164,7 @@ $$w_1 = 2 h_k + h_{k-1}, \quad w_2 = h_k + 2 h_{k-1}$$
 
 $$d_k = \begin{cases} \frac{w_1 + w_2}{\frac{w_1}{\Delta_{k-1}} + \frac{w_2}{\Delta_k}}, & \Delta_{k-1} \cdot \Delta_k > 0 \\ 0, & \Delta_{k-1} \cdot \Delta_k \le 0 \end{cases}$$
 
-with endpoint boundary derivatives set to standard one-sided differences: $d_0 = \Delta_0$ and $d_{K-1} = \Delta_{K-2}$.
+with endpoint derivatives set by SciPy/Moler's shape-preserving one-sided three-point scheme, **not** the first secant: `d0 = ((2h0+h1)*Delta0 - h0*Delta1)/(h0+h1)` and the mirrored last endpoint, then clamped to zero when the sign disagrees with the endpoint secant and to `3*Delta` when the adjacent secants reverse and the estimate is too steep (Fritsch & Carlson 1980; SciPy `PchipInterpolator`; Moler, *Numerical Computing with MATLAB*, 2004).
 
 This guarantees strict monotonicity and eliminates overshoot across arbitrary non-uniform knot spacing. Continuous evaluation over dense FFT grids utilizes a monotonic cursor, reducing search complexity from $O(M \log N)$ to $O(M)$ linear time.
 
@@ -182,17 +184,17 @@ Headphone coupler measurements above $8\text{ kHz} - 10\text{ kHz}$ contain non-
 
 $$w(f) = 2^{-\frac{1}{2}\left(\frac{f - f_{\text{start}}}{\sigma}\right)^2}, \quad f_{\text{start}} = \max\left(24000, f_{\text{nyq}}\right) \cdot \frac{20200}{24000}, \quad \sigma = \max\left(24000, f_{\text{nyq}}\right) \cdot \frac{1650}{24000}$$
 
-(yielding $-3.0103\text{ dB}$ attenuation at $f = f_{\text{start}} + \sigma$ and $-15.97\text{ dB}$ at $f = f_{\text{nyq}}$). Clamping the apodizer scale floor at $24\text{ kHz}$ ensures that sample rates at or below $48\text{ kHz}$ ($44.1\text{ kHz}$, $48\text{ kHz}$) never attenuate audible treble below $20\text{ kHz}$ (preserving flat response up to $20.2\text{ kHz}$), while eliminating stopband ringing at high rates ($96\text{ kHz}$, $192\text{ kHz}$).
+(yielding $-3.0103\text{ dB}$ attenuation at $f = f_{\text{start}} + \sigma$ and $-15.97\text{ dB}$ at the scale endpoint $f=\max(24000,f_{\text{nyq}})$, not at every Nyquist rate). At $44.1\text{ kHz}$ the scale floor is $24\text{ kHz}$ while Nyquist is $22.05\text{ kHz}$, so the response is flat through $20.2\text{ kHz}$ and only $-3.78\text{ dB}$ at Nyquist. Clamping the apodizer scale floor at $24\text{ kHz}$ ensures that sample rates at or below $48\text{ kHz}$ ($44.1\text{ kHz}$, $48\text{ kHz}$) never attenuate audible treble below $20\text{ kHz}$ (preserving flat response up to $20.2\text{ kHz}$), while eliminating stopband ringing at high rates ($96\text{ kHz}$, $192\text{ kHz}$).
 
 ### 5. ITU-R BS.1770-5 Polyphase True-Peak Metering
 Standard digital sample-peak meters cannot detect inter-sample peaks that emerge during digital-to-analog reconstruction or asynchronous sample rate conversion. HyprEQ integrates an ITU-R BS.1770-5 Annex 2 compliant polyphase oversampling detector:
-- **Polyphase Filter Bank:** 16-phase Kaiser-windowed sinc interpolation filter ($51\text{ taps/phase}$, oversampling by $16\times$, with support from $2\times$ up to $32\times$, plus standard ITU $4\times$ mode).
+- **Polyphase Filter Bank:** The CLI defaults to a 16-phase Kaiser-windowed sinc interpolator (`51 taps/phase`, x16). The library also exposes x2/x8/x16/x32 derived 51-tap banks and the printed ITU x4 12-tap/4-phase bank; `Ratio::default()` is x4 for the standalone meter, `limiter_cfg` starts at x16, and the limiter's own `Cfg::default()` is x8.
 - **Static Branch Caching:** Polyphase impulse responses are calculated once and stored in static memory via thread-safe `OnceLock` structures, eliminating runtime allocation during streaming convolution.
 - **Sub-Sample Parabolic Refinement:** When oversampled samples locate a peak at index $k$, continuous parabolic interpolation solves for the sub-sample apex:
 
 $$t^* = -\frac{y_{k+1} - y_{k-1}}{2(y_{k+1} - 2y_k + y_{k-1})}, \quad y^* = y_k - \frac{1}{4}(y_{k-1} - y_{k+1}) t^*$$
 
-This achieves sub-sample apex measurement precision within $<0.01\text{ dBTP}$ across the audio band.
+ITU-R BS.1770-5 Annex 2 Attachment 1 gives under-read bounds of 0.034/0.042 dB at f_norm 0.45/0.5 for x16 and 0.008/0.010 dB for x32. Parabolic refinement reduces grid-phase error on the derived banks, but the earlier blanket `<0.01 dBTP across the audio band` claim is not valid for the x16 CLI default; use x32 if that bound is required.
 
 ### 6. Two-Stage True-Peak Limiter & Non-Distorting Static FIR Scaling
 To maintain zero inter-sample clipping while preserving transient punch, HyprEQ incorporates a dual-stage ceiling limiter alongside non-distorting impulse response gain scaling:
@@ -644,7 +646,7 @@ HyprEQ provides comprehensive control over target curve design, acoustic regular
 | `--notch-mode <MODE>` | Enum: `safe`, `original`, `zero` | **Default:** `safe` | Controls non-minimum-phase concha reflection null handling in model's `notch_range_hz` ($2.8–4.5\text{ kHz}$). | • **`safe`** (Default): Compresses narrow boosts to $+1.50\text{ dB}$ via $C \cdot \tanh(g / C)$ across all targets, preventing glare.<br>• **`original`**: Allows raw target inversion fill ($+4.26\text{ dB}$ on DT 770; $+2.01\text{ dB}$ on FT1 Pro).<br>• **`zero`**: Enforces $0.00\text{ dB}$ flat wire through notch band, skipping concha correction entirely. |
 | `--apodize` | Flag | **Off** (model-defined in JSON) | Forces Gaussian Nyquist roll-off ($>20.2\text{ kHz}$) to eliminate Gibbs ringing on legacy brickwall DACs. | • Overrides model JSON: forces apodization even on flat-wire profiles (e.g. `jbl770nc`). Target-independent. |
 | `--no-apodize` | Flag | **Off** (model-defined in JSON) | Forces non-apodizing $0.00\text{ dB}$ ultrasonic wire up to Nyquist, disabling model's `gauss_apodize`. | • Overrides model JSON: preserves flat wire to Nyquist on DT 770 and FT1 Pro. Target-independent. |
-| `--synth <BACKEND>` | Enum: `fir`, `peq`, `parallel-iir` | **Default:** `fir` | Synthesis engine: `fir` (65,536-tap minimum-phase FIR), `peq` (parametric biquads + APO export), `parallel-iir` (parallel second-order sections). | • **`fir`** (Default): Evaluates Hilbert-Cepstral minimum-phase impulse response.<br>• **`peq`**: Fits $N$ peaking/shelf filters using Vicanek/RBJ biquads and exports EqualizerAPO config with dense-grid verified preamp.<br>• **`parallel-iir`**: Generates parallel second-order sections for ultra-low latency hardware DSP engines. |
+| `--synth <BACKEND>` | Enum: `fir`, `peq`, `parallel-iir` | **Default:** `fir` | Synthesis engine: `fir` (65,536-tap minimum-phase FIR), `peq` (parametric biquads + APO export), `parallel-iir` (parallel second-order sections). | • **`fir`** (Default): Evaluates Hilbert-Cepstral minimum-phase impulse response.<br>• **`peq`**: Fits $N$ peaking/shelf filters using Vicanek matched biquads and exports Equalizer APO custom IIR coefficients (not RBJ `PK` parameters) with dense-grid verified preamp.<br>• **`parallel-iir`**: Generates parallel second-order sections for ultra-low latency hardware DSP engines. |
 | `--peq-bands <N>` | Integer [1, 32] | **Default:** `8` | Number of parametric biquad bands allocated when `--synth peq`. | • Fits available biquad budget to dominant acoustic features of target error curve. Target-independent. |
 | `--global-fit` | Flag | **Off** | Solves a global curvature-constrained box-QP over the dense 1/48-octave grid. | • Solves bounded convex optimization penalizing second-derivative roughness while respecting driver excursion/headroom boundaries. Operates across any target. |
 
@@ -661,10 +663,10 @@ HyprEQ provides comprehensive control over target curve design, acoustic regular
 
 | CLI Flag | Type / Domain | Default State | Core DSP Behavior | Target-Specific Behavior across Supported Targets |
 | :--- | :--- | :--- | :--- | :--- |
-| `--headroom-db <DB>` | Float (dB) | **Default:** `-1.50 dB` | Steady-state convolver preamp headroom added to inverse max filter boost: $\text{Preamp} = -(\text{Max Boost}) + \text{Headroom}$. | • Scales static FIR gain to guarantee 0 dBFS sine inputs never clip linear convolvers. Active on all targets.<br>• On `harman_kb5000_7` with JBL 770NC (max boost $+8.71\text{ dB}$), total preamp is $-10.21\text{ dB}$. On Harman 2018 (max boost $+5.00\text{ dB}$), total preamp is $-6.50\text{ dB}$. |
+| `--headroom-db <DB>` | Float (dB) | **Default:** `-1.50 dB` | Steady-state convolver preamp headroom added to inverse max filter boost: $\text{Preamp} = -(\text{Max Boost}) + \text{Headroom}$. | • Scales static FIR gain to guarantee 0 dBFS sine inputs never clip linear convolvers. Active on all targets.<br>• On `harman_kb5000_7` with JBL 770NC (max boost $+7.03\text{ dB}$), total preamp is $-8.53\text{ dB}$. On Harman 2018 (max boost $+5.00\text{ dB}$), total preamp is $-6.50\text{ dB}$. |
 | `--no-tp-limiter` | Flag | **Off** (limiter enabled) | Disables the two-stage true-peak ceiling limiter on audio playback/test probes (measurements still execute). | • Allows unbounded linear convolution for offline analysis or bit-transparent mastering chains. Target-independent. |
 | `--tp-ceiling <DBTP>` | Float [-24.0, 0.0] | **Default:** `-3.0 dBTP` | Sets the hard true-peak ceiling for the dynamic limiter. | • Bounds inter-sample peaks across DAC reconstruction filters. Target-independent. |
-| `--tp-ratio <RATIO>` | Enum: `x2`, `x4`, `x8`, `x16`, `x32` | **Default:** `x16` | Polyphase Kaiser oversampling ratio for true-peak detection and side-chain tracking. | • Exceeds standard ITU-R BS.1770-5 (x4) detection accuracy, catching sub-sample transients up to Nyquist. Target-independent. |
+| `--tp-ratio <RATIO>` | Enum: `x2`, `x4`, `x8`, `x16`, `x32` | **Default:** `x16` (CLI) | Polyphase Kaiser oversampling ratio for true-peak detection and side-chain tracking. | • CLI/report default x16; the standalone meter's `Ratio::default()` is the printed ITU x4 bank, the generic limiter `Cfg::default()` is x8, and `limiter_cfg` pins x16 for this tool.<br>• Exceeds the standard ITU-R BS.1770-5 x4 detector on grid-phase error; see the under-read bounds above. |
 | `--tp-lookahead <MS>` | Float [0.2, 2.0] | **Default:** `2.0 ms` | Lookahead buffer for transparent gain reduction ramp-up. | • Prevents transient waveshape clipping without audible distortion. Target-independent. |
 | `--tp-attack <MS>` | Float [1.0, 200.0] | **Default:** `60.0 ms` | Slow-stage RMS envelope attack time constant. | • Shapes macro-dynamic levelling without pumping. Target-independent. |
 | `--tp-release <MS>` | Float [10.0, 5000.0] | **Default:** `900.0 ms` | Slow-stage release time constant. | • Smooth dynamic decay recovery. Target-independent. |

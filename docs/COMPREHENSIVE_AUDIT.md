@@ -1,6 +1,6 @@
-# HyprEQ Comprehensive Audit & Bug List (All 3 Reviews - All Resolved & Verified)
+# HyprEQ Comprehensive Audit & Bug List (All 3 Reviews Consolidated)
 
-This document consolidates every defect, discrepancy, performance hotspot, broken invariant, and literature error identified across all three comprehensive reviews of the HyprEQ codebase (39 files across `src/*.rs`, `tests/*.rs`, `scripts/*`, `docs/*`, `README.md`, `Cargo.toml`, `measurements.json`). All items below have been resolved, fixed in production code/docs, and verified against tests and primary sources.
+This document consolidates every defect, discrepancy, performance hotspot, broken invariant, and literature error identified across all three comprehensive reviews of the HyprEQ codebase (39 files across `src/*.rs`, `tests/*.rs`, `scripts/*`, `docs/*`, `README.md`, `Cargo.toml`, `measurements.json`). It states findings and the required fixes; **it claims no verification status of its own**. The per-item verified state lives in the COMPLETION AUDIT in `BUGFIX.md`, where each numbered item cites fresh evidence from the working tree — test ids, measured numbers, sabotage results — instead of trusting this report's prose.
 
 ---
 

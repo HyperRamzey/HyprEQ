@@ -417,6 +417,12 @@ impl Ratio {
     /// Worst-case under-read BS.1770-5 Annex 2 Attachment 1 allows a proper meter at
     /// this ratio, at normalised frequency `f_norm`: `20·log10(cos(pi·f_norm/n))`,
     /// as a negative dB number.
+    ///
+    /// Test-only: the guard the limiter actually aims at is [`crate::limiter::Cfg::band_caveat_db`],
+    /// a configured dB number that the operator sets, and the report prints that. This is the
+    /// standard's own bound, which is what the tests below hold the detector and the shipped default
+    /// against — a production caller would be tempted to treat an allowance as a target.
+    #[cfg(test)]
     #[must_use]
     pub fn bound_db(self, f_norm: f64) -> f64 {
         let x = std::f64::consts::PI * f_norm / self.n() as f64;

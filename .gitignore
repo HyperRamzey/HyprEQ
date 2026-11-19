@@ -11,3 +11,7 @@ __pycache__/
 /*.wav
 /*.png
 /*_audit_data.csv
+
+# Target recipes are recipes, not curves: every CSV a recipe points at is data the
+# user supplied (published target tables are copyrighted). Never commit one.
+/targets/*.csv

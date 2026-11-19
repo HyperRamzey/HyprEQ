@@ -63,10 +63,41 @@ pub fn guess_mask(channels: u16) -> u32 {
         .fold(0, |acc, bit| acc | bit)
 }
 
+/// `nBlockAlign`: one frame's width in bytes, which the container carries in 16 bits.
+///
+/// A wide, deep file can exceed that — 16384 channels of 32-bit float is 65536 bytes per frame —
+/// and the honest answer is that this container cannot hold the file. The alternative was clamping
+/// to `u16::MAX`, which writes a header whose stride disagrees with the payload: the file opens,
+/// plays, and is wrong, which is worse than refusing.
+pub fn block_align(channels: u16, bits: u32) -> Result<u16> {
+    if bits == 0 || !bits.is_multiple_of(8) {
+        return Err(Error::msg(format!(
+            "cannot write {bits}-bit samples: a WAV frame has to be a whole number of bytes"
+        )));
+    }
+    let block = u64::from(channels) * u64::from(bits / 8);
+    u16::try_from(block).map_err(|_| {
+        Error::msg(format!(
+            "cannot write {channels} channels at {bits} bits in one WAV file: one frame is \
+             {block} bytes and the RIFF container carries that width in 16 bits (65535 at most)"
+        ))
+    })
+}
+
 /// Classic 44-byte header when the file is 1–2 channels and needs no mask,
 /// otherwise the extensible header.
-pub fn header(rate: u32, channels: u16, bits: u32, float: bool, mask: Option<u32>) -> Vec<u8> {
-    let block = (channels as u32).saturating_mul(bits / 8);
+///
+/// # Errors
+/// When [`block_align`] cannot represent the frame, or the sample width is not a whole number of
+/// bytes.
+pub fn header(
+    rate: u32,
+    channels: u16,
+    bits: u32,
+    float: bool,
+    mask: Option<u32>,
+) -> Result<Vec<u8>> {
+    let block = u32::from(block_align(channels, bits)?);
     let extensible = channels > 2 || mask.is_some_and(|m| m != guess_mask(channels));
     let mut h = Vec::with_capacity(68);
     let tag = if float {
@@ -90,7 +121,7 @@ pub fn header(rate: u32, channels: u16, bits: u32, float: bool, mask: Option<u32
     h.extend_from_slice(&channels.to_le_bytes());
     h.extend_from_slice(&rate.to_le_bytes());
     h.extend_from_slice(&(rate.saturating_mul(block)).to_le_bytes());
-    h.extend_from_slice(&(u16::try_from(block).unwrap_or(u16::MAX)).to_le_bytes());
+    h.extend_from_slice(&(block as u16).to_le_bytes());
     h.extend_from_slice(&(bits as u16).to_le_bytes());
     if extensible {
         // wValidBitsPerSample: the container and the payload have the same width
@@ -102,7 +133,7 @@ pub fn header(rate: u32, channels: u16, bits: u32, float: bool, mask: Option<u32
     }
     h.extend_from_slice(b"data");
     h.extend_from_slice(&0u32.to_le_bytes());
-    h
+    Ok(h)
 }
 
 /// The length of the header [`header`] would produce for these settings.
@@ -114,9 +145,8 @@ pub fn header(rate: u32, channels: u16, bits: u32, float: bool, mask: Option<u32
 /// It is measured from the builder itself — [`header`], run once with a placeholder rate — rather
 /// than from arithmetic that could drift away from it. That costs one allocation per output file,
 /// against a header that is written once per file.
-#[must_use]
-pub fn header_len(channels: u16, bits: u32, float: bool) -> usize {
-    header(8000, channels, bits, float, None).len()
+pub fn header_len(channels: u16, bits: u32, float: bool) -> Result<usize> {
+    Ok(header(8000, channels, bits, float, None)?.len())
 }
 
 /// The two sizes a WAV header carries, checked before either is written.
@@ -158,7 +188,7 @@ impl WavWriter {
         float: bool,
         mask: Option<u32>,
     ) -> Result<Self> {
-        let hdr = header(rate, channels, bits, float, mask);
+        let hdr = header(rate, channels, bits, float, mask)?;
         // Recorded rather than recomputed at the end: the header that exists and the
         // header guessed from the channel count are different lengths as soon as a custom
         // mask is involved, and the two size fields live at the end of whichever one was
@@ -582,11 +612,15 @@ mod tests {
             (8, 32, true, 68),
         ] {
             assert_eq!(
-                header_len(ch, bits, float),
-                header(48000, ch, bits, float, None).len(),
+                header_len(ch, bits, float).unwrap(),
+                header(48000, ch, bits, float, None).unwrap().len(),
                 "{ch}ch {bits}bit float={float}"
             );
-            assert_eq!(header_len(ch, bits, float), want, "{ch}ch {bits}bit");
+            assert_eq!(
+                header_len(ch, bits, float).unwrap(),
+                want,
+                "{ch}ch {bits}bit"
+            );
         }
     }
 
@@ -683,7 +717,7 @@ mod tests {
     #[test]
     fn f64_float_header_roundtrip() {
         let p = tmp("f64.wav");
-        let h = header(48000, 8, 64, true, Some(0x63f));
+        let h = header(48000, 8, 64, true, Some(0x63f)).unwrap();
         assert_eq!(h.len(), 68);
         assert_eq!(u16::from_le_bytes([h[20], h[21]]), WAVE_FORMAT_EXTENSIBLE);
         let mut f = std::fs::File::create(&p).unwrap();
@@ -699,9 +733,43 @@ mod tests {
     /// The mono/stereo path HyprEQ writes is the plain 44-byte header with
     /// `wFormatTag` 3 (float) or 1 (PCM) and `cbSize` absent — byte-for-byte what
     /// `hypreq.py` puts on disk.
+    /// One frame's width is carried in 16 bits. Clamping a value that does not fit wrote a header
+    /// whose stride disagreed with the payload — the file opened, played, and was wrong — so the
+    /// builder refuses it instead.
+    #[test]
+    fn a_frame_wider_than_sixteen_bits_is_refused_not_clamped() {
+        assert_eq!(block_align(2, 32).unwrap(), 8);
+        assert_eq!(block_align(8, 64).unwrap(), 64);
+        // 65535 bytes is the widest frame the container can describe; one byte more is not.
+        assert_eq!(block_align(65535, 8).unwrap(), 65535);
+        for (ch, bits) in [(16384u16, 32u32), (65535, 16), (8192, 64)] {
+            let e = block_align(ch, bits).err().unwrap_or_else(|| {
+                panic!(
+                    "{ch}ch at {bits} bits is {} bytes per frame and was accepted",
+                    u64::from(ch) * u64::from(bits / 8)
+                )
+            });
+            assert!(
+                e.to_string().contains("65535"),
+                "the refusal did not state the limit: {e}"
+            );
+            assert!(
+                header(48000, ch, bits, true, None).is_err(),
+                "the header builder accepted a frame it cannot write"
+            );
+        }
+        // A sample width that is not a whole byte would give a frame of 0 bytes: the same class of
+        // lie about the layout, refused by the same guard.
+        assert!(block_align(2, 0).is_err(), "a 0-bit frame is not a frame");
+        assert!(
+            block_align(2, 20).is_err(),
+            "a 20-bit frame is not whole bytes"
+        );
+    }
+
     #[test]
     fn hypreq_classic_header_matches_python_layout() {
-        let h = header(48000, 2, 32, true, None);
+        let h = header(48000, 2, 32, true, None).unwrap();
         assert_eq!(h.len(), 44);
         assert_eq!(&h[0..4], b"RIFF");
         assert_eq!(u32::from_le_bytes([h[4], h[5], h[6], h[7]]), 0);

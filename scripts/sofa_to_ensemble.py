@@ -35,7 +35,9 @@ def log_grid(f_min: float, f_max: float, bins_per_octave: int) -> np.ndarray:
     return grid
 
 
-def magnitude_db_from_ir(ir: np.ndarray, fs: float, n_fft: int) -> tuple[np.ndarray, np.ndarray]:
+def magnitude_db_from_ir(
+    ir: np.ndarray, fs: float, n_fft: int
+) -> tuple[np.ndarray, np.ndarray]:
     """Return (rfftfreq, 20log10|H|) for a real impulse response."""
     n = max(int(n_fft), 2 * len(ir))
     spec = np.fft.rfft(np.asarray(ir, dtype=np.float64), n=n)
@@ -67,7 +69,9 @@ def resample_normalised(
     return vals - ref
 
 
-def curves_from_sofa(path: Path, grid: np.ndarray, n_fft: int, ears: str, normalise_hz: float):
+def curves_from_sofa(
+    path: Path, grid: np.ndarray, n_fft: int, ears: str, normalise_hz: float
+):
     """Yield (label, curve_db) for each usable measurement × receiver in a SOFA file."""
     try:
         import sofar
@@ -94,11 +98,18 @@ def curves_from_sofa(path: Path, grid: np.ndarray, n_fft: int, ears: str, normal
         if real.ndim == 2:
             real, imag = real[np.newaxis, ...], imag[np.newaxis, ...]
         if real.ndim == 1:
-            real, imag = real[np.newaxis, np.newaxis, ...], imag[np.newaxis, np.newaxis, ...]
+            real, imag = (
+                real[np.newaxis, np.newaxis, ...],
+                imag[np.newaxis, np.newaxis, ...],
+            )
         n_m, n_r, _ = real.shape
-        get_spectrum = lambda m, r: magnitude_db_from_tf(real[m, r], imag[m, r], fs, n_fft)
+        get_spectrum = lambda m, r: magnitude_db_from_tf(
+            real[m, r], imag[m, r], fs, n_fft
+        )
     else:
-        raise ValueError(f"{path}: SOFA file has neither Data.IR nor Data.Real/Data.Imag")
+        raise ValueError(
+            f"{path}: SOFA file has neither Data.IR nor Data.Real/Data.Imag"
+        )
 
     if ears == "left":
         receivers = [0]
@@ -133,7 +144,9 @@ def self_test(grid: np.ndarray, n_fft: int, normalise_hz: float) -> int:
     assert np.allclose(f0, f1)
     assert np.allclose(m0, m1, atol=1e-9), "delay must not alter magnitude"
     flat = resample_normalised(f0, m0, grid, normalise_hz)
-    assert np.allclose(flat, 0.0, atol=1e-9), f"flat IR gave {flat.min():.3g}..{flat.max():.3g} dB"
+    assert np.allclose(flat, 0.0, atol=1e-9), (
+        f"flat IR gave {flat.min():.3g}..{flat.max():.3g} dB"
+    )
     assert np.all(np.diff(grid) > 0)
 
     # Exercise the SOFA extraction shape with an in-memory fake reader: no real SOFA file (or
@@ -149,7 +162,9 @@ def self_test(grid: np.ndarray, n_fft: int, normalise_hz: float) -> int:
     saved = sys.modules.get("sofar")
     sys.modules["sofar"] = fake
     try:
-        curves = list(curves_from_sofa(Path("fake.sofa"), grid, n_fft, "all", normalise_hz))
+        curves = list(
+            curves_from_sofa(Path("fake.sofa"), grid, n_fft, "all", normalise_hz)
+        )
     finally:
         if saved is None:
             sys.modules.pop("sofar", None)
@@ -157,7 +172,9 @@ def self_test(grid: np.ndarray, n_fft: int, normalise_hz: float) -> int:
             sys.modules["sofar"] = saved
     assert len(curves) == 4, f"expected 2 placements × 2 ears, got {len(curves)}"
     for _, curve in curves:
-        assert np.allclose(curve, 0.0, atol=1e-9), "fake flat SOFA must yield flat curves"
+        assert np.allclose(curve, 0.0, atol=1e-9), (
+            "fake flat SOFA must yield flat curves"
+        )
     print(
         f"self-test OK: {len(grid)} bins, {grid[0]:.1f}-{grid[-1]:.1f} Hz, "
         f"{len(curves)} flat curves from fake SOFA"
@@ -167,7 +184,12 @@ def self_test(grid: np.ndarray, n_fft: int, normalise_hz: float) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("sofa", nargs="*", type=Path, help="SOFA files (PHOnA uses one per headphone/placement set)")
+    ap.add_argument(
+        "sofa",
+        nargs="*",
+        type=Path,
+        help="SOFA files (PHOnA uses one per headphone/placement set)",
+    )
     ap.add_argument("--out-dir", type=Path, default=Path("ensemble"))
     ap.add_argument("--bins-per-octave", type=int, default=48)
     ap.add_argument("--f-min", type=float, default=20.0)
@@ -176,7 +198,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--normalise-hz", type=float, default=1000.0)
     ap.add_argument("--ear", choices=["all", "left", "right"], default="all")
     ap.add_argument("--prefix", default="hp")
-    ap.add_argument("--self-test", action="store_true", help="verify the conversion math without SOFA input")
+    ap.add_argument(
+        "--self-test",
+        action="store_true",
+        help="verify the conversion math without SOFA input",
+    )
     args = ap.parse_args(argv)
 
     if args.bins_per_octave < 1 or args.f_min <= 0 or args.f_max <= args.f_min:
@@ -190,7 +216,9 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     written = 0
     for path in args.sofa:
-        for label, curve in curves_from_sofa(path, grid, args.n_fft, args.ear, args.normalise_hz):
+        for label, curve in curves_from_sofa(
+            path, grid, args.n_fft, args.ear, args.normalise_hz
+        ):
             out = args.out_dir / f"{args.prefix}_{label}.csv"
             write_csv(out, grid, curve)
             written += 1

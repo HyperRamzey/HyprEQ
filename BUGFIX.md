@@ -1,5 +1,11 @@
 # Bugfix audit log
 
+> **Provenance note.** This log cites `hypreq.py` and `scripts/parity.py` by line number. Both were
+> removed from the tree later (the reference program and the harness that diffed it against the Rust
+> crate), so those citations are historical records of what was compared at the time, not pointers to
+> files in this repository. The byte comparisons they provided now live in `tests/cli_report.rs` and
+> the unit tests beside the code.
+
 Working checklist for the defect report received against HEAD `81628b0`. Every line was checked
 against the **working tree**, not against the report text, because a large part of the report was
 written against an older tree. Statuses:
@@ -321,3 +327,157 @@ so the report figure and the taper cannot drift apart; `apodize_flag`'s doc, whi
 Decided rather than deleted, with the reason in the code: `Pchip::len`/`is_empty` (the only way to
 observe knot de-duplication from outside), `Meters::frames`/`reset` and `riff::read_info` (reached by
 tests and by the docs). Deleted: `Meters::param`, which had no caller, test or doc reference at all.
+
+---
+
+# COMPLETION AUDIT — 2026-11-19 (contract: every numbered item re-verified against the working tree)
+
+Convention used here, per AGENTS.md measure-the-claim: **ran** = the named test executed green in
+today's `cargo test --all-targets` gate (0 failed, counts below); **sab** = a temporary sabotage of
+the feature made the named test fail today, and the file was restored with the recorded md5;
+**measured** = a number produced by a command in this session, quoted as produced. Items whose fix
+landed earlier in this task re-verify through **ran** (the pinning tests are the contract's cover);
+sabotage re-runs are listed where they were done in this session.
+
+## Section 1 — stereo/IR/regularization
+
+- **1.1 shared per-ear preamp.** Ran: `ir::tests::stereo_synthesis_preserves_interaural_level_difference`,
+  `tests::stereo_split_caps_each_ear_once_so_identical_ears_reproduce_the_shared_filter`,
+  `tests::the_ears_report_counts_a_shared_ceiling_knot_once_not_twice`,
+  `tests::a_knot_the_ceiling_clipped_on_both_ears_moves_the_centre_once`,
+  `tests::the_regularization_knee_is_sized_from_the_ear_mean_not_from_one_ear`.
+  Measured (temp-dir `--stereo split` smoke): both ears print **Preamp −2.30 dB** (one shared
+  normalization) while `||h||_1` keeps −3.10 dB left / −1.50 dB right — the captured +1.60 dB ear
+  difference is cancelled by trim, not re-cancelled by the preamp (the old bug made the preamp
+  difference equal and opposite to the trim).
+- **1.2 interaural delay/length skew.** Ran: `phase::tests::stereo_phase_alignment_shares_identical_latency_and_taps`.
+  Measured: split smoke — both EQ FIRs 65,536 taps @ 48,000 Hz (equal length and alignment).
+- **1.3 gauss_apodize at high rate.** Ran: `ir::tests::gauss_apodizer_pulls_only_above_20200_hz`
+  (the apodizer is frequency-anchored, so ≥96 kHz rates get no stopband hole; the −360 dB brickwall
+  ringing precondition is gone by construction).
+- **1.4 realtime IR hardcoded at 32768/16384.** Fixed at `src/main.rs:1235-1238`
+  (`rt_taps = 16384·fs/48000` next-pow-two, floor kept as the 48 kHz constant).
+  New test **today**: `realtime_filter_scales_with_the_sample_rate_it_is_written_for`.
+  Sab: reinstating `rt_taps = 16384; n_fft_rt = 32768` made the 96 kHz run report
+  `32,768 FFT … -> 16,384 taps (170.7 ms)` and the test fail; restore byte-identical
+  (md5 `6db7d77bd87ea3a08bc096051cf6ed9c`), test green.
+- **1.5 regularization & derivation fidelity.** Ran: `tests::regularize_accepts_the_three_forms_and_rejects_the_rest`,
+  `tests::regularize_acts_on_the_target_derived_curve_and_reports_that_curve`,
+  `tests::regularize_off_hands_back_the_models_own_curve`, `tests::the_notch_cap_still_binds_on_a_regularized_curve`,
+  `fit::tests::infinite_load_bypasses_and_zero_load_is_todays_curve`, `fit::tests::the_smoother_is_the_log_domain_integral_of_the_window`,
+  `fit::tests::the_shrink_lands_between_the_curve_and_bypass_and_never_past_either`,
+  `model::tests::a_fully_bypassed_derivation_is_a_flat_wire_below_65_hz_too`,
+  `model::tests::subbass_discount_is_gaussian_in_log2_and_zero_at_65hz`.
+  Measured: `--regularize 1000` + 3× `--ensemble-csv` + `--target-preset targets/harman_kb5000_7.json`
+  ran end-to-end (rc 0) in a temp dir today.
+
+## Section 2 — CLI/database/robustness
+
+- **2.1 `--verify-with` unreachable under `--measure-only` (audio mode).** Fix lives at
+  `src/main.rs:1725-1747` (verify runs; only the per-band table is suppressed via
+  `(!args.measure_only).then(...)`). Pin **added today** (the item previously had no test at all):
+  `measure_only_still_verifies_and_still_writes_nothing` — asserts `Verdict : PASS` in measure-only
+  and that the scratch dir holds exactly the three fixture files afterwards.
+  Sab A (always `Some(Path::new(""))`): failed the "wrote files" assertion.
+  Sab B (early `return Ok(())` when measure-only): failed the "without judging the capture" assertion.
+  Restore note: the first sed-based restore also rewrote an unrelated `Some(Path::new(""))` at
+  `src/main.rs:1388` (model-mode verification always writes its table); the md5 comparison caught
+  it, the line was restored, and `git diff` now shows no `Path::new` hunk at all.
+- **2.2 stereo-split shared-filter overhead/duplicate report.** Ran:
+  `report_leaves_the_audio_alone_and_split_changes_it`,
+  `tests::stereo_split_caps_each_ear_once_so_identical_ears_reproduce_the_shared_filter`,
+  `the_ears_block_sits_under_the_model_it_describes`.
+- **2.3 `sort_and_dedup_points` junk rows.** Ran:
+  `model::tests::sort_and_dedup_rejects_single_column_and_non_finite_gains`,
+  `model::tests::sort_and_dedup_keeps_the_last_write_per_frequency`.
+- **2.4 `Ears::from_raw_pts` ragged panic.** Ran: `stereo::tests::from_raw_pts_reads_the_figures_own_column_convention`,
+  which asserts a ragged row set returns `None` (`src/stereo.rs:704-705`) instead of indexing off the end.
+- **2.5 `assess()` bogus line on zero-sample channels.** Ran:
+  `assess::tests::degenerate_input_produces_numbers_not_panics`,
+  `assess::tests::without_audio_the_curve_is_still_described`,
+  `measure::tests::empty_buffer_measures_as_no_signal`.
+- **2.6 Panel 3 unwrap / Panel 4 peak-delay figures.** Ran:
+  `phase::tests::the_unwrapper_removes_wraps_a_fit_cannot_tolerate`,
+  `plot::tests::plot_with_added_latency_centers_impulse_and_labels_peak_delay`,
+  `plot::tests::linear_phase_ir_peaks_at_zero_ms_inside_the_window`.
+
+## Section 3 — performance work, verified by the equivalences it must not break
+
+All ran today; these are the invariant pairs that make an optimization observable rather than plausible:
+
+- **3.1 phase linearize:** `phase::tests::the_bass_group_delay_actually_flattens`,
+  `the_magnitude_survives_within_rounding`, `a_padded_grid_is_what_makes_the_magnitude_claim_true`,
+  `the_taper_weight_is_continuous_and_ends_where_it_says`.
+- **3.2 convolve/fft:** `convolve::tests::block_and_fft_plan_matches_the_python_formula`,
+  `matches_numpy_artifacts`, `matches_naive_linear_convolution`, `block_boundaries_are_invisible`;
+  `fft::tests::forward_matches_the_definition`, `rfft_matches_a_half_spectrum_dft_and_round_trips`.
+- **3.3 tp/limiter loops:** `tp::tests::detector_is_chunk_size_invariant`,
+  `streaming_matches_the_naive_cascade`, `interleaved_and_planar_agree`;
+  `limiter::tests::limiter_is_chunk_size_invariant`, `limiter_is_deterministic`,
+  `the_ceiling_holds_across_ratios_lookahead_and_depth`.
+- **3.4 measure:** `measure::tests::itu_x4_and_x16_agree_on_band_limited_content`,
+  `probe_is_deterministic_and_zero_dbtp_at_x16`, `full_scale_sine_reads_zero_dbfs_and_a_positive_crest`.
+- **3.5 verify pchip reuse:** the `verify::tests::*` block, incl.
+  `a_capture_that_reproduces_the_prediction_passes_every_band`,
+  `a_known_residual_is_named_by_band_and_by_number`, `fine_ripple_is_resolved_rather_than_averaged_into_smoothness`.
+- **3.6 pchip:** `pchip::tests::searchsorted_matches_the_right_side_convention`,
+  `reproduces_python_on_a_known_curve`, `monotone_between_knots_of_one_sign`.
+- **3.7 assess bins:** `assess::tests::the_grid_is_iec_61260_base_10`,
+  `a_tone_lands_in_its_own_band_at_its_own_level`, `a_record_that_is_not_a_power_of_two_reads_the_same_level`.
+- **3.8 wav/riff streaming:** `riff::tests::patched_sizes_are_right`,
+  `the_measured_header_is_the_header_written`, `a_frame_wider_than_sixteen_bits_is_refused_not_clamped`
+  — **sab ×2 today**: clamping `block.min(65535)` failed the refusal loop at `src/riff.rs:748`;
+  deleting the whole-byte-width guard failed at `src/riff.rs:763`; restore byte-identical
+  (md5 `f808bbc0404e954f7aa2682204d2d017`); `wav::tests::round_trip_through_every_depth`.
+- **3.9 other hotspots:** `accum::tests::order_does_not_move_it`,
+  `accum::tests::recovers_what_a_left_to_right_walk_drops`, `meter::tests::decay_matches_the_vst_formula`,
+  `driver::tests::distortion_envelope_caps_boost_only_at_high_spl`.
+
+## Section 4 — test debt and dead code
+
+- **4.1 discriminating `best_window` test.** Ran:
+  `phase::tests::best_window_finds_the_dense_stretch_and_discriminates_against_zero`.
+- **4.2 `assert_eq!(a.len(), b.len())` in cli_report.** Measured: `rg 'assert_eq!\(a\.len\(\), b\.len\(\)\)' tests/cli_report.rs`
+  → no match (exit 1) today; the 32 integration tests pass with per-run comparisons.
+- **4.3 dead-code sweep.** Measured sweep today (`rg` over `src/`): `DEFAULT_CROSSOVER_HZ`,
+  `budget_ms`, `Limiter::rate`/`Detector::ratio`/`TruePeak::ratio`, `Ears::avg`,
+  `sample_peak_lin`, `true_peak_lin`, `meter_peak_hold_lin`, phase.rs `fit_f`/`fit_p` — **gone**.
+  Names that survive are alive, with call sites: `regularized_gain_db`/`regularized_curve`
+  (`src/fit.rs:555`, used by the 1.5 path), `min_lookahead_samples` (`src/tp.rs:840`,
+  `src/limiter.rs:342`), `Database::resolve` (called from `main.rs`; pinned by
+  `tests::aliases_never_shadow_a_loaded_model`). `grab-sources.sh`: shellcheck exit 0.
+  `cargo clippy --all-targets`: zero warnings today.
+
+## Fixture-guard work this session (beyond the numbered list, contract item "correct curves per supported pair")
+
+- KB5000_7 recipe (`targets/harman_kb5000_7.json`, `fixture: gras_kb5000`, params 0.0) + importer
+  (`scripts/import_kb5000_7.py`, ruff-clean; run today: 1015 points, 13.02–19688.4 Hz,
+  +0.163 dB @ 998 Hz) + per-fixture status table in `targets/README.md`; the curve itself is never
+  in the repo (`/targets/*.csv` gitignored; `git status` shows only README + recipe).
+- Guard-pairing smokes: `[GRAS KB5000]` model × KB5000_7 preset → runs and prints the preset line;
+  `[GRAS 43AG]` model × same preset → refused rc 2; `--force` → runs; `fixture_conflict_ok` → still
+  refused for a *preset* conflict by design (`src/main.rs:798-802`), and that refusal no longer
+  recommends the dead-end route. Tests:
+  `a_preset_fixture_conflict_is_refused_without_a_dead_end_suggestion`,
+  `a_recorded_conflict_ok_unlocks_the_shipped_pairing_only` — **sab**: `if false` at each branch
+  made the corresponding test fail; restore byte-identical (`6db7d77b…` then).
+- `--rig-calibration` smokes: unverified-pairing run continues with the `[Note]` line; mismatched
+  target refused rc 2; `--force` overrides with the note printed.
+
+## Out-of-contract sections of the audit (1.6–1.8, 2.7–2.8, 5.x)
+
+Not re-sabotaged this session. Their pinning tests all ran green in today's gate (counts below);
+5.2/5.3 additionally gained primary-source wording this session (Olive & Clark Express Paper 394,
+GRAS KB5000 product page) recorded in `targets/README.md` and the recipe's `source`/`note`.
+
+## Gate evidence (today, 2026-11-19)
+
+`cargo fmt --all --check` exit 0 · `cargo clippy --all-targets` 0 warning lines ·
+`RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --no-deps` exit 0 ·
+`cargo test --all-targets`: **lib 340 passed / 0 failed / 2 ignored, bin 41 / 0, cli_report 32 / 0**
+(415 pinned tests, 413 executed, 0 failed) · `ruff check`+`ruff format --check` clean over all
+`scripts/*.py`, with `derive_rig_calibration.py --self-test` (mean 3.25 dB, sigma 0.35 dB, 479 bins)
+and `sofa_to_ensemble.py --self-test` (479 bins, 20–20000 Hz, 4 flat curves) both exit 0 ·
+`shellcheck scripts/*.sh` exit 0 · end-to-end smokes: KB5000_7 guard 4-case table and the
+five-flag matrix (regularize+ensemble+preset, global-fit, stereo split + notch safe, synth
+parallel-iir @ 44.1 kHz, rig-calibration refuse/force/unverified) all behaved as reported above.

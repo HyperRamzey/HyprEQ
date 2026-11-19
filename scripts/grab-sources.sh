@@ -89,7 +89,6 @@ order_groups=(
     "scripts/"
     "docs/"
     "targets/"
-    "hypreq.py"
     "measurements.json"
     "README.md"
     "AGENTS.md"

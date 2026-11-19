@@ -327,12 +327,15 @@ fn riff_guard(name: &str, data_size: usize, hdr_len: usize) -> Result<()> {
 }
 
 /// The header the writer will emit for these settings, without pretending to know its
-/// length: asked of the builder that makes it.
-#[must_use]
-fn header_len_for(channels: usize, bits: u32, float: bool) -> usize {
-    // A channel count too wide for the format is refused by `writer()` a moment later;
-    // clamping here only keeps the guard on the strict (extensible) side while it decides.
-    crate::riff::header_len(u16::try_from(channels).unwrap_or(u16::MAX), bits, float)
+/// length: asked of the builder that makes it, so the two size fields and the header actually
+/// written cannot drift apart.
+fn header_len_for(channels: usize, bits: u32, float: bool) -> Result<usize> {
+    // Refused rather than clamped. Clamping a count the container cannot carry kept the guard on
+    // the strict (extensible) side only while it decided, and the header that came out described a
+    // frame stride the payload does not have.
+    let channels = u16::try_from(channels)
+        .map_err(|_| Error::msg(format!("cannot write {channels} channels in one WAV file")))?;
+    crate::riff::header_len(channels, bits, float)
 }
 
 /// Open the writer for a mono/stereo file: [`WavWriter`] emits the plain
@@ -365,7 +368,7 @@ pub fn write_wav_ieee_float(path: &Path, planar: &[Vec<f64>], fs: u32, bits: u32
         .checked_mul(channels)
         .and_then(|fc| fc.checked_mul(bps))
         .ok_or_else(|| Error::msg(format!("WAV output '{name}' exceeds addressable size")))?;
-    riff_guard(&name, data_size, header_len_for(channels, bits, true))?;
+    riff_guard(&name, data_size, header_len_for(channels, bits, true)?)?;
 
     let mut w = writer(path, fs, channels, bits, true)?;
     // Written in frame-major blocks so the interleave is explicit and the
@@ -423,7 +426,7 @@ pub fn write_wav_pcm_or_float(
         .checked_mul(channels)
         .and_then(|fc| fc.checked_mul(bps))
         .ok_or_else(|| Error::msg(format!("WAV output '{name}' exceeds addressable size")))?;
-    riff_guard(&name, data_size, header_len_for(channels, bits, false))?;
+    riff_guard(&name, data_size, header_len_for(channels, bits, false)?)?;
 
     let (scale, vmin, vmax) = if bits == 16 {
         (32768.0f64, -32768.0f64, 32767.0f64)

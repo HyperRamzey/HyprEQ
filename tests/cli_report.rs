@@ -96,6 +96,72 @@ fn run_keep(tag: &str, args: &[&str]) -> (PathBuf, Option<i32>, String, String) 
     )
 }
 
+/// Run in a temporary directory that already contains `files` (name, contents), so a test can hand
+/// the binary a data file of its own, and do not insist on success.
+fn run_files(
+    tag: &str,
+    files: &[(&str, &str)],
+    args: &[&str],
+) -> (PathBuf, Option<i32>, String, String) {
+    let dir: PathBuf = std::env::temp_dir().join(format!(
+        "hypreq-cli-{}-{}",
+        std::process::id(),
+        tag.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temporary directory");
+    for (name, contents) in files {
+        std::fs::write(dir.join(name), contents).expect("fixture file");
+    }
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("measurements.json");
+    let out = Command::new(env!("CARGO_BIN_EXE_hypreq"))
+        .current_dir(&dir)
+        .arg("--data-file")
+        .arg(&data)
+        .args(args)
+        .output()
+        .expect("the binary runs");
+    let dir2 = dir.clone();
+    let code = out.status.code();
+    let stdout = String::from_utf8(out.stdout).expect("stdout is utf-8");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = dir2;
+    (dir, code, stdout, stderr)
+}
+
+/// A target CSV is hand-edited, so it arrives in whatever order the author's spreadsheet had. The
+/// interpolator used to read the first and last rows as the two ends of the frequency axis, which
+/// reached `f64::clamp` as "min > max" and aborted the run; and a file whose rows all share one
+/// frequency holds a single knot, which is not a curve and has to be refused in words.
+#[test]
+fn a_target_csv_is_read_in_its_own_order_and_a_single_knot_is_refused() {
+    let unsorted = "freq_hz,gain_db\n1000.0,0.0\n100.0,-2.0\n1000.0,1.0\n10000.0,-3.0\n20.0,4.0\n";
+    let (dir, code, stdout, stderr) = run_files(
+        "target-csv-unsorted",
+        &[("unsorted.csv", unsorted)],
+        &["-H", "dt770_80", "--target-csv", "unsorted.csv"],
+    );
+    assert_eq!(code, Some(0), "exit {code:?}, stderr: {stderr}");
+    assert!(
+        stdout.contains("replaced by --target-csv"),
+        "the report never said which baseline it used: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let one_knot = "freq_hz,gain_db\n1000.0,0.0\n1000.0,2.0\n";
+    let (dir, code, _, stderr) = run_files(
+        "target-csv-one-knot",
+        &[("dup.csv", one_knot)],
+        &["-H", "dt770_80", "--target-csv", "dup.csv"],
+    );
+    assert_eq!(code, Some(1), "exit {code:?}, stderr: {stderr}");
+    assert!(
+        stderr.contains("fewer than two usable points"),
+        "the refusal did not say why: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn read_bytes(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
@@ -316,15 +382,18 @@ fn report_leaves_the_audio_alone_and_split_changes_it() {
         !out_split.contains("EQ FIR (dt770_80ohm)"),
         "split printed a shared filter it did not apply:\n{out_split}"
     );
-    // Pinned from the shipped capture: the trim pushes six left knots and nine right knots back
-    // over the model's own notch ceiling, and the ceiling is the last word, so the report has to
-    // say the centre moved rather than recite the design's promise.
+    // Re-pinned from the shipped capture after the ceiling stopped being applied twice. It used to
+    // say "6 left / 9 right" and "moved in 15 knot(s)": the per-ear trim ran off an already-capped
+    // shared curve, so fewer left knots reached the ceiling, and the centre's count was the two
+    // sides' holds added together. Trimmed from the pre-cap curve and capped once per ear, eight
+    // left knots and nine right knots are held, eight of them at knots the right ear is held too —
+    // so the middle of the image moved in nine knots, not seventeen.
     assert!(
-        out_split.contains("Centre            : moved in 15 knot(s)"),
+        out_split.contains("Centre            : moved in 9 knot(s)"),
         "split did not account for the ceiling biting:\n{out_split}"
     );
     assert!(
-        out_split.contains("Notch cap         : held 6 left / 9 right knot(s)"),
+        out_split.contains("Notch cap         : held 8 left / 9 right knot(s)"),
         "the ceiling's accounting is missing:\n{out_split}"
     );
 
@@ -745,6 +814,102 @@ fn a_capture_that_cannot_be_read_fails_before_any_convolver_is_written() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `--measure-only` once skipped the whole tail of the run, which swallowed a `--verify-with`
+/// request: neither honoured nor refused, it vanished behind a zero exit code. Verification now
+/// runs in that mode too — the finding is about the measurement, not about the output — and the
+/// mode still writes nothing at all.
+#[test]
+fn measure_only_still_verifies_and_still_writes_nothing() {
+    let dir = scratch("measure-verify");
+    zero_model(&dir);
+    std::fs::write(dir.join("in.wav"), stereo_bytes("measure-verify")).expect("fixture");
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &[
+            "-H",
+            "zero",
+            "--no-plot",
+            "--models-dir",
+            "models",
+            "--input",
+            "in.wav",
+            "--measure-only",
+            "--verify-with",
+            "post_exact.csv",
+        ],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "--verify-with was swallowed by --measure-only again:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("Verdict         : PASS"),
+        "the run ended without judging the capture it was handed:\n{stdout}"
+    );
+    let mut files: Vec<String> = std::fs::read_dir(&dir)
+        .expect("scratch readable")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(
+        files,
+        vec![
+            "in.wav".to_string(),
+            "post_bump.csv".to_string(),
+            "post_exact.csv".to_string()
+        ],
+        "--measure-only wrote files beyond the fixtures it was handed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The real-time convolver used to load a hardcoded 32,768-FFT / 16,384-tap filter whatever the
+/// rate: at 96 kHz that is a 171 ms filter instead of the 341 ms the offline design reaches, and
+/// the cepstral oversampling shrinks with it. Taps and FFT now scale with the rate; the old
+/// constants survive only as the 48 kHz floor. The `beta=16.0` line is the real-time block; the
+/// offline block above it prints the same field name without the taper.
+#[test]
+fn realtime_filter_scales_with_the_sample_rate_it_is_written_for() {
+    let dir = scratch("rt-rate");
+    zero_model(&dir);
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &[
+            "-H",
+            "zero",
+            "--no-plot",
+            "--models-dir",
+            "models",
+            "--fs",
+            "96000",
+        ],
+    );
+    assert_eq!(code, Some(0), "a 96 kHz model run failed: {stderr}");
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("FFT / Taps") && l.contains("beta=16.0"))
+        .expect("the real-time block reports its FFT and taps");
+    assert!(
+        line.contains("65,536 FFT") && line.contains("32,768 taps"),
+        "96 kHz must double the real-time filter (341 ms kept): {line}"
+    );
+    let (code, stdout, stderr) =
+        run_in(&dir, &["-H", "zero", "--no-plot", "--models-dir", "models"]);
+    assert_eq!(code, Some(0), "the default-rate run failed: {stderr}");
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("FFT / Taps") && l.contains("beta=16.0"))
+        .expect("the real-time block reports its FFT and taps");
+    assert!(
+        line.contains("32,768 FFT") && line.contains("16,384 taps"),
+        "48 kHz keeps the published floor constants: {line}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn verification_reports_nothing_when_it_was_not_asked_for() {
     let stdout = run("verify-absent", &["-H", "dt770_80", "--no-plot"]);
@@ -943,6 +1108,95 @@ fn a_target_defined_on_another_fixture_is_refused_naming_both() {
         .filter(|e| e.file_name() != "fixtures.json")
         .count();
     assert_eq!(written, 0, "the refusal wrote files before refusing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `--target-preset` conflict must not be refused with advice to reach for
+/// `fixture_conflict_ok`: that record is honoured only for the model's *shipped* target, so
+/// recommending it here would point at a route this very guard has just declined to walk.
+#[test]
+fn a_preset_fixture_conflict_is_refused_without_a_dead_end_suggestion() {
+    let dir = scratch("preset-conflict");
+    let db = write_fixture_db(
+        &dir,
+        "preset.json",
+        &[(
+            "conflict45",
+            "45CA Set [GRAS 45CA]",
+            "gras_45ca",
+            "unrecorded_target",
+        )],
+    );
+    std::fs::write(dir.join("base.csv"), "20,0.0\n1000,0.0\n20000,0.0\n").expect("baseline");
+    std::fs::write(
+        dir.join("recipe.json"),
+        r#"{"name":"preset_on_5128","fixture":"bk5128","family":"diffuse","baseline_csv":"base.csv","params":{"bass":0.0,"mid":0.0,"tilt":0.0},"source":"test recipe"}"#,
+    )
+    .expect("recipe");
+    let (code, _, stderr) = run_db(
+        &dir,
+        &db,
+        &[
+            "-H",
+            "conflict45",
+            "--target-preset",
+            "recipe.json",
+            "--no-plot",
+        ],
+    );
+    assert_eq!(
+        code,
+        Some(2),
+        "a 45CA capture EQ'd to a preset declared on the 5128 ran:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("GRAS 45CA") && stderr.contains("B&K 5128"),
+        "the refusal did not name both rigs: {stderr}"
+    );
+    assert!(
+        stderr.contains("--force"),
+        "the refusal did not offer the one override that works here: {stderr}"
+    );
+    assert!(
+        !stderr.contains("record the pairing on the model with 'fixture_conflict_ok'"),
+        "the refusal recommended the shipped-target exemption for a preset conflict it does not unlock: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `fixture_conflict_ok` unlocks the shipped pairing and nothing else: with the record the same
+/// conflicting pairing runs, without it the identical pairing is still refused. Deleting the
+/// exemption from `fixture_guard` turns the first run red; widening it past
+/// `recipe_fixture.is_none()` would contradict the test above.
+#[test]
+fn a_recorded_conflict_ok_unlocks_the_shipped_pairing_only() {
+    let dir = scratch("conflict-ok");
+    let raw: Vec<String> = (0..500)
+        .map(|i| format!("[{:.1},0.0]", 20.0 + 20.0 * i as f64))
+        .collect();
+    let raw = raw.join(",");
+    let ctrl = "[[20.0,0.0],[1000.0,0.0],[20000.0,0.0]]";
+    std::fs::write(
+        dir.join("recorded.json"),
+        format!(
+            r#"{{
+  "targets": {{ "on5128": [[20.0,0.0],[1000.0,0.0],[20000.0,0.0]] }},
+  "target_fixtures": {{ "on5128": "bk5128" }},
+  "models": {{
+    "recorded": {{"name":"Recorded Set [GRAS 45CA]","fixture":"gras_45ca","target":"on5128",
+      "fixture_conflict_ok":"Inherited from a database that measured this unit against a 5128 target.","raw_pts":[{raw}],"ctrl_pts":{ctrl}}},
+    "silent": {{"name":"Silent Set [GRAS 45CA]","fixture":"gras_45ca","target":"on5128",
+      "raw_pts":[{raw}],"ctrl_pts":{ctrl}}}
+  }}
+}}"#
+        ),
+    )
+    .expect("database");
+    let db = dir.join("recorded.json");
+    let (code, _, stderr) = run_db(&dir, &db, &["-H", "recorded", "--no-plot"]);
+    assert_eq!(code, Some(0), "a recorded conflict was refused: {stderr}");
+    let (code, _, stderr) = run_db(&dir, &db, &["-H", "silent", "--no-plot"]);
+    assert_eq!(code, Some(2), "an unrecorded conflict ran anyway: {stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -1,19 +1,24 @@
 # Setting up HyprEQ
 
-HyprEQ ships as one Rust crate (`hypreq`, a library plus a binary) and one Python
-script (`hypreq.py`). The Rust crate is the implementation; `hypreq.py` is kept only as
-the **parity oracle** the harness diffs the Rust output against, and it is expected to
-drift behind the Rust side as features are added.
+HyprEQ ships as one Rust crate (`hypreq`, a library plus a binary), plus two optional
+data-preparation helpers under `scripts/`. The crate is the implementation, and it is the
+thing you build.
 
 ```text
 Cargo.toml            crate manifest (numerical policy lives in its comments)
 src/                  the implementation
-hypreq.py             parity oracle — not the thing you build
 measurements.json     target curves + headphone definitions, in file order
 models/               optional drop-in .json / .csv models (scanned at startup)
-scripts/parity.py     Rust-vs-oracle comparison harness
+scripts/sofa_to_ensemble.py        SOFA capture set -> ensemble CSVs (needs `sofar`)
+scripts/derive_rig_calibration.py  paired curves -> rig calibration JSON
 docs/                 this file
 ```
+
+Behaviour used to be pinned by diffing this crate against a reference implementation of the same
+pipeline. Both that script and the harness that diffed them have been removed, so the tests in
+this repository are the contract: `src/` holds the unit tests and `tests/cli_report.rs` runs the
+real binary and byte-compares its report, its WAV containers and payloads, its audit CSVs and its
+usage errors. A change that alters any of those has to say so in the test it updates.
 
 ## 1. Prerequisites
 
@@ -22,8 +27,8 @@ docs/                 this file
 | Rust ≥ 1.87 (`rustc`, `cargo`) | everything | `rust-version` in `Cargo.toml` is 1.87, edition 2021 |
 | `pkg-config`, `fontconfig`, `freetype` (C dev files) | the verification PNG | the `ttf` feature of `plotters` goes through `font-kit`, which links against the system fontconfig/freetype and resolves `"sans-serif"` **at runtime** |
 | a usable `sans-serif` font | the verification PNG | any family fontconfig can resolve; DejaVu is enough |
-| Python ≥ 3.10, `numpy`, `soundfile` | `scripts/parity.py` | `soundfile` wrapslibsndfile for payload decoding |
-| Python `matplotlib` | the oracle's PNG only | the Rust figure does not use it |
+| Python ≥ 3.10, `numpy`, `soundfile` | `scripts/derive_rig_calibration.py` | `soundfile` wraps libsndfile for payload decoding |
+| Python `sofar` | `scripts/sofa_to_ensemble.py` | reads SOFA capture sets; only that helper needs it |
 
 The font dependencies are not optional if you want the figure: with the `ttf` feature
 enabled a machine with no fontconfig configured fails to *link*, and a machine with
@@ -97,7 +102,6 @@ cargo build
 cargo build --release
 cargo test                      # unit + integration, default parallelism
 cargo clippy --all-targets      # zero warnings, including tests
-python3 scripts/parity.py       # all scenarios
 
 # documentation links must resolve — this is what catches a doc that still names a
 # function the code no longer has
@@ -113,19 +117,10 @@ sweeps that take minutes:
 cargo test -- --include-ignored
 ```
 
-### The parity harness
+### What the tests compare
 
-```bash
-python3 scripts/parity.py                 # everything
-python3 scripts/parity.py --only audio    # scenarios whose name contains "audio"
-python3 scripts/parity.py --keep          # leave the scratch tree behind
-python3 scripts/parity.py --selftest      # check the harness's own normalisers, no binaries
-python3 scripts/parity.py --rust ./target/release/hypreq --python python3 --ref hypreq.py
-```
-
-Each of the 28 scenarios runs `hypreq.py` and the Rust binary in **separate scratch
-directories** seeded with the same `measurements.json` and the same input WAV, then
-compares:
+`tests/cli_report.rs` runs the built binary in a **scratch directory** seeded with
+`measurements.json` and, where a scenario needs audio, an input WAV, then compares:
 
 * **stdout** byte-for-byte after normalising the absolute paths both tools print;
 * **WAV containers** exactly (chunk order, format tag, channels, rate, bits, byte size);
@@ -140,22 +135,21 @@ compares:
   fails. matplotlib and `plotters` are different renderers, so pixels are never compared;
   exact geometry is covered by unit tests that decode the PNG the same way.
 
-One deliberate divergence, because the honest version of "the figures match" is "the default
-figures match": with `--stereo` set to anything but `off`, the Rust figure draws a fifth trace the
-reference has no word for — `left − right` on panel 2, in the ears' own blue, with the worst
-disagreement quoted in its legend entry. It is opt-in for exactly that reason, and
+The ear trace is opt-in for a reason: with `--stereo` set to anything but `off`, the figure draws a
+fifth trace — `left − right` on panel 2, in the ears' own blue, with the worst disagreement quoted
+in its legend entry — and a default run must not acquire it. And
 `the_ear_trace_draws_ink_in_the_error_panel` holds both halves: the trace's pixels present when the
 flag asks, and none of that colour anywhere in panel 2 when it does not.
 
-The harness exits non-zero if any comparison fails, so it is usable as a CI gate.
+`cargo test` exits non-zero if any comparison fails, so it is usable as a CI gate.
 
-#### One usage-error message is spelled differently by different CPythons
+#### Why one usage-error spelling is printed, whatever the interpreter
 
-`usage wording` is compared word for word, with two exceptions the harness owns: the
-`hypreq.py:` / `error:` prefix, and the quoting of argparse's `invalid choice:` message. That
-exception is not laziness — argparse has changed the spelling of this message twice and reverted
-one of its own changes, and it did so at **patch** granularity, so there is no version range that
-is "the" wording:
+The binary prints argparse's wording and exit code 2, and the wording is pinned by
+`the_ear_flags_refuse_what_they_cannot_do` and `an_out_bits_choice_refuses_a_number_off_the_list`.
+It is the *current* CPython spelling, and the reason it is fixed rather than matched per
+interpreter is that argparse changed the quoting of this message twice and reverted one of its own
+changes, at **patch** granularity — so there is no version range that is "the" wording:
 
 | interpreter | bad `--notch-mode` (string choices) | bad `--out-bits` (int choices) |
 | --- | --- | --- |
@@ -165,27 +159,8 @@ is "the" wording:
 
 The middle row is `str(value)` + `map(str, choices)` rendered through `%(value)r`, which is why
 the *value* stays quoted while the list loses its quotes; the last row is `repr(str(x))` in both
-slots. The Rust binary prints one fixed string (the last row, matching what people actually run
-now), so a strict comparison would make parity red on the interpreters in rows one and two while
-the CLI is telling the user something entirely correct. `canonicalize_choice` therefore strips
-quotes from inside that message and nothing else; the flag name, the phrase, the value, the set
-of choices and the exit code are all still compared.
-
-`--selftest` asserts both halves — that the three spellings collapse, and that the normaliser
-does not swallow content (a different flag, a different value, a shortened choice list, and every
-non-choice message must survive byte for byte). It runs without a binary, numpy, or the reference.
-
-To reproduce the table, or to check a new interpreter:
-
-```bash
-uv python install 3.11 3.12.7 3.13.0            # or any patch level you care about
-uv venv /tmp/v311 --python 3.11 && uv pip install -p /tmp/v311/bin/python numpy soundfile
-python3 scripts/parity.py --python /tmp/v311/bin/python --only usage   # 33/33
-/tmp/v311/bin/python hypreq.py --out-bits 20 | grep 'invalid choice'   # the raw spelling
-```
-
-`numpy` and `soundfile` are needed because the reference imports them before it parses the
-command line; `matplotlib` is not, because the usage-error scenarios never reach the plot.
+slots. The binary prints the last row, matching what people actually run now, and does not chase a
+patch release — see the note on `validate_choice` in `src/main.rs` before changing the quoting.
 
 ## 5. Numerical rules
 
@@ -450,10 +425,11 @@ comparing the two is the check (`src/fixture.rs`).
   is allowed as a decision on file. Empty or non-string: refused at load, because an acknowledgement
   that records no reason acknowledges nothing.
 - The label is shown by putting it in the model's display `name`, not by adding a report line. That is
-  deliberate: `name` is printed by the reference program too, so `--list-models`, the report banner and
-  the figure's title block gain the fixture as **data**, and the byte-for-byte parity contract with the
-  reference holds. A line added in code would have to be added to the oracle as well, and the oracle is
-  frozen.
+  deliberate: `name` was printed by the reference program too, so `--list-models`, the report banner and
+  the figure's title block gain the fixture as **data** without a new report line — which back then kept
+  the byte-for-byte parity diff clean, since the frozen oracle could not gain a line to match. The oracle
+  is gone now; the reason stands on its own, because a fixture named in data needs no parser, while a
+  report line is text every CLI test in `tests/cli_report.rs` has to carry.
 - The shipped pairing is recorded, not hidden: three GRAS 43AG models, a target defined on GRAS 45CA,
   and no published 43AG equivalent of that target to switch to. Dropping the `target_fixtures` entry
   from the database switches the whole comparison off quietly, which is what
@@ -462,10 +438,10 @@ comparing the two is the check (`src/fixture.rs`).
 
 ### What the experimental phase stage is held to numerically
 
-`--experimental-phase <HZ>` is opt-in, so nothing here applies to a default run, and the parity
-oracle never sees it. It is also the one place where the oracle's own figure diverges by design: the
-plots are drawn from the IR that gets written, so the phase and IR panels show the reshaped filter
-while the magnitude panel does not move.
+`--experimental-phase <HZ>` is opt-in, so nothing here applies to a default run, and the parity oracle
+that used to pin this crate never exercised it. It is also the one place where a figure is allowed to
+diverge by design: the plots are drawn from the IR that gets written, so the phase and IR panels show
+the reshaped filter while the magnitude panel does not move.
 
 - **The magnitude is carried, never recomputed.** `|H|` comes off the input filter's own transform
   and is recombined with the corrected phase, so the curve is preserved by construction. What the

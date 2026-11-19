@@ -2,8 +2,11 @@
 //!
 //! Rig-compensated **minimum-phase FIR impulse-response generator** for headphone
 //! equalisation from coupler measurements, plus the file-convolution and
-//! true-peak-limiting chain around it. A Rust port of `hypreq.py`; the CLI is
-//! argument-for-argument compatible, and `scripts/parity.py` diffs the two
+//! true-peak-limiting chain around it. A Rust port of the reference program that started this
+//! pipeline; the CLI keeps that program's argument surface, and the behaviour the two used to be
+//! diffed on is now pinned by the tests in this crate (the reference script and the diffing harness
+//! were removed from the tree, so a test — not a comparison against a second implementation — is
+//! what a change has to satisfy).
 //! implementations' artefacts.
 //!
 //! ## What it produces
@@ -70,12 +73,12 @@
 //! | [`pchip`] | Fritsch–Carlson monotone cubic in `log10(f)` |
 //! | [`phase`] | Experimental mixed-phase band group-delay linearization |
 //! | [`plot`] | Four-panel PNG verification figure renderer |
-//! | [`psycho`] | ERB/roex excitation, Harman PPR, complex fractional-octave smoothing |
+//! | [`psycho`] | ERB/Cam scale, `roex(p)` excitation, Harman PPR |
 //! | [`pyfmt`] | Python-style format string and float printer |
 //! | [`riff`] | RIFF header writer/reader, extensible channel masks |
 //! | [`robust_fit`] | Ensemble MAD statistics and whole-curve bootstrap confidence intervals |
 //! | [`stereo`] | Interaural L/R mismatch analysis, balance, and per-ear trim |
-//! | [`synth_alt`] | Vicanek matched PEQ, Bank parallel IIR, NUPOLS partition schedule |
+//! | [`synth_alt`] | Vicanek matched PEQ, Bank parallel IIR (`freqpoles` + Cholesky LS) |
 //! | [`target`] | Parameterized targets, Bradley–Terry preference learner, ISO 226 delta |
 //! | [`tp`] | ITU-R BS.1770-5 true-peak detector, 4x–32x polyphase interpolators |
 //! | [`verify`] | Third-octave prediction-vs-capture acoustic verifier |

@@ -1,5 +1,9 @@
-//! Parameterized target families, spatial-audio slope (Mülleder et al. 2025),
-//! Bradley–Terry pairwise preference learning, and ISO 226:2023 Formula (1) contour deltas.
+//! Parameterized target families, spatial-audio slope (Mülleder et al. 2025), and ISO 226:2023
+//! Formula (1) contour deltas.
+//!
+//! Preference learning is not part of this module: a Bradley–Terry IRLS fit for pairwise preset
+//! choices lived here until it was removed, and nothing in the tool ranks presets, so it had no
+//! caller and no CLI surface. Re-add it with a caller, not on its own.
 
 use crate::pchip::Pchip;
 use std::path::Path;
@@ -26,17 +30,33 @@ pub struct TargetParams {
 }
 
 impl TargetParams {
+    /// The three basis features `[shelf, bell, tilt]` at `f_hz`.
+    ///
+    /// A finite but non-positive frequency is floored to 1 nHz before the logarithms. `log2(0)` is
+    /// `-inf`, and IEEE-754 makes `0.0 * -inf` a NaN — so a baseline CSV with a row at 0 Hz poisoned
+    /// every knot of the target curve *even when `theta_tilt` was zero*, which is the usual case and
+    /// the one that looks safest. The floor keeps the shelf at its `f -> 0` limit (1), the bell at
+    /// its (0), and the tilt at a large but finite slope.
+    ///
+    /// A non-finite frequency is passed through, not invented: a NaN in the axis is bad input, and
+    /// substituting a plausible number for it would hide the row that caused it.
     #[must_use]
     pub fn features(f_hz: f64) -> [f64; 3] {
         // Smooth 2nd-order-like low-shelf basis, broad mid bell, and octave tilt.
-        let x_bass = (f_hz / 105.0).powi(2);
+        let f = if f_hz.is_finite() {
+            f_hz.max(1e-9)
+        } else {
+            f_hz
+        };
+        let x_bass = (f / 105.0).powi(2);
         let b = 1.0 / (1.0 + x_bass);
-        let z_mid = (f_hz / 2500.0).log2() / 0.65;
+        let z_mid = (f / 2500.0).log2() / 0.65;
         let m = (-0.5 * z_mid * z_mid).exp();
-        let s = (f_hz / 1000.0).log2();
+        let s = (f / 1000.0).log2();
         [b, m, s]
     }
 
+    /// The parameterized deviation from the baseline, in dB. Finite for every finite frequency.
     #[must_use]
     pub fn delta_db(&self, f_hz: f64) -> f64 {
         let [b, m, s] = Self::features(f_hz);
@@ -73,103 +93,6 @@ pub fn evaluate_target(
             b + slope + params.delta_db(f)
         })
         .collect()
-}
-
-/// One pairwise preference outcome: `winner` preferred over `loser` in `(bass, mid, tilt)` space.
-#[derive(Clone, Copy, Debug)]
-pub struct PairwiseChoice {
-    pub winner: [f64; 3],
-    pub loser: [f64; 3],
-}
-
-/// Fit MAP Bradley–Terry preference weights via regularized Newton–Raphson (IRLS).
-#[must_use]
-pub fn fit_bradley_terry(choices: &[PairwiseChoice], prior_var: f64) -> TargetParams {
-    let mut theta = [0.0f64; 3];
-    if choices.is_empty() || prior_var <= 0.0 {
-        return TargetParams::default();
-    }
-    let inv_prior = 1.0 / prior_var;
-    for _ in 0..20 {
-        let mut grad = [
-            -theta[0] * inv_prior,
-            -theta[1] * inv_prior,
-            -theta[2] * inv_prior,
-        ];
-        let mut hess = [
-            [inv_prior, 0.0, 0.0],
-            [0.0, inv_prior, 0.0],
-            [0.0, 0.0, inv_prior],
-        ];
-        for c in choices {
-            let d = [
-                c.winner[0] - c.loser[0],
-                c.winner[1] - c.loser[1],
-                c.winner[2] - c.loser[2],
-            ];
-            let dot = theta[0] * d[0] + theta[1] * d[1] + theta[2] * d[2];
-            let p = 1.0 / (1.0 + (-dot).exp());
-            let w = p * (1.0 - p);
-            for i in 0..3 {
-                grad[i] += (1.0 - p) * d[i];
-                for j in 0..3 {
-                    hess[i][j] += w * d[i] * d[j];
-                }
-            }
-        }
-        let Some(step) = solve_3x3(hess, grad) else {
-            break;
-        };
-        let norm = (step[0] * step[0] + step[1] * step[1] + step[2] * step[2]).sqrt();
-        for i in 0..3 {
-            theta[i] += step[i];
-        }
-        if norm < 1e-10 {
-            break;
-        }
-    }
-    TargetParams {
-        theta_bass: theta[0],
-        theta_mid: theta[1],
-        theta_tilt: theta[2],
-    }
-}
-
-fn solve_3x3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
-    let mut m = [
-        [a[0][0], a[0][1], a[0][2], b[0]],
-        [a[1][0], a[1][1], a[1][2], b[1]],
-        [a[2][0], a[2][1], a[2][2], b[2]],
-    ];
-    for col in 0..3 {
-        let mut piv = col;
-        for row in (col + 1)..3 {
-            if m[row][col].abs() > m[piv][col].abs() {
-                piv = row;
-            }
-        }
-        m.swap(col, piv);
-        let div = m[col][col];
-        if !div.is_finite() || div.abs() < 1e-15 {
-            return None;
-        }
-        let pivot = m[col];
-        for below in m.iter_mut().skip(col + 1) {
-            let f = below[col] / div;
-            for (k, cell) in below.iter_mut().enumerate().skip(col) {
-                *cell -= f * pivot[k];
-            }
-        }
-    }
-    let mut x = [0.0; 3];
-    for row in (0..3).rev() {
-        let mut s = m[row][3];
-        for col in (row + 1)..3 {
-            s -= m[row][col] * x[col];
-        }
-        x[row] = s / m[row][row];
-    }
-    Some(x)
 }
 
 /// One row of ISO 226:2023 Table 1 (supplied externally by the user; ISO table data is
@@ -266,6 +189,63 @@ impl Iso226Table {
 mod tests {
     use super::*;
 
+    /// `log2(0)` is `-inf`, and IEEE-754 makes `0.0 * -inf` a NaN, so the tilt term poisoned the whole
+    /// target curve at a 0 Hz row even when the operator never asked for a tilt.
+    #[test]
+    fn a_non_positive_frequency_does_not_poison_the_target_deviation() {
+        let p = TargetParams {
+            theta_bass: 6.4,
+            theta_mid: -1.4,
+            theta_tilt: 0.0,
+        };
+        for f in [0.0, -1.0, -20_000.0] {
+            let d = p.delta_db(f);
+            assert!(
+                d.is_finite(),
+                "delta_db({f}) = {d}; the shelf must stay finite"
+            );
+        }
+        let [b, m, s] = TargetParams::features(0.0);
+        assert!(
+            (b - 1.0).abs() < 1e-9,
+            "the shelf saturates to 1 as f -> 0, got {b}"
+        );
+        assert!(m.abs() < 1e-12, "the bell vanishes as f -> 0, got {m}");
+        assert!(s < -30.0 && s.is_finite(), "the tilt is finite, got {s}");
+        // Bad input stays visible instead of being invented as something plausible.
+        assert!(
+            p.delta_db(f64::NAN).is_nan(),
+            "a NaN frequency must not be silenced"
+        );
+        // The published anchors are untouched by the guard.
+        let tilt = TargetParams {
+            theta_bass: 0.0,
+            theta_mid: 0.0,
+            theta_tilt: 3.0,
+        };
+        assert!(
+            tilt.delta_db(1000.0).abs() < 1e-12,
+            "tilt is anchored at 1 kHz"
+        );
+        assert!(
+            (tilt.delta_db(2000.0) - 3.0).abs() < 1e-12,
+            "one octave up is one theta, got {}",
+            tilt.delta_db(2000.0)
+        );
+        // And through the curve: a query grid that touches 0 Hz yields a usable target.
+        let base = vec![(20.0, 0.0), (1000.0, 0.0), (20000.0, 0.0)];
+        let out = evaluate_target(
+            &base,
+            &[0.0, 20.0, 1000.0, 20000.0],
+            TargetFamily::SpatialDiffuseSlope,
+            p,
+        );
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "non-finite target: {out:?}"
+        );
+    }
+
     #[test]
     fn iso226_2023_formula1_passes_through_phon_at_1khz() {
         let e = Iso226Entry {
@@ -278,32 +258,5 @@ mod tests {
             let spl = Iso226Table::spl_at_entry(&e, phon);
             assert!((spl - phon).abs() < 1e-12, "{spl} vs {phon}");
         }
-    }
-
-    #[test]
-    fn bradley_terry_recovers_preference_direction() {
-        let true_w = [2.0, -0.5, -1.0];
-        let mut choices = Vec::new();
-        for i in 0..12 {
-            let a = [(i % 5) as f64 - 2.0, 0.5, -1.0];
-            let b = [1.0 - (i % 3) as f64, -1.0, 1.0];
-            let sa: f64 = true_w.iter().zip(a).map(|(w, x)| w * x).sum();
-            let sb: f64 = true_w.iter().zip(b).map(|(w, x)| w * x).sum();
-            if sa >= sb {
-                choices.push(PairwiseChoice {
-                    winner: a,
-                    loser: b,
-                });
-            } else {
-                choices.push(PairwiseChoice {
-                    winner: b,
-                    loser: a,
-                });
-            }
-        }
-        let est = fit_bradley_terry(&choices, 4.0);
-        let dot =
-            true_w[0] * est.theta_bass + true_w[1] * est.theta_mid + true_w[2] * est.theta_tilt;
-        assert!(dot > 0.0, "estimated preference misaligned: {est:?}");
     }
 }

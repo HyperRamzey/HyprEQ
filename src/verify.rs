@@ -575,6 +575,20 @@ pub struct PsychoSummary {
 /// Only pass/fail bands are used: unmeasured and uncovered bands are not evidence about the
 /// response, and folding their placeholder values into either statistic would be a finding about
 /// the capture's gaps rather than about the filter.
+///
+/// What is scored is the **response error curve**: the equalized capture minus the design target,
+/// `measured − offset − target`. Every term of that expression is load-bearing.
+///
+/// - `target` — the published predictors take the deviation of a headphone's magnitude response
+///   *from its target*. `measured − predicted` instead measures how well this project's filter
+///   model tracked the rig, which is a different quantity wearing the same units.
+/// - `offset` — the run's level offset. Without it an uncalibrated capture gain enters `ME`
+///   directly and the in-ear model charges 2.658 dB of preference for every dB of gain error the
+///   measurement rig introduced.
+///
+/// With no design target in the report there is nothing to deviate *from*, so no PPR is reported.
+/// The rig-tracking residual is not silently substituted for it; it is already in the band table
+/// as `residual_db`, under that name.
 #[must_use]
 pub fn psycho_summary(rep: &Report, mode: crate::psycho::PprMode) -> Option<PsychoSummary> {
     let scored: Vec<&BandResult> = rep
@@ -586,12 +600,29 @@ pub fn psycho_summary(rep: &Report, mode: crate::psycho::PprMode) -> Option<Psyc
         return None;
     }
     let f: Vec<f64> = scored.iter().map(|b| b.centre_hz).collect();
-    let err: Vec<f64> = scored.iter().map(|b| b.residual_db).collect();
     let levels: Vec<f64> = scored.iter().map(|b| b.measured_db).collect();
+    // One target for the whole run or none: a partly-populated target column would score the
+    // bands that have one against a different reference than the bands that do not.
+    let scored_against_target = rep.offset_db.is_finite()
+        && scored
+            .iter()
+            .all(|b| b.target_db.is_finite() && b.measured_db.is_finite());
+    let err: Vec<f64> = if scored_against_target {
+        scored
+            .iter()
+            .map(|b| b.measured_db - rep.offset_db - b.target_db)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let centres = [100.0_f64, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
     let ex = crate::psycho::roex_excitation_db(&f, &levels, &centres);
     Some(PsychoSummary {
-        ppr: crate::psycho::harman_ppr(&f, &err, mode),
+        ppr: if scored_against_target {
+            crate::psycho::harman_ppr(&f, &err, mode)
+        } else {
+            None
+        },
         excitation: centres.into_iter().zip(ex).collect(),
         scored_bands: scored.len(),
     })
@@ -615,7 +646,14 @@ pub fn psycho_report_lines(s: &PsychoSummary, mode: crate::psycho::PprMode) -> V
             p.score, p.sd_db, p.abs_slope, p.mean_err_db
         ));
     } else {
-        out.push("  Harman PPR         : unavailable (need >= 2 finite residuals)".to_string());
+        out.push(
+            "  Harman PPR         : not reported - it scores deviation from a design target"
+                .to_string(),
+        );
+        out.push(
+            "                        (measured-minus-predicted is rig tracking, not preference)"
+                .to_string(),
+        );
     }
     let exc = s
         .excitation
@@ -1286,14 +1324,62 @@ mod tests {
     fn psycho_summary_scores_the_same_scored_bands_and_reports_them() {
         let predicted = curve(|f| bump(f, 500.0, 6.0));
         let capture = curve(|_| 0.0);
-        let r = verify(&capture, &predicted, None, &cfg()).expect("usable report");
+        let target = curve(|_| 0.0);
+        let r = verify(&capture, &predicted, Some(&target), &cfg()).expect("usable report");
         let s = psycho_summary(&r, crate::psycho::PprMode::OverEar).expect("summary");
         assert_eq!(s.scored_bands, r.scored);
-        assert!(s.ppr.is_some(), "a usable report must yield a PPR");
+        assert!(s.ppr.is_some(), "a report with a target must yield a PPR");
         assert_eq!(s.excitation.len(), 7);
         let lines = psycho_report_lines(&s, crate::psycho::PprMode::OverEar).join("\n");
         assert!(lines.contains("Harman PPR"), "{lines}");
         assert!(lines.contains("Roex excitation"), "{lines}");
+    }
+
+    /// The PPR predictors are defined on the response *error curve*: capture minus target. Scoring
+    /// `measured - predicted` instead measures the filter model against the rig, and leaving the
+    /// run's level offset in charges the in-ear model 2.658 dB of preference for every dB of gain
+    /// error the measurement fixture contributed.
+    #[test]
+    fn the_ppr_is_scored_against_the_target_with_the_capture_level_removed() {
+        let predicted = curve(|_| 0.0);
+        let target = curve(|_| 2.0);
+        // A capture 7 dB hot. Six of those dB are fixture gain; the only deviation from the target
+        // is the 2 dB left after the run's offset is removed.
+        let capture = curve(|_| 7.0);
+        let r = verify(&capture, &predicted, Some(&target), &cfg()).expect("usable report");
+        assert!(
+            (r.offset_db - 7.0).abs() < 0.2,
+            "fixture assumption broken: offset_db is {}, expected ~7",
+            r.offset_db
+        );
+        let s = psycho_summary(&r, crate::psycho::PprMode::InEar).expect("summary");
+        let p = s.ppr.expect("a target makes a PPR available");
+        assert!(
+            (p.mean_err_db - 2.0).abs() < 0.1,
+            "ME must be |capture - offset - target| = 2 dB, not the 7 dB capture level: got {:.2}",
+            p.mean_err_db
+        );
+    }
+
+    /// Without a design target there is nothing to be deviated from. The rig-tracking residual is a
+    /// different quantity and must not be handed to the PPR model under a preference label.
+    #[test]
+    fn no_target_means_no_ppr_rather_than_a_rig_tracking_number() {
+        let predicted = curve(|f| bump(f, 500.0, 6.0));
+        let capture = curve(|_| 0.0);
+        let r = verify(&capture, &predicted, None, &cfg()).expect("usable report");
+        let s = psycho_summary(&r, crate::psycho::PprMode::OverEar).expect("summary");
+        assert!(
+            s.ppr.is_none(),
+            "a PPR computed from rig tracking is a category error"
+        );
+        let lines = psycho_report_lines(&s, crate::psycho::PprMode::OverEar).join("\n");
+        assert!(lines.contains("not reported"), "{lines}");
+        assert_eq!(
+            s.excitation.len(),
+            7,
+            "excitation still describes the capture"
+        );
     }
 
     #[test]

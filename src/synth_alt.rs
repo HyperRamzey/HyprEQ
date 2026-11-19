@@ -1,7 +1,11 @@
 //! Alternative synthesis & deployment structures:
 //! - Vicanek (2016) matched (decramped) second-order peaking EQ + PEQ cascade fitter
 //! - Balázs Bank (2008/2010) fixed-pole parallel second-order filter (`freqpoles` + Cholesky LS)
-//! - Gardner (1995) / Wefers (2014) non-uniform partitioned convolution (NUPOLS) schedule
+//!
+//! Non-uniform partitioned convolution (Gardner 1995 / Wefers 2014) is deliberately *not* here: this
+//! crate renders filters, it does not stream them, and the partition planner formerly in this module
+//! had no caller and produced a schedule that was not zero-latency. See the note at the foot of the
+//! file for the rule a real implementation has to satisfy.
 
 use crate::fft::Complex64;
 use std::f64::consts::PI;
@@ -371,49 +375,15 @@ fn cholesky_solve(n: usize, a: &[f64], b: &[f64]) -> Option<Vec<f64>> {
     Some(x)
 }
 
-/// Gardner (1995) / Wefers (2014) zero-I/O-latency NUPOLS partition schedule for future
-/// `hypreq-live` streaming convolution.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NupolsSegment {
-    pub offset: usize,
-    pub len: usize,
-    pub fft_size: usize,
-    pub period_blocks: usize,
-}
-
-#[must_use]
-pub fn plan_nupols(ir_len: usize, direct_head: usize) -> Vec<NupolsSegment> {
-    if ir_len == 0 || direct_head == 0 {
-        return Vec::new();
-    }
-    let mut segs = Vec::new();
-    let head = direct_head.min(ir_len);
-    segs.push(NupolsSegment {
-        offset: 0,
-        len: head,
-        fft_size: 0,
-        period_blocks: 1,
-    });
-    let mut pos = head;
-    let mut blk = direct_head.next_power_of_two();
-    while pos < ir_len {
-        let take = blk.min(ir_len - pos);
-        segs.push(NupolsSegment {
-            offset: pos,
-            len: take,
-            fft_size: blk * 2,
-            period_blocks: (blk / direct_head).max(1),
-        });
-        pos += take;
-        if pos < ir_len {
-            let taken_at_size = segs.iter().filter(|s| s.fft_size == blk * 2).count();
-            if taken_at_size >= 2 {
-                blk = (blk * 4).min(16384);
-            }
-        }
-    }
-    segs
-}
+// The Gardner (1995) / Wefers (2014) NUPOLS partition planner that used to live here was removed:
+// nothing in this crate convolves with a partitioned schedule, so it was an unused public API, and
+// the schedule it produced was not usable even if something had called it. A segment of length L at
+// IR offset O needs O >= L input samples before it can be computed with zero added I/O latency, and
+// doubling `blk` after two equal blocks preserves exactly that while quadrupling it breaks it — for
+// a 128-sample direct head the planner emitted offset 384 / len 512 (then 1408 < 2048, 5504 < 8192),
+// i.e. it asked for 512 samples of a block that had not arrived yet. The rule is recorded here so a
+// real implementation in the streaming side project starts from it: build the schedule as
+// `offset >= len`, assert that per segment, and grow by a factor of two.
 
 #[cfg(test)]
 mod tests {

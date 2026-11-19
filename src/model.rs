@@ -45,9 +45,15 @@ pub const MODEL_ALIASES: [(&str, &str); 5] = [
 /// `gauss_apodize`, `plot_meta`), keyed by model. Mirrors
 /// `hypreq.py::DEFAULT_MODEL_METADATA`.
 #[must_use]
-/// Extracts the dB gain from a row: for 3 columns [freq, L, R], takes the ear mean.
 #[inline]
-fn point_gain(p: &[f64]) -> f64 {
+/// Gain of one raw-curve row, whatever shape the row has.
+///
+/// A row is `[freq, gain]`, or `[freq, left, right]` when the database carries the two ears
+/// separately; the three-column form is scored by its mean, which is the same convention the
+/// 1 kHz normalisation and the control-point derivation use. Public so that *every* reader of
+/// `raw_pts` agrees: a site that takes `p.last()` instead silently scores the right ear only,
+/// and a model whose ears differ stops meaning the same thing in two halves of one report.
+pub fn point_gain(p: &[f64]) -> f64 {
     if p.len() == 3 {
         (p[1] + p[2]) / 2.0
     } else {
@@ -867,6 +873,21 @@ pub fn normalize_model_entry(
     let harm_offset = f64_or(cfg, "harm_offset", 0.0);
     let hf_bypass_hz = f64_or(cfg, "hf_bypass_hz", 9500.0);
     let hf_taper_start_hz = f64_or(cfg, "hf_taper_start_hz", hf_bypass_hz * 0.88);
+    // Both are frequencies that end up inside a logarithm and a division. A non-positive
+    // `hf_taper_start_hz` makes `(f / start).log2()` infinite and paints NaN over the shaped error
+    // from there up; a non-positive `hf_bypass_hz` makes every frequency read as "past the bypass"
+    // and flattens the correction to 0 dB — a filter that does nothing while reporting a normal
+    // derivation. A database typo should name itself, not arrive as a silent curve.
+    for (name, value) in [
+        ("hf_taper_start_hz", hf_taper_start_hz),
+        ("hf_bypass_hz", hf_bypass_hz),
+    ] {
+        if !(value.is_finite() && value > 0.0) {
+            return err(format!(
+                "Model '{key}': '{name}' must be a finite frequency above 0 Hz, got {value}."
+            ));
+        }
+    }
 
     // Set only by the branch that derives, so the regularized re-derivation can reuse the same
     // fixture parameters rather than a second copy of them.
@@ -1504,6 +1525,61 @@ mod tests {
             ctrl.iter()
                 .all(|(_, g)| (g * 100.0).round() - g * 100.0 < 1e-6),
             "0.01 dB grid"
+        );
+    }
+
+    /// Both shaping frequencies go into a logarithm and a division, and neither was checked. A
+    /// `hf_taper_start_hz` of 0 makes `(f / start).log2()` infinite, which paints NaN over the shaped
+    /// error from there up; a `hf_bypass_hz` of 0 makes every frequency read as "past the bypass",
+    /// which flattens the correction to exactly 0 dB — a filter that does nothing while reporting a
+    /// perfectly normal derivation. A database typo should name itself.
+    #[test]
+    fn a_non_positive_shaping_frequency_names_itself_instead_of_flattening_the_filter() {
+        let dir = scratch("hf_freqs");
+        fs::write(
+            dir.join("raw.csv"),
+            "20,0.0\n1000,0.0\n10000,0.0\n20000,0.0\n",
+        )
+        .unwrap();
+        // The sibling is always given as a usable number: `hf_taper_start_hz` defaults to
+        // `hf_bypass_hz * 0.88`, so a bad bypass would otherwise be reported as a bad taper — both
+        // are wrong, but the message has to name the field the file actually got wrong.
+        for (field, value) in [
+            ("hf_taper_start_hz", 0.0),
+            ("hf_taper_start_hz", -1000.0),
+            ("hf_bypass_hz", 0.0),
+            ("hf_bypass_hz", -1.0),
+        ] {
+            let sibling = if field == "hf_bypass_hz" {
+                ("hf_taper_start_hz", json!(6000.0))
+            } else {
+                ("hf_bypass_hz", json!(9500.0))
+            };
+            let mut entry = json!({ "raw_csv": "raw.csv", sibling.0: sibling.1 });
+            entry
+                .as_object_mut()
+                .expect("object")
+                .insert(field.to_string(), json!(value));
+            let e = normalize_model_entry("t", &cfg(entry), &targets(flat_target()), &dir)
+                .err()
+                .unwrap_or_else(|| panic!("{field} = {value} was accepted as a frequency"));
+            let text = e.to_string();
+            assert!(
+                text.contains(field),
+                "the error did not name {field}: {text}"
+            );
+        }
+        // A usable pair still derives, and the values reach the model rather than being defaulted.
+        let c = cfg(json!({
+            "raw_csv": "raw.csv",
+            "hf_taper_start_hz": 8000.0,
+            "hf_bypass_hz": 9500.0,
+        }));
+        let m = normalize_model_entry("t", &c, &targets(flat_target()), &dir).unwrap();
+        assert_eq!(
+            m.derivation.map(|d| (d.hf_taper_start_hz, d.hf_bypass_hz)),
+            Some((8000.0, 9500.0)),
+            "the shaping parameters did not survive validation"
         );
     }
 

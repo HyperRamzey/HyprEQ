@@ -1,0 +1,13 @@
+{
+  "name": "kb5000_7_olive_clark_2025",
+  "fixture": "gras_kb5000",
+  "family": "harman",
+  "baseline_csv": "kb5000_7.csv",
+  "params": {
+    "bass": 0.0,
+    "mid": 0.0,
+    "tilt": 0.0
+  },
+  "source": "Olive & Clark, 'A Preferred Headphone Target Curve Defined for the B&K 5128 and GRAS45CA-10 Test Fixtures', Express Paper 394, AES 159th Convention (Long Beach, 2025 Oct 23-25), eLibrary 23068; curve published as the attachment to the authors' Head-Fi write-up. See targets/README.md for provenance and the pairing rules.",
+  "note": "Recipe only. The published KB5000_7 curve is the authors' measurement data and is NOT embedded here: put your own copy in kb5000_7.csv beside this file (columns: frequency_hz,gain_db), or produce it with scripts/import_kb5000_7.py from your copy of the attachment. All params are 0.0 because the published curve already contains the shelf structure the TargetParams bases would add. The paper defines this target for the GRAS 45CA-10 test fixture with the KB5000 pinna; the fixture key is gras_kb5000 because the KB5000 pinna on its 711-style (IEC 60318-4) ear simulator is the acoustic object the sources name. A capture mounted on a 43AG body does NOT pair with this recipe automatically - record the acoustic fixture you actually used (gras_kb5000 for a KB5000-series pinna on a 711-style ear), or accept the mismatch knowingly: a preset conflict is overridden per run with --force, since fixture_conflict_ok on a model vouches for its shipped target, not for a recipe picked at the command line."
+}

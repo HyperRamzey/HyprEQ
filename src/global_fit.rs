@@ -215,12 +215,13 @@ pub fn solve_global_qp(input: &GlobalFitInput, cfg: &GlobalFitConfig) -> Option<
         .collect();
 
     // Fast path: unconstrained exact solve; return in 1 step if bounds are inactive.
+    let (q_lo, q_hi) = box_bounds(&input.q_min_db, &input.q_max_db);
     let (u0, u1, u2) = build_system(&w, lam0, lam2, 0.0);
     let unconst = PentadiagLdlt::factor(&u0, &u1, &u2)?;
     let q0 = unconst.solve(&rhs0);
     let bounds_ok = q0
         .iter()
-        .zip(input.q_min_db.iter().zip(&input.q_max_db))
+        .zip(q_lo.iter().zip(&q_hi))
         .all(|(&q, (&lo, &hi))| q >= lo && q <= hi);
     if bounds_ok {
         return Some(GlobalFitResult {
@@ -239,8 +240,8 @@ pub fn solve_global_qp(input: &GlobalFitInput, cfg: &GlobalFitConfig) -> Option<
 
     let mut z: Vec<f64> = q0
         .iter()
-        .zip(input.q_min_db.iter().zip(&input.q_max_db))
-        .map(|(&q, (&lo, &hi))| q.clamp(lo.min(hi), hi.max(lo)))
+        .zip(q_lo.iter().zip(&q_hi))
+        .map(|(&q, (&lo, &hi))| q.clamp(lo, hi))
         .collect();
     let mut u = vec![0.0; k];
     let mut rhs = vec![0.0; k];
@@ -255,8 +256,8 @@ pub fn solve_global_qp(input: &GlobalFitInput, cfg: &GlobalFitConfig) -> Option<
         let mut r_dual = 0.0f64;
         for i in 0..k {
             let q_hat = alpha * q[i] + (1.0 - alpha) * z[i];
-            let lo = input.q_min_db[i].min(input.q_max_db[i]);
-            let hi = input.q_min_db[i].max(input.q_max_db[i]);
+            let lo = q_lo[i];
+            let hi = q_hi[i];
             let z_new = (q_hat + u[i]).clamp(lo, hi);
             u[i] += q_hat - z_new;
             r_pri = r_pri.max((q[i] - z_new).abs());
@@ -281,9 +282,120 @@ pub fn solve_global_qp(input: &GlobalFitInput, cfg: &GlobalFitConfig) -> Option<
     })
 }
 
+/// Normalize caller-supplied box bounds to finite, ordered `(lo, hi)` pairs.
+///
+/// A bound that is not a number is not a value to clamp against — it is the absence of a bound on
+/// that side, which is exactly what a driver model with no distortion ceiling, or a QP row over a
+/// measurement hole, is saying. It becomes the extreme of the range instead. A pair delivered the
+/// wrong way round is swapped. Both cases come out of data files rather than code paths, and
+/// `f64::clamp` panics on either ("min > max, or either was NaN"), which would take the whole run
+/// down over one bad row.
+fn box_bounds(q_min_db: &[f64], q_max_db: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let n = q_min_db.len().min(q_max_db.len());
+    let mut lo = Vec::with_capacity(n);
+    let mut hi = Vec::with_capacity(n);
+    for i in 0..n {
+        let a = if q_min_db[i].is_finite() {
+            q_min_db[i]
+        } else {
+            f64::MIN
+        };
+        let b = if q_max_db[i].is_finite() {
+            q_max_db[i]
+        } else {
+            f64::MAX
+        };
+        let (l, h) = if a <= b { (a, b) } else { (b, a) };
+        lo.push(l);
+        hi.push(h);
+    }
+    (lo, hi)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A NaN bound came from a driver ceiling sentinel and a reversed pair from a hand-edited JSON;
+    /// both reached `f64::clamp`, which panics on either, and took the whole run down.
+    ///
+    /// The demand below is the one the bridging test uses, because its ceiling is genuinely active:
+    /// with inert bounds the solver returns on the unconstrained fast path and never runs the
+    /// projection, and a test that only asked for "no panic" would pass without touching the line
+    /// that was broken. `iterations > 1` is what makes that visible.
+    #[test]
+    fn a_non_finite_or_reversed_box_bound_constrains_nothing_instead_of_panicking() {
+        let f = uniform_log_grid(20.0, 20000.0, 48);
+        let k = f.len();
+        let mut err = vec![0.0; k];
+        let mut sig = vec![0.3; k];
+        for (i, &hz) in f.iter().enumerate() {
+            let n_z = (hz / 3700.0).log2() / 0.08;
+            let p_z = (hz / 8200.0).log2() / 0.12;
+            err[i] = 8.0 * (-0.5 * n_z * n_z).exp() - 5.0 * (-0.5 * p_z * p_z).exp();
+            sig[i] += 4.5 * (-0.5 * n_z * n_z).exp();
+        }
+        let ceiling: Vec<f64> = f
+            .iter()
+            .map(|&hz| if hz > 7000.0 { 0.0 } else { 5.5 })
+            .collect();
+        // Two rows the ceiling is inert on, so their treatment can be compared against the plain
+        // meaning of "unconstrained" without the active ceiling moving anything else.
+        let i_nan = 3;
+        let i_rev = 4;
+
+        let solve = |q_min: Vec<f64>, q_max: Vec<f64>| {
+            solve_global_qp(
+                &GlobalFitInput {
+                    f_hz: f.clone(),
+                    raw_error_db: err.clone(),
+                    total_sigma_db: sig.clone(),
+                    anchor_db: vec![0.0; k],
+                    q_min_db: q_min,
+                    q_max_db: q_max,
+                },
+                &GlobalFitConfig::default(),
+            )
+        };
+
+        let mut q_min = vec![-12.0; k];
+        q_min[i_nan] = f64::NAN;
+        q_min[i_rev] = 5.5;
+        let mut q_max = ceiling.clone();
+        q_max[i_rev] = -12.0;
+
+        let got = solve(q_min.clone(), q_max.clone()).expect("a bad bound must not abort the run");
+        assert!(
+            got.converged,
+            "the solver gave up instead of ignoring the bound"
+        );
+        assert!(
+            got.iterations > 1,
+            "the ceiling never engaged, so the projection step was never run: {}",
+            got.iterations
+        );
+        assert!(got.q_db.iter().all(|q| q.is_finite()), "{:?}", got.q_db);
+        let i_high = f
+            .iter()
+            .position(|&hz| hz > 7000.0)
+            .expect("grid reaches 7 kHz");
+        assert!(
+            got.q_db[i_high] <= 1e-9,
+            "the active ceiling was ignored: {}",
+            got.q_db[i_high]
+        );
+
+        // The same run, with the two rows written as what they mean: no floor, and a sorted pair.
+        let mut want_min = q_min.clone();
+        want_min[i_nan] = f64::MIN;
+        let mut want_max = q_max.clone();
+        std::mem::swap(&mut want_min[i_rev], &mut want_max[i_rev]);
+        let want = solve(want_min, want_max).expect("unconstrained twin");
+        assert_eq!(
+            got.q_db, want.q_db,
+            "a non-finite or reversed bound did not behave as the absence of a bound"
+        );
+    }
 
     #[test]
     fn high_uncertainty_notch_is_bridged_while_low_uncertainty_peak_holds() {

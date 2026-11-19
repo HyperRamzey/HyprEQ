@@ -24,7 +24,7 @@ Those are different claims, and the difference is the whole content of this sect
 | **True-peak** limiting, not sample-peak: interpolating detector, two-stage slow/transient gain, lookahead and release accounting, per-channel and group meters | Post-EQ clipping is the most common way "correcting" a headphone makes it worse, and sample-peak meters do not see inter-sample overs |
 | Every run writes an **audit CSV** (raw, target, raw error, applied EQ per control knot) and a 4-panel verification figure, and both are checked against a reference implementation | The curve can be audited after the fact, which is the difference between a tool and a preset |
 | Reproducible numerical contract: NumPy-compatible FFT/PCHIP/dither semantics, TPDF dither with a fixed stream, ties-to-even rounding, and a parity harness that diffs artefacts against the reference | The port is testable rather than plausible |
-| The engine is small and legible: `model → pchip → ir → convolve → limiter → plot`, with 313 library tests, 22 binary tests and 27 CLI integration tests (362 tests total) | A base you can read is a base you can extend |
+| The engine is small and legible: `model → pchip → ir → convolve → limiter → plot`, with 342 library tests, 41 binary tests and 32 CLI integration tests (415 tests total) | A base you can read is a base you can extend |
 
 ### What caps it — the honest list
 
@@ -286,9 +286,9 @@ them.
 ## 4. Roadmap
 
 Every PR below keeps one invariant: **with no new flags, output is byte-identical to
-today's**, and `scripts/parity.py` stays green. New behaviour is additive and opt-in, so
-the parity oracle remains a live check on the existing engine while each change is
-proved by its own tests.
+today's**, and `cargo test --all-targets` stays green. New behaviour is additive and opt-in, so
+the byte comparisons in `tests/cli_report.rs` remain a live check on the existing engine while each
+change is proved by its own tests.
 
 ### PR 1 — Fit-aware regularization — **shipped** as `--regularize`
 
@@ -406,9 +406,9 @@ risks. The measurements show that under `auto`, boosts are walked back by up to 
 
 **What did not ship: the figure overlay.** The acceptance list asked for a panel drawing auto and
 off together. That item was substituted, not implemented, and the reason is scope on this turn,
-not a blocker: `scripts/parity.py` never passes `--regularize` (checked: no occurrence), so with
-the flag at its default the figure's bytes are untouched and an overlay could have gone in with
-parity green. What it actually takes is a second trace on the gain panel, an entry in the
+not a blocker: no test passes `--regularize` (checked: no occurrence), so with
+the flag at its default the figure's bytes are untouched and an overlay could have gone in with the
+suite green. What it actually takes is a second trace on the gain panel, an entry in the
 hand-drawn legend (`plot.rs` draws those itself, to matplotlib's geometry), a test that renders
 with the flag on and counts ink, and one that the flag-off figure is unchanged.
 
@@ -775,10 +775,10 @@ amplifier and no distortion threshold, and prints no excursion number.
   catches it.
 
 **One acceptance line moved.** The plan asked for "the limiter report gains a line stating the
-measured margin after the filter". The limiter report is byte-compared against the reference
-program in `scripts/parity.py`, so a line added there is a parity failure by construction. The
+measured margin after the filter". The default limiter report is byte-compared in
+`tests/cli_report.rs`, so a line added there fails that test by construction. The
 margin statement ships in the opt-in section instead (`Ceiling : N band(s) reach …; the limiter
-is doing this work`), which is where it can exist without breaking parity. The default report is
+is doing this work`), which is where it can exist without disturbing the default report. The default report is
 byte-identical with and without the flag — checked end to end, not just by inspection: the same
 input through both paths writes byte-identical WAVs.
 

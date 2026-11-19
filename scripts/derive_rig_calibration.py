@@ -81,18 +81,35 @@ def derive(pairs, grid, sigma_floor: float):
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--pair", nargs=2, action="append", metavar=("SOURCE_CSV", "TARGET_CSV"),
-                    help="paired curves of the SAME headphone; repeat for several models")
+    # `__doc__` is None when the interpreter runs with -OO, which strips docstrings; the
+    # one-line summary is the help text, so fall back to a literal rather than raise on the
+    # first statement of main().
+    summary = (
+        (__doc__ or "").splitlines()[0] if __doc__ else "Derive a rig calibration JSON."
+    )
+    ap = argparse.ArgumentParser(description=summary)
+    ap.add_argument(
+        "--pair",
+        nargs=2,
+        action="append",
+        metavar=("SOURCE_CSV", "TARGET_CSV"),
+        help="paired curves of the SAME headphone; repeat for several models",
+    )
     ap.add_argument("--source-fixture", choices=sorted(FIXTURES))
     ap.add_argument("--target-fixture", choices=sorted(FIXTURES))
     ap.add_argument("--acoustic-class", default="unknown", choices=sorted(CLASSES))
     ap.add_argument("--f-min", type=float, default=20.0)
     ap.add_argument("--f-max", type=float, default=20000.0)
     ap.add_argument("--bins-per-octave", type=int, default=48)
-    ap.add_argument("--sigma-floor", type=float, default=0.30,
-                    help="minimum reported uncertainty in dB (default 0.30)")
-    ap.add_argument("--out", type=Path, help="write the calibration JSON here (default stdout)")
+    ap.add_argument(
+        "--sigma-floor",
+        type=float,
+        default=0.30,
+        help="minimum reported uncertainty in dB (default 0.30)",
+    )
+    ap.add_argument(
+        "--out", type=Path, help="write the calibration JSON here (default stdout)"
+    )
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args(argv)
 
@@ -108,7 +125,9 @@ def main(argv: list[str] | None = None) -> int:
         assert np.allclose(mean, 3.25), mean[:3]
         assert np.allclose(sigma, 0.25 * np.sqrt(2.0)), sigma[:3]
         assert np.all(np.diff(grid) > 0)
-        print(f"self-test OK: mean={mean[0]:.2f} dB, sigma={sigma[0]:.2f} dB, {len(grid)} bins")
+        print(
+            f"self-test OK: mean={mean[0]:.2f} dB, sigma={sigma[0]:.2f} dB, {len(grid)} bins"
+        )
         return 0
 
     if not args.source_fixture or not args.target_fixture:

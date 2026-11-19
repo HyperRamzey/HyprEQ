@@ -1,27 +1,13 @@
-//! Psychoacoustic evaluation & complex spectral smoothing:
+//! Psychoacoustic evaluation:
 //! - Glasberg & Moore (1990) ERB scale and `roex(p)` auditory excitation patterns
 //! - Olive, Welti & Khonsaripour (2017/2018) Harman Predicted Preference Rating (PPR)
-//! - Hatziantoniou & Mourjopoulos (2000) complex fractional-octave smoothing
 
-use crate::fit::smooth_octave;
 use crate::pchip::Pchip;
 
 /// Equivalent Rectangular Bandwidth in Hz at center frequency `f_hz` (Glasberg & Moore, 1990).
 #[must_use]
 pub fn erb_hz(f_hz: f64) -> f64 {
     24.7 * (4.37 * (f_hz.max(0.0) / 1000.0) + 1.0)
-}
-
-/// Frequency in Hz to ERB-rate number (Cam scale).
-#[must_use]
-pub fn hz_to_erbs(f_hz: f64) -> f64 {
-    21.4 * (4.37 * (f_hz.max(0.0) / 1000.0) + 1.0).log10()
-}
-
-/// ERB-rate number back to Hz.
-#[must_use]
-pub fn erbs_to_hz(erbs: f64) -> f64 {
-    (10f64.powf(erbs / 21.4) - 1.0) / 4.37 * 1000.0
 }
 
 /// Dimensionless ERB density weight normalized to `1.0` at 1 kHz (`ERB(1000) / ERB(f)`).
@@ -95,15 +81,34 @@ pub enum PprMode {
 pub struct PprScore {
     pub score: f64,
     pub sd_db: f64,
+    /// `|slope|` of the deviation regressed on `ln(f)`, in dB per neper of log-frequency.
     pub abs_slope: f64,
+    /// `InEar`: `ME`, the mean of `|error|` over 40 Hz–10 kHz. `OverEar`: the signed mean, which
+    /// the published over-ear model does not use — reported for context only.
     pub mean_err_db: f64,
 }
 
 /// Olive, Welti & Khonsaripour (2017/2018) Predicted Preference Rating on 1/48-octave spacing.
 ///
-/// - `OverEar` (AES 9919, 2018): `114.49 - 12.62 * s - 15.52 * g` over 50 Hz–10 kHz.
-/// - `InEar` (AES 143rd, 2017): `68.685 - 3.238 * s - 4.473 * g - 2.658 * m`
-///   (`s, g` over 20 Hz–10 kHz, `m` = `|mean|` over 40 Hz–10 kHz).
+/// Form as published — US 2019/0087739 A1 (*Linear model to predict listener preference ratings of
+/// headphones*, Olive, Welti & Khonsaripour, Harman International, priority 2017-09-15), claims
+/// 11–13 and 20, which give all three predictors explicitly:
+///
+/// - `AS = SUM[(ln x − ln x̄)(y − ȳ)] / SUM[(ln x − ln x̄)²]` — a regression of the deviation on the
+///   **natural** logarithm of frequency. Regressing on log₁₀ instead scales the slope by ln 10 ≈
+///   2.302585, so every `AS`-weighted penalty is over-applied by that factor.
+/// - `SD = sqrt(SUM (y − ȳ)² / (n − 1))` — the sample standard deviation (the `n − 1` here is what
+///   this function's `n - 1.0` divisor is).
+/// - `ME_40Hz–10kHz = SUM |y_i| / n` — the mean of the **absolute** deviations. `|mean y|` is a
+///   different statistic entirely: boosts and cuts of similar size cancel, so a curve thrashing
+///   ±6 dB scores like a flat one on the term that exists to catch exactly that.
+///
+/// Ranges as published: `OverEar` scores `s, g` over 50 Hz–10 kHz as
+/// `114.49 − 12.62·s − 15.52·AS`; `InEar` scores `s, g` over 20 Hz–10 kHz and `m` over 40 Hz–10 kHz
+/// as `68.685 − 3.238·s − 4.473·AS − 2.658·ME`.
+///
+/// `error_db` is the headphone response error curve — the equalized magnitude response minus its
+/// design target — not a rig-tracking residual. See [`crate::verify::psycho_summary`].
 #[must_use]
 pub fn harman_ppr(f_hz: &[f64], error_db: &[f64], mode: PprMode) -> Option<PprScore> {
     let valid: Vec<(f64, f64)> = f_hz
@@ -132,7 +137,8 @@ pub fn harman_ppr(f_hz: &[f64], error_db: &[f64], mode: PprMode) -> Option<PprSc
     let var = err.iter().map(|&e| (e - mean) * (e - mean)).sum::<f64>() / (n - 1.0);
     let sd = var.sqrt();
 
-    let lx: Vec<f64> = grid.iter().map(|f| f.log10()).collect();
+    // Natural log, as published. See the `AS` term in the docs above.
+    let lx: Vec<f64> = grid.iter().map(|f| f.ln()).collect();
     let lx_mean = lx.iter().sum::<f64>() / n;
     let mut cov = 0.0;
     let mut lx_var = 0.0;
@@ -152,7 +158,8 @@ pub fn harman_ppr(f_hz: &[f64], error_db: &[f64], mode: PprMode) -> Option<PprSc
         PprMode::InEar => {
             let g40 = crate::global_fit::uniform_log_grid(40.0, 10_000.0, 48);
             let e40 = interp.eval_grid(&g40);
-            let m40 = (e40.iter().sum::<f64>() / (e40.len() as f64)).abs();
+            // ME = SUM|y|/n: the absolute values are taken per bin, before the mean.
+            let m40 = e40.iter().map(|e| e.abs()).sum::<f64>() / (e40.len() as f64);
             (68.685 - 3.238 * sd - 4.473 * abs_slope - 2.658 * m40, m40)
         }
     };
@@ -163,21 +170,6 @@ pub fn harman_ppr(f_hz: &[f64], error_db: &[f64], mode: PprMode) -> Option<PprSc
         abs_slope,
         mean_err_db,
     })
-}
-
-/// Hatziantoniou & Mourjopoulos (JAES 2000) complex fractional-octave smoothing over
-/// real and imaginary spectral components on the log-frequency integral grid.
-#[must_use]
-pub fn smooth_complex_octave(
-    f_hz: &[f64],
-    re: &[f64],
-    im: &[f64],
-    fraction: f64,
-) -> (Vec<f64>, Vec<f64>) {
-    (
-        smooth_octave(f_hz, re, fraction),
-        smooth_octave(f_hz, im, fraction),
-    )
 }
 
 #[cfg(test)]
@@ -196,5 +188,54 @@ mod tests {
         for &v in &ex {
             assert!(v.abs() < 1e-9, "flat excitation must be 0 dB, got {v}");
         }
+    }
+
+    /// A deviation of exactly 6 dB per decade has a slope of 6 / ln 10 = 2.602697 dB per neper when
+    /// regressed on `ln f`, as published. Regressed on `log10 f` the same curve reports 6.0 — a 2.3×
+    /// over-penalty on a term weighted 15.52 (over-ear) or 4.473 (in-ear).
+    #[test]
+    fn the_absolute_slope_is_regressed_on_the_natural_log_of_frequency() {
+        let grid = crate::global_fit::uniform_log_grid(50.0, 10_000.0, 48);
+        let err: Vec<f64> = grid.iter().map(|f| 6.0 * (f / 1000.0).log10()).collect();
+        let s = harman_ppr(&grid, &err, PprMode::OverEar).expect("score");
+        let expected = 6.0 / 10f64.ln();
+        assert!(
+            (s.abs_slope - expected).abs() < 1e-6,
+            "AS must be {expected:.6} dB per neper, got {:.6}",
+            s.abs_slope
+        );
+        assert!(
+            (s.abs_slope * 10f64.ln() - 6.0).abs() < 1e-6,
+            "ln(10) is exactly the factor a log10 regression adds"
+        );
+    }
+
+    /// ME is the mean of the absolute deviations, not the absolute value of the mean: an
+    /// alternating ±3 dB curve has a signed mean of zero and a mean absolute error of 3 dB, and the
+    /// term exists to charge the thrash that the signed mean cannot see.
+    #[test]
+    fn the_in_ear_mean_error_averages_absolute_deviations() {
+        let grid = crate::global_fit::uniform_log_grid(20.0, 10_000.0, 48);
+        let err: Vec<f64> = grid
+            .iter()
+            .enumerate()
+            .map(|(i, _)| if i % 2 == 0 { 3.0 } else { -3.0 })
+            .collect();
+        let signed_mean = err.iter().sum::<f64>() / err.len() as f64;
+        assert!(
+            signed_mean.abs() < 0.02,
+            "the fixture must be one the two statistics disagree on, got {signed_mean:.4}"
+        );
+        let s = harman_ppr(&grid, &err, PprMode::InEar).expect("score");
+        assert!(
+            (s.mean_err_db - 3.0).abs() < 0.25,
+            "ME must be mean|y| (3 dB), got {:.3}",
+            s.mean_err_db
+        );
+        assert!(
+            s.score < 68.685 - 2.6,
+            "a 3 dB thrash must pay the 2.658 x ME term, score {:.3}",
+            s.score
+        );
     }
 }

@@ -63,13 +63,21 @@ impl Pchip {
     pub fn new(f_nodes: &[f64], g_nodes: &[f64]) -> Self {
         assert_eq!(f_nodes.len(), g_nodes.len(), "node/gain length mismatch");
         assert!(!f_nodes.is_empty(), "PCHIP needs at least one node");
-        // A repeated knot makes one interval zero wide, and every divided slope over it
-        // becomes inf or NaN, which then spreads through the whole cubic. The loaders
-        // deduplicate already (last write wins, like the reference's dict); doing it here
-        // too keeps a directly-constructed interpolator honest.
+        // Nodes are normalized here, not assumed. A repeated knot makes one interval zero wide and
+        // every divided slope over it inf or NaN, and an unsorted axis makes `f_min` and `f_max` the
+        // first and last rows rather than the smallest and largest — which reached `f64::clamp` as
+        // "min > max" and aborted the binary on a hand-edited `--target-csv`. So: sort by ascending
+        // frequency, last write winning at a repeated frequency (the same rule the CSV loaders use,
+        // [`crate::model::sort_and_dedup_points`]), then reject what no cubic can be built from.
+        // Sorting is not a convenience: the monotone limiter below and the binary search in `eval`
+        // are both only correct on an ascending axis, so an interpolator is never a valid object
+        // until this has happened.
+        let mut order: Vec<usize> = (0..f_nodes.len()).collect();
+        order.sort_by(|&a, &b| f_nodes[a].total_cmp(&f_nodes[b]));
         let mut nodes: Vec<f64> = Vec::with_capacity(f_nodes.len());
         let mut gains: Vec<f64> = Vec::with_capacity(g_nodes.len());
-        for (&f, &g) in f_nodes.iter().zip(g_nodes.iter()) {
+        for &i in &order {
+            let (f, g) = (f_nodes[i], g_nodes[i]);
             if nodes.last().is_some_and(|&prev| prev == f) {
                 let n = gains.len() - 1;
                 gains[n] = g;
@@ -78,6 +86,14 @@ impl Pchip {
                 gains.push(g);
             }
         }
+        assert!(
+            nodes.iter().all(|f| f.is_finite() && *f > 0.0),
+            "PCHIP nodes must be finite positive frequencies; got {}",
+            nodes
+                .iter()
+                .find(|f| !(f.is_finite() && **f > 0.0))
+                .map_or(String::new(), |f| f.to_string())
+        );
         let f_min = nodes[0];
         let f_max = nodes[nodes.len() - 1];
         let f_nodes: &[f64] = &nodes;
@@ -231,11 +247,44 @@ pub fn pchip_eval1(f_nodes: &[f64], g_nodes: &[f64], f_hz: f64) -> f64 {
 mod tests {
     use super::*;
 
+    /// The monotone limiter below and the binary search in `eval` both assume an ascending axis, and
+    /// `f_min` / `f_max` come from the ends of the node list — so an interpolator built from a
+    /// hand-edited CSV in spreadsheet order was not a valid object, and reached `f64::clamp` as
+    /// "min > max". Nodes are therefore normalized on the way in: ascending, last write winning at a
+    /// repeated frequency, which is the same rule the loaders apply.
+    #[test]
+    fn unsorted_and_repeated_nodes_describe_the_same_curve_as_sorted_ones() {
+        let shuffled_f = [1000.0, 100.0, 1000.0, 10000.0, 20.0];
+        let shuffled_g = [0.0, -2.0, 1.0, -3.0, 4.0];
+        // The same nodes, ordered, with the two rows at 1 kHz collapsed to the later write.
+        let want_f = [20.0, 100.0, 1000.0, 10000.0];
+        let want_g = [4.0, -2.0, 1.0, -3.0];
+        let shuffled = Pchip::new(&shuffled_f, &shuffled_g);
+        let ordered = Pchip::new(&want_f, &want_g);
+        for &f in &[20.0, 50.0, 100.0, 400.0, 1000.0, 4000.0, 10000.0] {
+            assert_eq!(
+                shuffled.f_min, want_f[0],
+                "the axis start came from a row order, not the data"
+            );
+            assert_eq!(
+                shuffled.f_max, want_f[3],
+                "the axis end came from a row order"
+            );
+            assert!(
+                (shuffled.eval(f) - ordered.eval(f)).abs() < 1e-12,
+                "at {f} Hz: {} vs {}",
+                shuffled.eval(f),
+                ordered.eval(f)
+            );
+        }
+        assert_eq!(shuffled.eval(1000.0), 1.0, "the last write must win");
+    }
+
     #[test]
     fn reproduces_python_on_a_known_curve() {
-        // Expected values are hypreq.py's own output for these knots, run through
-        // pchip_log_interp (see scripts/parity.py, which checks the same thing on
-        // the real model curves rather than on these toy ones):
+        // Expected values are the reference program's own output for these knots, captured from
+        // `pchip_log_interp` before that script left the tree — which is why they are written out
+        // in full rather than recomputed here. They are the oracle this interpolator has to hit:
         //   python: pchip_log_interp(np.array([20.,100.,1000.,10000.,20000.]),
         //                           np.array([ 3., 0.,-2., 4., 0.]),
         //                           np.array([20.,50.,1000.,3703.,20000.,50000.,1.]))

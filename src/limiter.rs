@@ -891,6 +891,12 @@ impl Limiter {
             *peak = side.push(*x);
         }
         self.fed += 1;
+        // Does the frame leaving this call carry input at all? For the first `latency` frames the
+        // delay line still holds the silence it was built with, so `old` below is a zero that was
+        // never the input, whatever the gains multiplied it by. Every counter that claims "this
+        // frame was shaped" has to answer to that, and it is one fact, so it is computed once,
+        // here, before either counter.
+        let live = self.fed > latency as u64;
 
         // --- slow stage: a peak-hold window, then attack and release on the gain -------
         // The window is what makes this a level detector rather than a second peak
@@ -958,7 +964,12 @@ impl Limiter {
                 slow_min = gr;
             }
         }
-        if slow_min < 1.0 - ENGAGED_EPS {
+        // `live` for the same reason as the engaged counter below, and this one was the counter
+        // that actually still mis-reported after that one was fixed: a full-scale DC file of
+        // 965 frames into a 966-frame latency delivered nothing but delay-line silence and
+        // reported 725 released frames. The slow follower really was deep — it is reading real
+        // input — but the frames it was deep for are not the frames that left the limiter.
+        if live && slow_min < 1.0 - ENGAGED_EPS {
             self.report.release_frames += 1;
             let db = -20.0 * slow_min.max(f64::MIN_POSITIVE).log10();
             if db > self.report.release_reduction_db {
@@ -1016,7 +1027,6 @@ impl Limiter {
         // the emission cursor trails it by `latency`, larger by construction.
         let j = self.fed.saturating_sub(latency as u64 + 1);
         let jslot = self.slot(j);
-        let live = self.fed > latency as u64;
         // Pass 3, the backward ramp, evaluated here. The gain at frame j may not fall
         // faster than `slope` per frame, and the only values that know that are the demands
         // at j+1 … j+ramp: a depth two frames ahead has to be arrived at from behind, one
@@ -1060,11 +1070,17 @@ impl Limiter {
                 deepest = g;
             }
         }
-        if deepest < 1.0 - ENGAGED_EPS {
+        if live && deepest < 1.0 - ENGAGED_EPS {
             // `engaged_frames` is the latch: the report says how many frames were changed, and a
             // reader who wants "did it engage at all" asks `engaged_frames > 0`. A second bool
             // set-once here could only ever agree with `engaged_frames > 0`, so it was a place to
             // be wrong rather than a fact. The count is what the harness asserts on.
+            //
+            // `live` is part of the definition, not a refinement: for the first `latency` frames the
+            // delay line still holds the silence it started with, so the gain multiplies samples that
+            // were never the input. Counting them reported a file as limited on frames that carried
+            // no audio, and a first frame hot enough to pull the gain down inflated the count by the
+            // whole lookahead before a single delivered sample was touched.
             self.report.engaged_frames += 1;
             let db = -20.0 * deepest.max(f64::MIN_POSITIVE).log10();
             if db > self.report.max_gain_reduction_db {
@@ -1478,6 +1494,144 @@ mod tests {
             landing.0,
             landing.1,
             landing.2
+        );
+    }
+
+    /// For the first `latency` frames the delay line still holds the silence it was built with, so
+    /// every gain applied in that stretch multiplies samples that were never the input. Counting
+    /// them reported a file as limited on frames that carried nothing at all.
+    ///
+    /// Read this before sabotaging it, because the first sabotage will look like a broken test:
+    /// the `engaged_frames` claim is held by two independent enforcers, and either one alone keeps
+    /// the count at zero. Turning off the counter's own `live` check passes; opening the ramp gate
+    /// in [`Limiter::ramp_schedule`] passes; both together fail here with "15 frames were counted
+    /// engaged … a 54-frame lookahead, 27 frames fed". That redundancy is deliberate — the counter
+    /// states its own definition instead of inheriting one from how the ramp happens to be
+    /// scheduled — but it means the discriminating sabotage for that clause is the joint one. The
+    /// `release_frames` clause below is singly enforced and fails on its own guard alone ("5 frames
+    /// were counted as released … a 246-frame lookahead, 245 frames fed").
+    #[test]
+    fn a_file_shorter_than_the_lookahead_engages_no_delivered_frame() {
+        let cfg = cfg(-1.0, Ratio::X4, 1.0);
+        let (_, probe) = run(cfg, &[worst_case(8192)], 128);
+        let latency = probe.latency_samples;
+        assert!(
+            probe.engaged_frames > 0,
+            "the material has to engage the limiter when there is enough of it: {probe:?}"
+        );
+
+        // The phases are separated on purpose. `process` emits one frame per frame fed, and while
+        // the feed is inside the lookahead every one of those frames multiplies the silence the delay
+        // line started with; the audio only leaves on `flush`. Asking for the report after a flush
+        // would count the limiting the tail legitimately receives and prove nothing about pre-roll.
+        let short_len = latency / 2;
+        let mut data = [worst_case(short_len)];
+        let before = {
+            let mut lim = Limiter::enabled(cfg, FS as u32, 1);
+            let mut blocks: Vec<&mut [f64]> = data.iter_mut().map(|d| &mut d[..]).collect();
+            lim.process(&mut blocks);
+            let delivered = blocks[0].to_vec();
+            assert!(
+                delivered.iter().all(|&y| y == 0.0),
+                "a frame delivered from inside the lookahead carried audio: {:?}",
+                &delivered[..delivered.len().min(8)]
+            );
+            lim.report()
+        };
+        assert_eq!(before.latency_samples, latency, "same config, same latency");
+        assert_eq!(
+            before.engaged_frames, 0,
+            "{} frames were counted engaged while every delivered sample was still the delay line's \
+             own silence — a {latency}-frame lookahead, {} frames fed",
+            before.engaged_frames,
+            short_len
+        );
+        assert_eq!(before.max_gain_reduction_db, 0.0, "{before:?}");
+
+        // The same claim was made twice over, by two counters, and only one of them was wrong.
+        // `engaged_frames` reads the gain that was applied to the sample that left the delay line;
+        // `release_frames` reads the slow follower, which runs on the input whether or not anything
+        // has come out yet, so it survived the first fix counting frames that delivered silence.
+        // `worst_case` is too short a transient to close the slow stage's peak-hold window, so the
+        // cell that shows it is a long lookahead fed full-scale DC: 5 ms (246 frames) with 245
+        // frames of DC leaves the slow follower genuinely deep for the last frames of the feed.
+        // Measured before the fix, that fixture reported `release_frames = 5` on a run whose entire
+        // delivered output was the delay line's own zeros.
+        // Built by hand because `cfg`, the helper, is shadowed by this test's own `cfg` above.
+        let slow = Cfg {
+            enable: true,
+            ceiling_db: -1.0,
+            ratio: Ratio::X4,
+            lookahead_ms: 5.0,
+            ..Cfg::default()
+        };
+        let (_, probe) = run(slow, &[vec![1.0; FS as usize]], 128);
+        let lat = probe.latency_samples;
+        assert!(
+            probe.release_frames > 0 && lat > 240,
+            "the fixture must exercise the slow stage: latency={lat} {probe:?}"
+        );
+
+        let mut data = [vec![1.0f64; lat - 1]];
+        let slow_before = {
+            let mut lim = Limiter::enabled(slow, FS as u32, 1);
+            let mut blocks: Vec<&mut [f64]> = data.iter_mut().map(|d| &mut d[..]).collect();
+            lim.process(&mut blocks);
+            assert!(
+                blocks[0].iter().all(|&y| y == 0.0),
+                "the pre-roll fixture stopped being a pre-roll"
+            );
+            lim.report()
+        };
+        assert_eq!(
+            slow_before.release_frames, 0,
+            "{} frames were counted as released, and with {} dB of reduction, while every delivered \
+             sample was still the delay line's own silence — a {lat}-frame lookahead, {} frames fed",
+            slow_before.release_frames, slow_before.release_reduction_db,
+            lat - 1
+        );
+        assert_eq!(slow_before.release_reduction_db, 0.0, "{slow_before:?}");
+        assert_eq!(slow_before.engaged_frames, 0, "{slow_before:?}");
+
+        // And neither counter is simply switched off: the same material, long enough to be
+        // delivered, still reports what it did.
+        let (_, slow_long) = run(slow, &[vec![1.0; lat * 4]], 128);
+        assert!(
+            slow_long.release_frames > 0 && slow_long.release_reduction_db > 0.0,
+            "a released long file must still be counted: {slow_long:?}"
+        );
+        let (out, r) = run(cfg, &[worst_case(latency * 4)], 128);
+        assert!(
+            r.engaged_frames > 0,
+            "limiting a long file must still be counted: {r:?}"
+        );
+        let _ = out;
+        // Measured, not assumed: the short file's audio leaves on `flush`, which drains the held
+        // `latency` samples (27 fed + 54 held = 81 out), and the limiting that tail legitimately
+        // receives is counted — the silent pre-roll frames are the ones that are not.
+        let (out, r) = run(cfg, &[worst_case(short_len)], 128);
+        assert_eq!(
+            out[0].len(),
+            short_len + latency,
+            "process plus flush delivered other than the feed plus the drained delay line"
+        );
+        assert!(
+            out[0][..short_len].iter().all(|&y| y == 0.0),
+            "a frame delivered from inside the lookahead carried audio: {:?}",
+            &out[0][..short_len.min(8)]
+        );
+        assert!(
+            out[0][short_len..].iter().any(|&y| y != 0.0),
+            "the drained tail held no audio, so this fixture proves nothing"
+        );
+        assert!(
+            r.engaged_frames > 0,
+            "the drained tail is real audio and its limiting must still be counted: {r:?}"
+        );
+        assert!(
+            r.engaged_frames < (short_len + latency) as u64,
+            "every frame counted, including the {} silent ones: {r:?}",
+            short_len
         );
     }
 

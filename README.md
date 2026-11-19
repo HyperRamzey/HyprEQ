@@ -7,11 +7,12 @@ All target curves and headphone measurement datasets are decoupled from the DSP 
 ## Implementation
 
 The DSP is a single self-contained Rust crate — a library plus a `hypreq` binary — with no
-external service, plugin host, or path dependency, covered by an extensive 362-test suite
-(`cargo test --all-targets`). `hypreq.py` is the same pipeline kept as
-a **parity oracle**: `scripts/parity.py` runs both sides scenario by scenario and diffs
-stdout, WAV containers and payloads, audit CSVs, and usage errors. See
-[`docs/SETUP.md`](docs/SETUP.md) for prerequisites (the verification figure needs
+external service, plugin host, or path dependency, covered by an extensive 415-test suite
+(`cargo test --all-targets`). The behaviour is pinned inside the crate rather than by a second
+implementation: the reference program this was ported from and the harness that used to diff the
+two side by side are no longer in the tree, so the tests — byte comparisons of stdout, WAV
+containers and payloads, audit CSVs, and usage errors — are the contract a change has to satisfy.
+See [`docs/SETUP.md`](docs/SETUP.md) for prerequisites (the verification figure needs
 fontconfig/freetype), the build and verification gates, the numerical rules (f64 internals,
 no FMA/fast-math), and the artefact naming.
 
@@ -61,6 +62,29 @@ cargo build --release
    <img width="1950" height="1725" alt="ft1pro_regularized_verification" src="docs/plots/ft1pro_regularized_verification.png" />
 
    > **What PR 1 Regularization Gives:** Operates with a baseline knee floor at $3.00\text{ dB}$, moving 62 of 127 knots to smoothly contract narrow high-frequency ripples near the coupler boundary (moderating the $+1.63\text{ dB}$ boost at $9.18\text{ kHz}$ to $+1.22\text{ dB}$). Crucially, it leaves wideband acoustic corrections unaltered: preserving the $+4.07\text{ dB}$ ear-gain restoration at $1.82\text{ kHz}$, the $-2.64\text{ dB}$ glare cut at $2.82\text{ kHz}$, and planar diaphragm excursion protection in the sub-bass ($+2.70\text{ dB}$ at $55\text{ Hz}$, $+2.37\text{ dB}$ at $20\text{ Hz}$). Total preamp moves from $-5.57\text{ dB}$ to $-5.53\text{ dB}$.
+
+### Current-Tree Re-Verification Figures (2026-11-19)
+
+Regenerated with the tree at this commit (full 415-test gate green) so the figures match
+the shipped binary rather than the PR 1 build. First figure: shipped default. Second
+figure: the same model with `--regularize auto`.
+
+**Baseline Verification (Unregularized / Shipped Default):**
+<img width="1950" height="1725" alt="jbl770nc_final_verification_20261119" src="docs/plots/jbl770nc_final_verification_20261119.png" />
+
+**Adaptive Regularized Verification (`--regularize auto`):**
+<img width="1950" height="1725" alt="jbl770nc_regularized_auto_20261119" src="docs/plots/jbl770nc_regularized_auto_20261119.png" />
+
+> The current binary reproduces the PR 1 regularization numbers exactly: adaptive knee at
+> $4.29\text{ dB}$ of deviation, 20 of 128 knots moved, largest shift $+0.79\text{ dB}$ at
+> $8481\text{ Hz}$, where the $-3.16\text{ dB}$ cut softens to $-2.37\text{ dB}$ — the
+> `--export-csv` tables confirm it on the written filter ($-3.16$ baseline versus $-2.37$
+> regularized at $8480.6\text{ Hz}$), and total preamp stays $-6.50\text{ dB}$ either way.
+> Note for readers of the second figure: panel 2's green callout text ("$-2.31$ dB &
+> $-3.16$ dB Surgical Cuts") is static model metadata describing the unregularized design
+> knots; with `--regularize auto` the plotted curve itself passes through $-2.37\text{ dB}$
+> at $8.48\text{ kHz}$, and the run summary prints the moved value. The annotation values
+> are not re-templated per run — this caption is the record that they are not.
 
 ### Reference Model Profiles & Convolver Metrics
 
@@ -405,14 +429,10 @@ what the filter moves in each:
 ```
 
 Report-only, and off by default: it changes no filter, no level and no output file, and the
-default report is byte-compared against the reference program, so a line added there would be
-a parity failure. What it states is a claim about measured quantities — content level in a
+default report is byte-compared in `tests/cli_report.rs`, so a line added there fails that test. What it states is a claim about measured quantities — content level in a
 band, the filter's gain there, and where the sum lands relative to the limiter ceiling. It does
 not model a driver, an amplifier or a distortion threshold, and no number in it should be read
 as one.
-
-`hypreq.py` accepts the core equalization, true-peak limiting, and WAV generation options and is kept as the parity oracle for
-`scripts/parity.py`.
 
 ### Checking the Correction Against What Actually Happened (`--verify-with`)
 
@@ -663,5 +683,5 @@ af=lavfi=[aformat=sample_fmts=dblp,aresample=48000:filter_size=256:phase_shift=1
 ---
 
 ## Credits & License
-- Generator code (Rust crate and `hypreq.py`) is licensed under the **MIT License**.
+- Generator code (the Rust crate) is licensed under the **MIT License**.
 - Raw frequency response measurements courtesy of **Filk** (`JBL Live 770NC`), **Crinacle** (`Beyerdynamic DT 770 Pro 80 Ω`), and **oratory1990 / Kuulokenurkka** (`FiiO FT1 Pro`) via **Jaakko Pasanen's [AutoEq](https://github.com/jaakkopasanen/AutoEq)** database (used under their respective measurement terms). Target curve derived from **Harman International** (2018 Over-Ear target).

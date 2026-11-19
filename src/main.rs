@@ -321,30 +321,33 @@ struct Args {
         help_heading = "Groundwork (opt-in)"
     )]
     target_family: String,
-    /// Bass-shelf trim (dB) of the parameterized target
+    /// Bass-shelf trim (dB) of the parameterized target. An explicit value always wins over a
+    /// `--target-preset`, `0.0` included: "no shelf" is a decision, not the absence of one.
     #[arg(
         long,
-        default_value_t = 0.0,
+        value_name = "DB",
         allow_negative_numbers = true,
         help_heading = "Groundwork (opt-in)"
     )]
-    target_bass: f64,
-    /// Presence-band trim (dB) of the parameterized target
+    target_bass: Option<f64>,
+    /// Presence-band trim (dB) of the parameterized target. Explicit values win over a
+    /// `--target-preset`, `0.0` included.
     #[arg(
         long,
-        default_value_t = 0.0,
+        value_name = "DB",
         allow_negative_numbers = true,
         help_heading = "Groundwork (opt-in)"
     )]
-    target_mid: f64,
-    /// Log-frequency tilt (dB/octave) of the parameterized target
+    target_mid: Option<f64>,
+    /// Log-frequency tilt (dB/octave) of the parameterized target. Explicit values win over a
+    /// `--target-preset`, `0.0` included.
     #[arg(
         long,
-        default_value_t = 0.0,
+        value_name = "DB_PER_OCT",
         allow_negative_numbers = true,
         help_heading = "Groundwork (opt-in)"
     )]
-    target_tilt: f64,
+    target_tilt: Option<f64>,
     /// Listening level in phon for the ISO 226:2023 contour-delta compensation
     #[arg(
         long,
@@ -468,13 +471,15 @@ fn run(args: Args) -> Result<(), Error> {
     );
     validate_choice(&args.ppr_mode, &["over-ear", "in-ear"], "--ppr-mode");
     for (name, v) in [
-        ("--ensemble-alpha", args.ensemble_alpha),
+        ("--ensemble-alpha", Some(args.ensemble_alpha)),
         ("--target-bass", args.target_bass),
         ("--target-mid", args.target_mid),
         ("--target-tilt", args.target_tilt),
     ] {
-        if !v.is_finite() {
-            usage_error(format!("argument {name}: not a number: '{v}'"));
+        if let Some(v) = v {
+            if !v.is_finite() {
+                usage_error(format!("argument {name}: not a number: '{v}'"));
+            }
         }
     }
     if args.ensemble_alpha < 0.0 {
@@ -636,8 +641,29 @@ fn run(args: Args) -> Result<(), Error> {
     // likely way this program produces a confident, wrong filter, and until the fixture had a key
     // there was nothing to compare. Checked before any file is written, for exactly the models this
     // invocation is about to put a filter on.
+    // A recipe brings its own baseline, so it brings its own rig: the fixture has to be read off the
+    // recipe, because the database entry describes the target the recipe *replaced*. Same argument
+    // for an empirical translation parsed from `--rig-calibration` — it is one file for every model
+    // in this run, so it is read once here. Both reads are the lenient ones: a file that does not
+    // parse is reported by the authoritative loader where it has always been reported, and a guard
+    // that cannot run simply does not run.
+    let preset_fixture = args
+        .target_preset
+        .as_ref()
+        .and_then(|p| preset_fixture_only(p));
+    let cli_calibration = args
+        .rig_calibration
+        .as_ref()
+        .and_then(|p| hypreq::fixture::RigCalibration::from_json_file(p).ok());
     for m in used_models(&models, &selected, args.input.is_some(), args.bypass_eq) {
-        fixture_guard(&models, m, args.force)?;
+        let target_fixture =
+            preset_fixture.or_else(|| models.target_fixtures.get(&m.target_name).copied());
+        // The recipe alone is the override here; a database that records its target rigs is the
+        // ordinary case, not a replacement, and `fixture_conflict_ok` speaks about that case.
+        fixture_guard(&models, m, preset_fixture, args.force)?;
+        if let Some(cal) = cli_calibration.as_ref().or(m.rig_calibration.as_ref()) {
+            rig_calibration_guard(m, target_fixture, cal, args.force)?;
+        }
     }
 
     if let Some(input) = args.input.clone() {
@@ -721,6 +747,18 @@ fn used_models<'a>(
     }
 }
 
+/// The fixture a `--target-preset` declares, or `None` when the recipe does not say.
+///
+/// Deliberately a *partial* parse: the authoritative one is [`load_target_preset`], which runs later
+/// and reports a malformed recipe in full. Reading only this one key means the guard cannot change
+/// the order in which the CLI reports unrelated problems with the same file; a recipe that does not
+/// parse yields `None` here and is refused where it has always been refused.
+fn preset_fixture_only(path: &Path) -> Option<hypreq::fixture::Fixture> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&text).ok()?;
+    hypreq::fixture::Fixture::parse(val.get("fixture")?.as_str()?)
+}
+
 /// Refuse a measurement being equalised to a target defined on a different test fixture.
 ///
 /// The check only exists when both sides recorded a fixture; a target with no recorded fixture is
@@ -728,42 +766,203 @@ fn used_models<'a>(
 /// claim would punish a database for being honest about what it does not know. `--force` lets a
 /// specific pairing through with a line saying so, because a user who re-measured on another rig may
 /// well want it, and it is their call once it is spelled out to them.
-fn fixture_guard(models: &Database, model: &Model, force: bool) -> Result<(), Error> {
+///
+/// `recipe_fixture` is the rig a `--target-preset` says its own baseline was defined on, and it is
+/// `None` unless a recipe was actually passed. It replaces the database's entry rather than merging
+/// with it: for this run the recipe *is* the target, so a guard that kept consulting
+/// `target_fixtures` would certify a pairing it had never looked at — the whole point of the recipe
+/// is that it brings its own curve.
+///
+/// The two cases must not be collapsed into one `Option`, because the second use below reads
+/// "was the target replaced" and a database that *does* record its target fixtures would then look
+/// like a replacement on every ordinary run — which would silence the `fixture_conflict_ok`
+/// exemption for exactly the shipped models that carry it, and refuse the program's default path.
+fn fixture_guard(
+    models: &Database,
+    model: &Model,
+    recipe_fixture: Option<hypreq::fixture::Fixture>,
+    force: bool,
+) -> Result<(), Error> {
     use hypreq::fixture::{pair, Pairing};
-    let target = models.target_fixtures.get(&model.target_name).copied();
+    // The recipe wins outright. A database entry for the *replaced* target has nothing to say about
+    // a baseline that came from a file, and consulting it would let a stale entry vouch for a curve
+    // it was never measured against.
+    let target = recipe_fixture.or_else(|| models.target_fixtures.get(&model.target_name).copied());
     if pair(model.fixture, target) != Pairing::Different {
         return Ok(());
     }
     // A database can record that it inherited a pairing it cannot fix — which is the honest state of
     // every AutoEq-derived measurement equalised to a Harman target, the shipped three included.
     // The reason is in the file, so a person reading the database sees the decision; the guard's job
-    // is to make an *unrecorded* pairing loud rather than to overrule a recorded one.
-    if model.fixture_conflict_ok.is_some() {
+    // is to make an *unrecorded* pairing loud rather than to overrule a recorded one. A
+    // `fixture_conflict_ok` on the model is a record about the model's *shipped* target, so it does
+    // not vouch for a recipe the database has never seen.
+    if model.fixture_conflict_ok.is_some() && recipe_fixture.is_none() {
         return Ok(());
     }
     let measured = model.fixture.expect("a Different pairing has both sides");
     let defined = target.expect("a Different pairing has both sides");
+    let named = if recipe_fixture.is_some() {
+        format!(
+            "the --target-preset baseline (target '{}')",
+            model.target_name
+        )
+    } else {
+        format!("the target '{}'", model.target_name)
+    };
+    // The suggestion list has to match what the guard actually honours. A `--target-preset`
+    // mismatch is never unlocked by `fixture_conflict_ok` (see the exemption above), so
+    // recommending that route from a preset refusal would send the user down a path the code has
+    // just refused to walk.
+    let routes = if recipe_fixture.is_some() {
+        String::from(
+            "Pick a preset whose 'fixture' matches the capture, correct the model's recorded \
+             fixture, or pass --force to equalise anyway. 'fixture_conflict_ok' vouches for the \
+             model's shipped target, never for a recipe chosen at the command line.",
+        )
+    } else {
+        format!(
+            "Choose a target recorded for {}, record the target's real fixture in \
+             'target_fixtures', record the pairing on the model with 'fixture_conflict_ok' and its \
+             reason, or pass --force to equalise anyway.",
+            measured.key()
+        )
+    };
     let message = format!(
-        "'{}' was measured on {} (fixture: {}), but the target '{}' was defined on {} \
+        "'{}' was measured on {} (fixture: {}), but {named} was defined on {} \
          (fixture: {}). Different fixtures present different acoustic transfer impedances, so this \
          filter would be fitting one rig's curve onto another's; a target is not portable between \
-         them. Choose a target recorded for {}, record the target's real fixture in \
-         'target_fixtures', record the pairing on the model with 'fixture_conflict_ok' and its \
-         reason, or pass --force to equalise anyway. Note that a published curve for one fixture has \
-         no free equivalent for another, which is why the shipped models carry that record.",
+         them. {routes} Note that a published curve for one fixture has no free equivalent for \
+         another, which is why the shipped models carry that record.",
         model.key,
         measured,
         measured.key(),
-        model.target_name,
         defined,
         defined.key(),
-        measured.key(),
     );
     if force {
         println!("  [Note] {message}");
         Ok(())
     } else {
         usage_error(message)
+    }
+}
+
+/// Refuse an empirical rig translation that does not describe this measurement and this target.
+///
+/// A [`RigCalibration`](hypreq::fixture::RigCalibration) is not a filter, it is a *statement about
+/// how two rigs differ for one class of headphone*: `delta_mean_db` is the response of the same
+/// units on the target rig minus their response on the source rig, stratified by acoustic class.
+/// Three things therefore have to line up before subtracting it from a correction is meaningful, and
+/// none of them was checked: the rig the measurement came from (`source`), the rig the target curve
+/// is defined on (`target`), and the construction the delta was averaged over (`acoustic_class`).
+/// A translation that mismatches any of the three still produces a smooth, plausible curve — it is
+/// simply the correction for some other headphone on some other rig, which is the failure mode this
+/// program's whole design exists to avoid.
+///
+/// A side that records nothing is [`Pairing::Unknown`], not a passed check: the run continues and
+/// says so, because refusing on the absence of a claim would make the honest database the one that
+/// fails. A side that records something contradictory is refused, and `--force` overrides it with a
+/// line saying which pairing was overridden and why it was objected to — the override is reported,
+/// never silent.
+fn rig_calibration_guard(
+    model: &Model,
+    target_fixture: Option<hypreq::fixture::Fixture>,
+    cal: &hypreq::fixture::RigCalibration,
+    force: bool,
+) -> Result<(), Error> {
+    use hypreq::fixture::{pair, AcousticClass, Pairing};
+    let mut complaints: Vec<String> = Vec::new();
+    let mut unverified: Vec<String> = Vec::new();
+
+    // (a) the rig the measurement was made on has to be the rig the delta starts from, and the rig
+    // the target curve is defined on has to be the rig the delta lands on.
+    for (label, recorded, theirs, said) in [
+        ("source", model.fixture, cal.source, "measured"),
+        ("target", target_fixture, cal.target, "defined"),
+    ] {
+        match pair(recorded, Some(theirs)) {
+            // `Different` proves both sides recorded something, so no `unwrap_or` hedge is needed.
+            Pairing::Different => {
+                let mine = recorded.expect("a Different pairing has both sides").key();
+                let theirs = theirs.key();
+                complaints.push(format!(
+                    "its '{label}' is {theirs}, but this run's curve was {said} on {mine} — the \
+                     translation subtracts the difference between {theirs} and {mine}, which is not \
+                     the difference that applies to a curve {said} on {mine}"
+                ));
+            }
+            Pairing::Unknown => {
+                let theirs = theirs.key();
+                unverified.push(format!(
+                    "its '{label}' is {theirs}, while this run's curve has no fixture recorded on \
+                     which it was {said}, so that half of the pairing could not be checked"
+                ));
+            }
+            Pairing::Same | Pairing::Adjacent => {}
+        }
+    }
+
+    // (b) the delta is an average over a construction; an open-back leak path is not a sealed one.
+    match (model.acoustic_class, cal.acoustic_class) {
+        (AcousticClass::Unknown, _) | (_, AcousticClass::Unknown) => unverified.push(format!(
+            "the calibration is stratified by acoustic class ({}), and {} one, so the class was not \
+             checked",
+            class_name(cal.acoustic_class),
+            if model.acoustic_class == AcousticClass::Unknown {
+                "this model records no"
+            } else {
+                "the calibration records no"
+            }
+        )),
+        (mine, theirs) if mine != theirs => complaints.push(format!(
+            "its 'acoustic_class' is {}, but this model is {} — a rig-to-rig delta is an average \
+             over one construction, and the leak path of one does not transfer to the other",
+            class_name(theirs),
+            class_name(mine)
+        )),
+        _ => {}
+    }
+
+    if complaints.is_empty() {
+        for line in unverified {
+            println!(
+                "  [Note] --rig-calibration {} -> {}: {line}. Pass --rig-calibration for a rig you \
+                 measured yourself, or record the fixture/acoustic_class on the model to have this \
+                 checked.",
+                cal.source.key(),
+                cal.target.key()
+            );
+        }
+        return Ok(());
+    }
+    let message = format!(
+        "--rig-calibration '{}' -> '{}' does not describe '{}': {}. It is an empirical statement \
+         about how two rigs differ for one class of headphone, not a filter: subtracting one that \
+         describes another pairing leaves a smooth curve that answers a different question. Fix the \
+         calibration's source/target/acoustic_class, leave 'rig_calibration' out of the model, or \
+         pass --force to apply it anyway.",
+        cal.source.key(),
+        cal.target.key(),
+        model.key,
+        complaints.join("; ")
+    );
+    if force {
+        println!("  [Note] {message}");
+        Ok(())
+    } else {
+        usage_error(message)
+    }
+}
+
+/// A class name a person can act on, rather than `Debug` on a unit variant.
+fn class_name(class: hypreq::fixture::AcousticClass) -> &'static str {
+    use hypreq::fixture::AcousticClass as C;
+    match class {
+        C::OpenBack => "open_back",
+        C::ClosedBack => "closed_back",
+        C::InEar => "in_ear",
+        C::Unknown => "unknown",
     }
 }
 
@@ -775,9 +974,10 @@ const OUT_BITS: [i64; 4] = [16, 24, 32, 64];
 /// Quoted value, quoted choices: that is what a current interpreter prints for a list of
 /// strings (`repr(str(choice))`), and it is what the oldest ones printed too. CPython changed
 /// the quoting of this message twice and reverted one of the changes, so the quote characters
-/// here match some patch levels and not others; `scripts/parity.py --selftest` documents the
-/// table and the harness ignores quoting inside this one message, so every interpreter from 3.10
-/// on compares equal on content. Do not "fix" the quoting to chase a specific patch release.
+/// here match some patch levels and not others; `docs/SETUP.md` records the table of spellings.
+/// The wording is pinned by the usage tests in `tests/cli_report.rs`, and the content — flag name,
+/// phrase, value, choice set, exit code — is what they assert. Do not "fix" the quoting to chase a
+/// specific patch release.
 fn validate_choice(value: &str, choices: &[&str], flag: &str) {
     if !choices.contains(&value) {
         let list = choices
@@ -912,7 +1112,8 @@ fn run_model(
 
     let title = figure_title(model, notch_mode);
 
-    let (active_ctrl, reg_lines) = corrected_curve(model, args)?;
+    let stages = corrected_curve_stages(model, args)?;
+    let (active_ctrl, reg_lines) = stages.shared;
 
     let f64_wav = format!("{prefix}_f64_{rate_tag}.wav");
     let mono_rt = format!("{prefix}_mastering_mono_{rate_tag}.wav");
@@ -985,7 +1186,7 @@ fn run_model(
     // response, and one impulse response is what gets loaded on both channels — so the argument
     // phase has already refused it and only `report` can arrive.
     if stereo_mode(args) != hypreq::stereo::Mode::Off {
-        let (lines, _) = stereo_pair(model, args, &active_ctrl, stereo_mode(args))?;
+        let (lines, _) = stereo_pair(model, args, &stages.pre_cap, stereo_mode(args))?;
         for line in lines {
             println!("{line}");
         }
@@ -1238,7 +1439,7 @@ fn run_audio_wav_mode(
     // reader already knows which model and which notch policy the knots belong to. Some for
     // exactly the path that needs it: a model, and the EQ not bypassed.
     let regularized = match model_cfg {
-        Some(m) if !args.bypass_eq => Some(corrected_curve(m, args)?),
+        Some(m) if !args.bypass_eq => Some(corrected_curve_stages(m, args)?),
         _ => None,
     };
 
@@ -1247,8 +1448,8 @@ fn run_audio_wav_mode(
     // the curve `off` would have synthesized. Computed once, before the banner, because printing it
     // later would put the answer above the question.
     let ears_block = match (model_cfg, regularized.as_ref()) {
-        (Some(m), Some((ctrl, _))) if stereo_mode(args) != hypreq::stereo::Mode::Off => {
-            Some(stereo_pair(m, args, ctrl, stereo_mode(args))?)
+        (Some(m), Some(stages)) if stereo_mode(args) != hypreq::stereo::Mode::Off => {
+            Some(stereo_pair(m, args, &stages.pre_cap, stereo_mode(args))?)
         }
         _ => None,
     };
@@ -1274,8 +1475,8 @@ fn run_audio_wav_mode(
         );
     }
     println!("{}", "=".repeat(80));
-    if let Some((_, lines)) = regularized.as_ref() {
-        for line in lines {
+    if let Some(stages) = regularized.as_ref() {
+        for line in &stages.shared.1 {
             println!("{line}");
         }
     }
@@ -1296,7 +1497,7 @@ fn run_audio_wav_mode(
     let mut applied_ir: Option<(Vec<f64>, f64)> = None;
 
     let eq_inputs = match (model_cfg, regularized) {
-        (Some(model), Some((active_ctrl, _))) => Some((model, active_ctrl)),
+        (Some(model), Some(stages)) => Some((model, stages.shared.0)),
         _ => None,
     };
 
@@ -1598,42 +1799,70 @@ fn regularized_ctrl(model: &Model, args: &Args) -> CurveAndReport {
         return (model.ctrl_pts.clone(), Vec::new());
     }
     let f: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
-    let g: Vec<f64> = model.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+    let g: Vec<f64> = model
+        .raw_pts
+        .iter()
+        .map(|p| hypreq::model::point_gain(p))
+        .collect();
     let policy = match arg {
         RegularizeArg::Auto => hypreq::fit::Policy::auto(&f, &g),
         RegularizeArg::Fixed(knee) => hypreq::fit::Policy::fixed(knee),
         RegularizeArg::Off => return (model.ctrl_pts.clone(), Vec::new()),
     };
     let done = model.regularize(&policy);
-    let mut lines = vec![format!(
-        "=== Regularization (knee {:.2} dB of deviation, {}) ===",
-        policy.lambda_db,
-        done.describe()
-    )];
     if done.curve().is_empty() {
-        lines.push("  Curve           : unchanged".to_string());
-        return (model.ctrl_pts.clone(), lines);
+        return (
+            model.ctrl_pts.clone(),
+            vec![
+                regularization_banner(&policy, done.describe()).to_string(),
+                "  Curve           : unchanged".to_string(),
+            ],
+        );
     }
     let curve = done.curve().to_vec();
-    // The plain curve read at the regularized knot's frequency: the two share frequencies on both
-    // paths (the knots themselves, or the measurement grid the knots were derived on), and a PCHIP
-    // passes through its own nodes, so this reads the exact old value. One interpolant for the
-    // whole curve — building it inside the loop made the report quadratic in the knot count.
-    let plain_f: Vec<f64> = model.ctrl_pts.iter().map(|&(x, _)| x).collect();
-    let plain_g: Vec<f64> = model.ctrl_pts.iter().map(|&(_, y)| y).collect();
+    let lines = regularization_lines(&policy, &model.ctrl_pts, &curve, done.describe());
+    (curve, lines)
+}
+
+/// The heading every regularization block shares, so both paths print the same banner.
+#[must_use]
+fn regularization_banner(policy: &hypreq::fit::Policy, describe: &str) -> String {
+    format!(
+        "=== Regularization (knee {:.2} dB of deviation, {describe}) ===",
+        policy.lambda_db
+    )
+}
+
+/// What the policy did to `curve`, measured against `plain` — the same derivation with the policy
+/// off. Shared by the two paths that can regularize: the plain one, where `plain` is the model's
+/// shipped knots, and the target one, where it is this run's own unregularized derivation. One
+/// sentence, one meaning, whichever way the curve arrived.
+#[must_use]
+fn regularization_lines(
+    policy: &hypreq::fit::Policy,
+    plain: &[(f64, f64)],
+    curve: &[(f64, f64)],
+    describe: &str,
+) -> Vec<String> {
+    let mut lines = vec![regularization_banner(policy, describe)];
+    // Read `plain` at the regularized curve's own frequencies: a PCHIP passes through its nodes, so
+    // when the two share a grid this is the exact old value. One interpolant for the whole curve —
+    // building it inside the loop made the report quadratic in the knot count.
+    let plain_f: Vec<f64> = plain.iter().map(|&(x, _)| x).collect();
+    let plain_g: Vec<f64> = plain.iter().map(|&(_, y)| y).collect();
     let plain_curve = hypreq::pchip::Pchip::new(&plain_f, &plain_g);
 
     let mut worst_db = 0.0f64;
     let mut worst_hz = 0.0f64;
     let mut moved = 0usize;
     let (mut was_at_worst, mut now_at_worst) = (0.0f64, 0.0f64);
-    for &(hz, gain) in &curve {
-        let plain = plain_curve.eval(hz);
-        let delta = gain - plain;
+    for &(hz, gain) in curve {
+        let before = plain_curve.eval(hz);
+        let delta = gain - before;
         if delta.abs() > worst_db.abs() {
             worst_db = delta;
             worst_hz = hz;
-            was_at_worst = plain;
+            was_at_worst = before;
             now_at_worst = gain;
         }
         if delta.abs() >= 0.005 {
@@ -1647,7 +1876,7 @@ fn regularized_ctrl(model: &Model, args: &Args) -> CurveAndReport {
             "  Knots moved     : 0 of {} (every band sits under the knee)",
             curve.len()
         ));
-        return (curve, lines);
+        return lines;
     }
     lines.push(format!(
         "  Knots moved     : {moved} of {} (largest {worst_db:+.2} dB @ {worst_hz:.0} Hz)",
@@ -1656,7 +1885,28 @@ fn regularized_ctrl(model: &Model, args: &Args) -> CurveAndReport {
     lines.push(format!(
         "  Extreme shifted : {was_at_worst:+.2} dB -> {now_at_worst:+.2} dB at that knot"
     ));
-    (curve, lines)
+    lines
+}
+
+/// The `--regularize` policy for this run, or `None` when the flag is off.
+fn regularization_policy(
+    args: &Args,
+    raw_pts: &[hypreq::model::Point],
+) -> Option<hypreq::fit::Policy> {
+    // Validated in the argument phase, where a bad value becomes a usage error; `Off` is the
+    // fallback rather than a panic so this stays total.
+    match regularize_arg(&args.regularize).unwrap_or(RegularizeArg::Off) {
+        RegularizeArg::Off => None,
+        RegularizeArg::Fixed(knee) => Some(hypreq::fit::Policy::fixed(knee)),
+        RegularizeArg::Auto => {
+            let f: Vec<f64> = raw_pts.iter().map(|p| p[0]).collect();
+            let g: Vec<f64> = raw_pts
+                .iter()
+                .map(|p| hypreq::model::point_gain(p))
+                .collect();
+            Some(hypreq::fit::Policy::auto(&f, &g))
+        }
+    }
 }
 
 /// The fixture parameters a re-derivation has to reuse, so a target edit does not also silently
@@ -1806,6 +2056,11 @@ fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
                 (f.is_finite() && f > 0.0 && g.is_finite()).then_some((f, g))
             })
             .collect();
+        // Sorted, last write winning, before anything interpolates it. A target CSV is hand-edited
+        // and comes in whatever order the author's spreadsheet had; `Pchip::new` normalizes too, but
+        // the count below has to be counted after deduplication or a file of two rows at the same
+        // frequency passes as a curve.
+        baseline = hypreq::model::sort_and_dedup_pairs(&baseline);
         if baseline.len() < 2 {
             return Err(Error::msg(format!(
                 "--target-csv '{}' holds fewer than two usable points",
@@ -1815,17 +2070,22 @@ fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
     }
     if let Some(path) = args.target_preset.as_ref() {
         let preset = load_target_preset(path)?;
-        baseline = preset.baseline;
+        // Same rule for a recipe's `baseline_csv`: it is a file on disk like any other.
+        baseline = hypreq::model::sort_and_dedup_pairs(&preset.baseline);
         if args.target_family == "harman" {
             family = preset.family;
         }
-        if args.target_bass == 0.0 {
+        // A preset fills in the trims the user did not name. It is not allowed to overwrite one
+        // they did, and `0.0` is one they did: a flat shelf is a decision a rig recipe gets to
+        // make and a user gets to take back, so "was it named" is carried in the `Option` rather
+        // than inferred from the value being indistinguishable from the default.
+        if args.target_bass.is_none() {
             params.theta_bass = preset.params.theta_bass;
         }
-        if args.target_mid == 0.0 {
+        if args.target_mid.is_none() {
             params.theta_mid = preset.params.theta_mid;
         }
-        if args.target_tilt == 0.0 {
+        if args.target_tilt.is_none() {
             params.theta_tilt = preset.params.theta_tilt;
         }
         preset_info = Some(format!(
@@ -1854,56 +2114,145 @@ fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
 
 fn groundwork_target_params(args: &Args) -> hypreq::target::TargetParams {
     hypreq::target::TargetParams {
-        theta_bass: args.target_bass,
-        theta_mid: args.target_mid,
-        theta_tilt: args.target_tilt,
+        theta_bass: args.target_bass.unwrap_or(0.0),
+        theta_mid: args.target_mid.unwrap_or(0.0),
+        theta_tilt: args.target_tilt.unwrap_or(0.0),
     }
 }
 
+/// Did the user ask for the parameterized target rather than the database's own?
+///
+/// Naming one of the three trims counts even when the number is `0.0` — typing the flag is the
+/// request — which is why the flags carry an `Option` and this cannot be written as a value test.
 fn target_extension_active(args: &Args) -> bool {
     args.target_family != "harman"
-        || args.target_bass != 0.0
-        || args.target_mid != 0.0
-        || args.target_tilt != 0.0
+        || args.target_bass.is_some()
+        || args.target_mid.is_some()
+        || args.target_tilt.is_some()
         || args.iso226_table.is_some()
         || args.target_csv.is_some()
         || args.target_preset.is_some()
 }
 
 /// Re-derive the control curve from `raw` against the (possibly edited) target.
+/// The control curve derived from the active target, and the report lines describing what
+/// `--regularize` did to *that* curve (empty when the flag is off).
+///
+/// The curve and its own description leave together on purpose: an earlier version returned a curve
+/// and let the caller keep regularization lines that had been computed against the model's shipped
+/// knots, so with `--target-csv` or `--ensemble-csv` the report described a curve that was thrown
+/// away a few statements later.
 fn derive_with_target(
     model: &Model,
     args: &Args,
     raw_override: Option<&[(f64, f64)]>,
     ctx: &TargetContext,
-) -> Result<Vec<(f64, f64)>, Error> {
+) -> Result<CurveAndReport, Error> {
     let (taper, bypass, discount) = derivation_params(model);
-    let f_t: Vec<f64> = ctx.baseline.iter().map(|p| p.0).collect();
-    let mut target: Vec<(f64, f64)> = ctx.baseline.clone();
-    if target_extension_active(args) {
-        let vals = hypreq::target::evaluate_target(&ctx.baseline, &f_t, ctx.family, ctx.params);
-        target = f_t.iter().copied().zip(vals).collect();
-    }
-    if let (Some(phon), Some(path)) = (args.listen_spl, args.iso226_table.as_ref()) {
-        let table = hypreq::target::Iso226Table::from_json_file(path)
-            .map_err(|e| Error::msg(format!("--iso226-table: {e}")))?;
-        let delta = table.contour_delta_db(&f_t, phon, 65.0);
-        for ((_, g), d) in target.iter_mut().zip(delta) {
-            *g += d;
-        }
-    }
     let raw: Vec<Vec<f64>> = match raw_override {
         Some(curve) => curve.iter().map(|&(f, g)| vec![f, g]).collect(),
         None => model.raw_pts.clone(),
     };
-    Ok(hypreq::model::derive_ctrl_pts_from_raw(
+    let f_raw: Vec<f64> = raw.iter().map(|p| p[0]).collect();
+    let f_t: Vec<f64> = ctx.baseline.iter().map(|p| p.0).collect();
+    let g_t: Vec<f64> = ctx.baseline.iter().map(|p| p.1).collect();
+
+    // The target is sampled where the fit will read it, not where the baseline file happens to have
+    // rows. `--target-baseline` CSVs are often three rows (20 / 1000 / 20000 Hz), and both things
+    // that get added to a baseline are functions of frequency, not of those rows: the parameterized
+    // deviation (whose 105 Hz shelf and 2500 Hz bell live entirely between them) and an ISO 226
+    // contour. Sampled at the baseline's own knots they collapsed to straight lines between three
+    // points and the shelf vanished; sampled on the merged grid they survive whatever the file's
+    // row spacing is. The grid is a superset of the baseline knots, so nothing is lost — a PCHIP
+    // passes through its own nodes — and every point added is one the inversion was going to
+    // interpolate onto anyway.
+    let grid = target_query_grid(&f_t, &f_raw);
+    let mut target: Vec<(f64, f64)> = if target_extension_active(args) {
+        let vals = hypreq::target::evaluate_target(&ctx.baseline, &grid, ctx.family, ctx.params);
+        grid.iter().copied().zip(vals).collect()
+    } else {
+        let baseline = hypreq::pchip::Pchip::new(&f_t, &g_t);
+        grid.iter().map(|&f| (f, baseline.eval(f))).collect()
+    };
+    if let (Some(phon), Some(path)) = (args.listen_spl, args.iso226_table.as_ref()) {
+        let table = hypreq::target::Iso226Table::from_json_file(path)
+            .map_err(|e| Error::msg(format!("--iso226-table: {e}")))?;
+        // Read at the target curve's own frequencies: a contour is a function of frequency, and
+        // pairing it with a different axis than the one it was evaluated on would shift it.
+        let f_target: Vec<f64> = target.iter().map(|p| p.0).collect();
+        let delta = table.contour_delta_db(&f_target, phon, 65.0);
+        for ((_, g), d) in target.iter_mut().zip(delta) {
+            *g += d;
+        }
+    }
+
+    // `--regularize` acts on the curve this run actually derives, so it cannot be overwritten by the
+    // derivation. The unregularized pass is kept as the baseline for the report, which is the only
+    // way the numbers printed describe the curve that ships.
+    let plain = hypreq::model::derive_ctrl_pts_from_raw(
         &raw,
         &target,
         model.harm_offset,
         taper,
         bypass,
         discount,
-    ))
+    );
+    let Some(policy) = regularization_policy(args, &raw) else {
+        return Ok((plain, Vec::new()));
+    };
+    let done = hypreq::model::derive_ctrl_pts_from_raw_regularized(
+        &raw,
+        &target,
+        model.harm_offset,
+        taper,
+        bypass,
+        discount,
+        &policy,
+    );
+    let lines = regularization_lines(
+        &policy,
+        &plain,
+        &done,
+        // Wording taken from the type that reports the plain path, so the two can say different
+        // things only if the paths genuinely differ.
+        hypreq::model::Regularized::Derived(Vec::new()).describe(),
+    );
+    Ok((done, lines))
+}
+
+/// Frequencies to evaluate a target on: both input axes plus a 1/48-octave log grid across their
+/// overlap, deduplicated and ascending.
+///
+/// 48 points per octave is the density the fitting grid already uses, so this samples the target at
+/// least as finely as the filter will be built from it, and it stays under a thousand points for any
+/// audio band.
+#[must_use]
+fn target_query_grid(f_t: &[f64], f_raw: &[f64]) -> Vec<f64> {
+    const POINTS_PER_OCTAVE: f64 = 48.0;
+    const MAX_GRID: usize = 4096;
+    let mut grid: Vec<f64> = f_t
+        .iter()
+        .chain(f_raw.iter())
+        .copied()
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .collect();
+    if grid.is_empty() {
+        return grid;
+    }
+    grid.sort_by(|a, b| a.total_cmp(b));
+    grid.dedup();
+    let lo = grid[0];
+    let hi = grid[grid.len() - 1];
+    if hi > lo {
+        let steps = ((hi / lo).log2() * POINTS_PER_OCTAVE).ceil() as usize;
+        for i in 0..=steps.min(MAX_GRID) {
+            let t = i as f64 / steps.max(1) as f64;
+            grid.push(lo * (hi / lo).powf(t));
+        }
+        grid.sort_by(|a, b| a.total_cmp(b));
+        grid.dedup();
+    }
+    grid
 }
 
 /// Result of collapsing repeated placement measurements.
@@ -1928,27 +2277,55 @@ fn normalize_ensemble_curve(raw: &[(f64, f64)]) -> Vec<(f64, f64)> {
     }
 }
 
-fn ensemble_stage(args: &Args) -> Result<Option<EnsembleOutcome>, Error> {
-    if args.ensemble_csv.is_empty() {
-        return Ok(None);
-    }
-    let mut curves: Vec<Vec<(f64, f64)>> = Vec::new();
-    for path in &args.ensemble_csv {
-        let rows = hypreq::model::load_csv_points(path)
-            .map_err(|e| Error::msg(format!("--ensemble-csv '{}': {e}", path.display())))?;
-        let pts: Vec<(f64, f64)> = rows
-            .iter()
+/// Collapse repeated placement measurements into one robust curve.
+///
+/// The placements come from `--ensemble-csv` when that flag names any file, and otherwise from the
+/// curves the selected model records in the database (`raw_ensemble` / `raw_csvs`, which
+/// [`hypreq::model`] has already resolved to points). Both sources carry rows that may hold two
+/// ears, so both go through [`hypreq::model::point_gain`] — scoring a `[freq, L, R]` row by its
+/// last column would fold one ear into the median of the ensemble.
+///
+/// Spread needs at least two curves. A model recording one placement — or none, which is every
+/// database shipped so far — returns `None` and the run proceeds on the single raw curve, exactly
+/// as it did before the key existed; a recorded ensemble whose points are all unusable is the same
+/// `None`, because nothing the user asked for is being dropped.
+fn ensemble_stage(
+    args: &Args,
+    recorded: &[Vec<hypreq::model::Point>],
+) -> Result<Option<EnsembleOutcome>, Error> {
+    let usable = |rows: &[hypreq::model::Point]| -> Vec<(f64, f64)> {
+        rows.iter()
             .filter_map(|p| {
                 let f = *p.first()?;
-                let g = *p.last()?;
+                let g = hypreq::model::point_gain(p);
                 (f.is_finite() && f > 0.0 && g.is_finite()).then_some((f, g))
             })
-            .collect();
-        if pts.len() >= 2 {
-            curves.push(pts);
+            .collect()
+    };
+    let mut curves: Vec<Vec<(f64, f64)>> = Vec::new();
+    let from = if args.ensemble_csv.is_empty() {
+        for rows in recorded {
+            let pts = usable(rows);
+            if pts.len() >= 2 {
+                curves.push(pts);
+            }
         }
-    }
+        "the model database"
+    } else {
+        for path in &args.ensemble_csv {
+            let rows = hypreq::model::load_csv_points(path)
+                .map_err(|e| Error::msg(format!("--ensemble-csv '{}': {e}", path.display())))?;
+            let pts = usable(&rows);
+            if pts.len() >= 2 {
+                curves.push(pts);
+            }
+        }
+        "--ensemble-csv"
+    };
     if curves.is_empty() {
+        if args.ensemble_csv.is_empty() {
+            return Ok(None);
+        }
         return Err(Error::msg("--ensemble-csv: no CSV held two usable points"));
     }
     let f_min = curves
@@ -1968,7 +2345,7 @@ fn ensemble_stage(args: &Args) -> Result<Option<EnsembleOutcome>, Error> {
         hypreq::robust_fit::EnsembleMode::Median
     };
     let stats = hypreq::robust_fit::analyze_ensemble(&curves, &grid, Some(1.0 / 6.0), mode, 400)
-        .ok_or_else(|| Error::msg("--ensemble-csv: could not resample the placement curves"))?;
+        .ok_or_else(|| Error::msg(format!("{from}: could not resample the placement curves")))?;
     let raw = normalize_ensemble_curve(
         &stats
             .f_hz
@@ -1995,6 +2372,7 @@ fn ensemble_stage(args: &Args) -> Result<Option<EnsembleOutcome>, Error> {
             stats.count,
             grid.len()
         ),
+        format!("  Source          : placement curves read from {from}"),
         format!("  Max sigma_r     : {worst}"),
         format!(
             "  CI_95 width     : {:.2} dB (whole-curve bootstrap)",
@@ -2048,10 +2426,31 @@ fn global_fit_stage(
         .zip(&rig_term)
         .map(|(&r, &s)| (r * r + s * s).sqrt())
         .collect();
+    // The distortion ceiling is stated in absolute SPL, so the calibration term it needs is the
+    // headphone's own response R(f) — which `Model::raw_pts` already carries, normalised to 0 dB
+    // at 1 kHz by the loader. Handing `q_max_bounds` zeros instead was not a neutral default: it
+    // over-allows by R(f) wherever the driver is already sensitive. A model with no raw curve has
+    // no calibration to contribute, and zeros are the honest answer there.
+    let listen_spl = args.listen_spl.unwrap_or(85.0);
+    let h_cal: Vec<f64> = if model.raw_pts.len() >= 2 {
+        let (fr, gr): (Vec<f64>, Vec<f64>) = model
+            .raw_pts
+            .iter()
+            .map(|p| (p[0], hypreq::model::point_gain(p)))
+            .unzip();
+        hypreq::fft::interp_grid(&f, &fr, &gr)
+    } else {
+        vec![0.0; k]
+    };
     let q_max = match model.distortion.as_ref() {
-        Some(d) => d.q_max_bounds(&f, &vec![0.0; k], args.listen_spl.unwrap_or(85.0), 3.0, 6.0),
+        Some(d) => d.q_max_bounds(&f, &h_cal, listen_spl, 3.0, 6.0),
         None => vec![6.0; k],
     };
+    // Counted before `q_max` moves into the solver: the report has to say how much of the band the
+    // ceiling actually binds, or a reader cannot tell a bound from a coincidence.
+    let ceiling_sweeps = model.distortion.as_ref().map_or(0, |d| d.sweeps.len());
+    let ceiling_bins = q_max.iter().filter(|q| **q < 6.0 - 1e-9).count();
+    let r_peak = h_cal.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let input = hypreq::global_fit::GlobalFitInput {
         f_hz: f.clone(),
         raw_error_db: err,
@@ -2071,7 +2470,7 @@ fn global_fit_stage(
         .copied()
         .zip(res.q_db.iter().copied())
         .collect();
-    let lines = vec![
+    let mut lines = vec![
         "=== Global Curvature-Constrained Fit ===".to_string(),
         format!(
             "  Grid / iterations: {} bins / {} ({})",
@@ -2086,6 +2485,37 @@ fn global_fit_stage(
         "  Weights          : w = 1 / (sigma_r^2 + sigma_rig^2), ERB density, floor 0.30 dB"
             .to_string(),
     ];
+    if ceiling_sweeps > 0 {
+        lines.push(format!(
+            "  Boost ceiling    : {ceiling_sweeps} sweeps, L_max at >3% THD, {ceiling_bins} of {k} bins limited (R(f) peak {r_peak:+.1} dB, listen {listen_spl:.0} dB)",
+        ));
+    }
+    // A database that records `"excursion"` expects an answer about it, which until now it never
+    // got: the field was parsed and dropped. It is spent here on a report line rather than on the
+    // solver's box, for the reason [`hypreq::driver::ExcursionModel::margins_db`] gives — the
+    // 12 dB-per-octave debt is a first-order rule whose rate depends on the alignment, so it can
+    // tell the operator that a sub-bass boost is ambitious without silently zeroing a filter. The
+    // measured distortion envelope above is what binds. And it is judged against the curve the fit
+    // delivered, not the curve it was asked for: a ceiling on demand the filter does not place
+    // would be fiction.
+    if let Some(exc) = model.excursion.as_ref() {
+        let margins = exc.margins_db(&f, &res.q_db, &h_cal, listen_spl);
+        let short = margins.iter().filter(|m| **m < 0.0).count();
+        let worst = margins
+            .iter()
+            .zip(&f)
+            .filter(|(m, _)| m.is_finite())
+            .min_by(|a, b| a.0.total_cmp(b.0));
+        let detail = match worst {
+            Some((m, &wf)) => format!("worst {m:+.2} dB at {}", hypreq::assess::band_name(wf)),
+            None => "no finite margin to quote".to_string(),
+        };
+        lines.push(format!(
+            "  Excursion screen : {short} of {k} bins short of X_max at {listen_spl:.0} dB listen \
+             (fs {:.0} Hz, X_max at {:.0} dB SPL) — {detail}; a screen, not a bound on the fit",
+            exc.fs_hz, exc.ref_xmax_spl_db
+        ));
+    }
     Ok((out, lines))
 }
 
@@ -2170,29 +2600,44 @@ fn synth_stage(
 /// metadata forbids: the regularizer shrinks toward a bypass by the *measurement's* deviation, and
 /// has no idea what `safe_cap_db` says about this model's notch.
 ///
-/// The groundwork flags are all opt-in: with none of them set this returns the same
-/// `(model.ctrl_pts, empty lines)` as before, so the parity report stays byte-identical.
-fn corrected_curve(model: &Model, args: &Args) -> Result<CurveAndReport, Error> {
-    let (mut base_ctrl, mut reg_lines) = regularized_ctrl(model, args);
+/// The groundwork flags are all opt-in: with none of them set — and with no ensemble recorded in
+/// the model — this returns the same `(model.ctrl_pts, empty lines)` as before, which is what
+/// `regularize_off_hands_back_the_models_own_curve` and `groundwork_flags_are_all_off_by_default`
+/// hold shut.
+fn corrected_curve_stages(model: &Model, args: &Args) -> Result<FilterStages, Error> {
     let ctx = target_context(model, args)?;
-    let ensemble = ensemble_stage(args)?;
-    if let Some(e) = ensemble.as_ref() {
-        base_ctrl = derive_with_target(model, args, Some(&e.raw), &ctx)?;
-        reg_lines.extend(e.lines.iter().cloned());
+    let ensemble = ensemble_stage(args, &model.raw_ensemble)?;
+    // Which ever way the curve arrived, the lines that describe it travel with it. The target paths
+    // put their own block first and the regularization block after it, because the sentence "knots
+    // moved 12 of 480" only means anything once the reader knows which target the knots came from.
+    let (mut base_ctrl, mut reg_lines) = if let Some(e) = ensemble.as_ref() {
+        let (curve, regularized) = derive_with_target(model, args, Some(&e.raw), &ctx)?;
+        let mut lines = e.lines.clone();
+        lines.extend(regularized);
+        (curve, lines)
     } else if target_extension_active(args) {
-        base_ctrl = derive_with_target(model, args, None, &ctx)?;
-        reg_lines.push("=== Parameterized Target ===".to_string());
-        reg_lines.push(format!(
-            "  Family          : {} (bass {:+.2}, mid {:+.2}, tilt {:+.2} dB/oct)",
-            ctx.family_label, ctx.params.theta_bass, ctx.params.theta_mid, ctx.params.theta_tilt
-        ));
+        let (curve, regularized) = derive_with_target(model, args, None, &ctx)?;
+        let mut lines = vec![
+            "=== Parameterized Target ===".to_string(),
+            format!(
+                "  Family          : {} (bass {:+.2}, mid {:+.2}, tilt {:+.2} dB/oct)",
+                ctx.family_label,
+                ctx.params.theta_bass,
+                ctx.params.theta_mid,
+                ctx.params.theta_tilt
+            ),
+        ];
         if let Some(info) = ctx.preset_info.as_ref() {
-            reg_lines.push(format!("  Preset          : {info}"));
+            lines.push(format!("  Preset          : {info}"));
         }
         if args.target_csv.is_some() {
-            reg_lines.push("  Baseline        : replaced by --target-csv".to_string());
+            lines.push("  Baseline        : replaced by --target-csv".to_string());
         }
-    }
+        lines.extend(regularized);
+        (curve, lines)
+    } else {
+        regularized_ctrl(model, args)
+    };
 
     let calibration = match args.rig_calibration.as_ref() {
         Some(path) => Some(
@@ -2232,6 +2677,10 @@ fn corrected_curve(model: &Model, args: &Args) -> Result<CurveAndReport, Error> 
     base_ctrl = synth_ctrl;
     reg_lines.extend(synth_lines);
 
+    // The ceiling is applied here, once. Capping is not idempotent: `c * tanh(g / c) < g` for every
+    // positive `g`, however far below `c`, so a curve that goes through `apply_notch_mode` twice
+    // loses level twice inside the notch band. `--stereo split` therefore starts from `pre_cap`
+    // below and caps each ear itself rather than starting from this one.
     let active_ctrl = apply_notch_mode(
         &base_ctrl,
         notch_mode(args),
@@ -2239,7 +2688,29 @@ fn corrected_curve(model: &Model, args: &Args) -> Result<CurveAndReport, Error> 
         model.notch_range_hz,
     )
     .map_err(|e| Error::msg(e.0))?;
-    Ok((active_ctrl, reg_lines))
+    Ok(FilterStages {
+        shared: (active_ctrl, reg_lines),
+        pre_cap: base_ctrl,
+    })
+}
+
+/// The delivered filter, and the curve the notch ceiling was applied to.
+struct FilterStages {
+    /// What the convolver is loaded with: the derived curve with the ceiling applied once.
+    shared: CurveAndReport,
+    /// The same curve *before* the ceiling. A per-ear trim has to start here, because the ceiling
+    /// is the last word per ear and applying it twice is not applying it once.
+    pre_cap: Vec<(f64, f64)>,
+}
+
+/// The delivered filter alone, for callers that have no use for the pre-ceiling curve.
+///
+/// Test-only: every production path needs both stages (the report prints the shared filter, `--stereo
+/// split` needs the curve it was capped from), so this exists to keep the tests reading as one call
+/// rather than as `corrected_curve_stages(..).shared` everywhere.
+#[cfg(test)]
+fn corrected_curve(model: &Model, args: &Args) -> Result<CurveAndReport, Error> {
+    corrected_curve_stages(model, args).map(|stages| stages.shared)
 }
 
 /// Apply the experimental mixed-phase stage to a finished filter, keeping the report honest.
@@ -2385,7 +2856,11 @@ fn run_verification(
     // would stay in the design shortfall, which is never offset-corrected, and that number is meant
     // to describe a spectral decision rather than a headroom choice.
     let f_raw: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
-    let g_raw: Vec<f64> = model.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+    let g_raw: Vec<f64> = model
+        .raw_pts
+        .iter()
+        .map(|p| hypreq::model::point_gain(p))
+        .collect();
     let f_t: Vec<f64> = model.target_pts.iter().map(|p| p.0).collect();
     let g_t: Vec<f64> = model
         .target_pts
@@ -2506,7 +2981,11 @@ fn stereo_mode(args: &Args) -> hypreq::stereo::Mode {
 /// and the report says which one was used.
 fn trim_policy(model: &Model, args: &Args) -> (hypreq::fit::Policy, bool) {
     let f: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
-    let g: Vec<f64> = model.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+    let g: Vec<f64> = model
+        .raw_pts
+        .iter()
+        .map(|p| hypreq::model::point_gain(p))
+        .collect();
     match regularize_arg(&args.regularize).unwrap_or(RegularizeArg::Off) {
         RegularizeArg::Auto => (hypreq::fit::Policy::auto(&f, &g), false),
         RegularizeArg::Fixed(knee) => (hypreq::fit::Policy::fixed(knee), false),
@@ -2520,10 +2999,16 @@ fn trim_policy(model: &Model, args: &Args) -> (hypreq::fit::Policy, bool) {
 /// which is the point of separating "look" from "do". `split` builds the pair from the curve the
 /// single filter would have been built from, so `--regularize` and the notch ceiling are already in
 /// it, and the trim is the last thing to touch the centre curve before it is split.
+/// The ears block, and — for [`hypreq::stereo::Mode::Split`] — one filter per ear.
+///
+/// `base` is the shared curve *before* the notch ceiling (see [`FilterStages`]). The trim is applied
+/// to that and the ceiling is then applied once per ear, which is what makes an identical-ears model
+/// come out identical: `cap(trim(cap(x)))` compressed every positive knot twice, and so `--stereo
+/// split` changed even the shared filter, on a model where both ears measure the same.
 fn stereo_pair(
     model: &Model,
     args: &Args,
-    shared: &hypreq::stereo::Curve,
+    base: &hypreq::stereo::Curve,
     mode: hypreq::stereo::Mode,
 ) -> Result<(Vec<String>, Option<hypreq::stereo::CurvePair>), Error> {
     use hypreq::stereo::{self as st, Mode};
@@ -2548,15 +3033,19 @@ fn stereo_pair(
     }
 
     let (policy, borrowed) = trim_policy(model, args);
-    let t = st::trim(&ears, shared, &policy, args.stereo_max_skew);
-    let (gl, gr) = t.curves(shared);
+    let t = st::trim(&ears, base, &policy, args.stereo_max_skew);
+    let (gl, gr) = t.curves(base);
     // The ceiling is still the last word, ear by ear: `safe_cap_db` says what this model's metadata
     // allows where its concha null lives, and a trim that lifted one ear's fill past it would
     // re-open exactly what the cap keeps shut. Where it bites the pair's middle moves, and the
     // report says so — "the centre is held" is otherwise a sentence this code broke.
-    let (gl, cap_l) = cap_ear(&gl, args, model)?;
-    let (gr, cap_r) = cap_ear(&gr, args, model)?;
-    let t = t.with_cap_bites(cap_l + cap_r);
+    let (gl, bit_l) = cap_ear(&gl, args, model)?;
+    let (gr, bit_r) = cap_ear(&gr, args, model)?;
+    // Per-ear counts for the line that says which side was held, the union for the line that says
+    // how far the middle moved.
+    let cap_l = bit_l.iter().filter(|b| **b).count();
+    let cap_r = bit_r.iter().filter(|b| **b).count();
+    let t = t.with_cap_bites(centre_bites(&bit_l, &bit_r));
 
     let mut lines = st::report_lines(&m, ears.len(), Some(&t));
     lines.push(format!(
@@ -2582,12 +3071,15 @@ fn stereo_pair(
     Ok((lines, Some((gl, gr))))
 }
 
-/// One ear's curve through the notch ceiling, and how many knots the ceiling moved.
+/// One ear's curve through the notch ceiling, and a mask marking the knots the ceiling moved.
+///
+/// A mask and not a count because [`stereo_pair`] needs to know *which* knots bit: a knot the
+/// ceiling cut back on both ears moves the centre once, and two counts added together would say twice.
 fn cap_ear(
     curve: &hypreq::stereo::Curve,
     args: &Args,
     model: &Model,
-) -> Result<(hypreq::stereo::Curve, usize), Error> {
+) -> Result<(hypreq::stereo::Curve, Vec<bool>), Error> {
     let capped = apply_notch_mode(
         curve,
         notch_mode(args),
@@ -2595,12 +3087,22 @@ fn cap_ear(
         model.notch_range_hz,
     )
     .map_err(|e| Error::msg(e.0))?;
-    let moved = curve
+    let bit = curve
         .iter()
         .zip(&capped)
-        .filter(|(before, after)| before.1 != after.1)
-        .count();
-    Ok((capped, moved))
+        .map(|(before, after)| before.1 != after.1)
+        .collect();
+    Ok((capped, bit))
+}
+
+/// Knots where the notch ceiling cut at least one ear back, from the two [`cap_ear`] masks.
+///
+/// The per-ear counts answer "which side was held"; this answers "how many knots did the middle of
+/// the image move", and the two are not the same sum. A knot the ceiling clipped on both ears leaves
+/// the two ear curves equal there, so the centre sits at the ceiling and has moved by one knot's
+/// worth of decision, not two. Adding the counts instead reports a knot twice.
+fn centre_bites(left: &[bool], right: &[bool]) -> usize {
+    left.iter().zip(right).filter(|(l, r)| **l || **r).count()
 }
 
 /// `--apodize` / `--no-apodize` as a tri-state over the model's own default.
@@ -3188,11 +3690,46 @@ mod tests {
         assert_eq!(a.synth, "fir");
         assert_eq!(a.peq_bands, 8);
         assert_eq!(a.target_family, "harman");
-        assert_eq!(a.target_bass, 0.0);
-        assert_eq!(a.target_mid, 0.0);
-        assert_eq!(a.target_tilt, 0.0);
+        assert_eq!(a.target_bass, None);
+        assert_eq!(a.target_mid, None);
+        assert_eq!(a.target_tilt, None);
         assert!(a.listen_spl.is_none());
         assert!(a.iso226_table.is_none());
+    }
+
+    /// The three trims are `Option` rather than `f64` defaulted to `0.0`, and the difference only
+    /// shows when `0.0` is *typed*: an unnamed flag must stay `None` so a `--target-preset` can
+    /// fill it in, and a typed `0.0` must stay `Some(0.0)` so the preset cannot talk the user out
+    /// of a flat shelf. With a value-typed flag both states are the number `0.0` and the preset
+    /// always wins.
+    #[test]
+    fn naming_a_trim_at_zero_is_not_the_same_as_not_naming_it() {
+        let unnamed = argv(&["-H", "hd6xx"]);
+        assert_eq!(
+            (unnamed.target_bass, unnamed.target_mid, unnamed.target_tilt),
+            (None, None, None),
+            "an unnamed trim must stay unnamed"
+        );
+
+        let typed = argv(&[
+            "-H",
+            "hd6xx",
+            "--target-bass",
+            "0",
+            "--target-mid",
+            "0.0",
+            "--target-tilt",
+            "0.",
+        ]);
+        assert_eq!(
+            (typed.target_bass, typed.target_mid, typed.target_tilt),
+            (Some(0.0), Some(0.0), Some(0.0)),
+            "a typed zero must arrive as a decision, not as the default"
+        );
+        assert!(
+            target_extension_active(&typed),
+            "naming a trim is the request for the parameterized target, even at 0 dB"
+        );
     }
 
     #[test]
@@ -3332,6 +3869,91 @@ mod tests {
         assert!(csv_bass < bass, "baseline CSV should carry its own +4 dB, not the preset shelf: {csv_bass:.3} vs {bass:.3}");
     }
 
+    /// A rig recipe publishes shelf constants and the user is allowed to disagree with them —
+    /// including by asking for none of them. `--target-bass 0` used to be indistinguishable from
+    /// an unnamed flag (both were the number `0.0`), so the recipe's +6.4 dB shelf survived the
+    /// override and the only way to get a flat target out of a shelved recipe was to edit its
+    /// JSON. Typed zeros now have to agree with a recipe that says zeros, to the bit, and a
+    /// single typed zero has to move exactly the one trim it names.
+    #[test]
+    fn an_explicit_zero_trim_overrides_the_recipe_that_published_it() {
+        let model = notch_cap_fixture();
+        let dir = std::env::temp_dir().join(format!("hypreq-trimzero-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("flat.csv"), "20,0\n1000,0\n20000,0\n").unwrap();
+        let write_preset = |name: &str, bass: f64, mid: f64, tilt: f64| {
+            let path = dir.join(format!("{name}.json"));
+            std::fs::write(
+                &path,
+                serde_json::json!({
+                    "name": name, "family": "harman", "baseline_csv": "flat.csv",
+                    "params": {"bass": bass, "mid": mid, "tilt": tilt},
+                    "source": "unit test"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            path
+        };
+        let shelved = write_preset("shelved", 6.4, -1.4, 2.0);
+        let all_zero = write_preset("allzero", 0.0, 0.0, 0.0);
+        let bass_zero = write_preset("basszero", 0.0, -1.4, 2.0);
+        let curve = |args: &[&str]| -> Vec<(f64, f64)> {
+            corrected_curve(&model, &argv(args))
+                .expect("curve")
+                .0
+                .into_iter()
+                .map(|(f, g)| (f, (g * 1e9).round() / 1e9))
+                .collect()
+        };
+
+        let p = shelved.to_str().unwrap();
+        let from_recipe = curve(&["-H", "hd6xx", "--target-preset", p]);
+        let typed_zeros = curve(&[
+            "-H",
+            "hd6xx",
+            "--target-preset",
+            p,
+            "--target-bass",
+            "0",
+            "--target-mid",
+            "0",
+            "--target-tilt",
+            "0",
+        ]);
+        let one_zero = curve(&["-H", "hd6xx", "--target-preset", p, "--target-bass", "0"]);
+        let like_all_zero = curve(&["-H", "hd6xx", "--target-preset", all_zero.to_str().unwrap()]);
+        let like_bass_zero = curve(&[
+            "-H",
+            "hd6xx",
+            "--target-preset",
+            bass_zero.to_str().unwrap(),
+        ]);
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Precondition: the recipe's trims really are in the first curve, or "the override
+        // removed them" would be a statement about nothing.
+        assert!(
+            (from_recipe[0].1 - like_all_zero[0].1).abs() > 3.0,
+            "the recipe's +6.4 dB shelf never reached the curve, so this test would prove \
+             nothing: 20 Hz {} vs {}",
+            from_recipe[0].1,
+            like_all_zero[0].1
+        );
+        assert_eq!(
+            typed_zeros, like_all_zero,
+            "typing three zeros kept the recipe's shelves"
+        );
+        assert_eq!(
+            one_zero, like_bass_zero,
+            "typing one zero moved something other than the bass shelf"
+        );
+        assert_ne!(
+            one_zero, from_recipe,
+            "--target-bass 0 changed nothing at all: {one_zero:?}"
+        );
+    }
+
     #[test]
     fn rig_calibration_shifts_the_correction_and_feeds_the_qp() {
         let model = notch_cap_fixture();
@@ -3391,6 +4013,422 @@ mod tests {
         assert!(!plain.is_empty());
     }
 
+    /// `q_max = L_max - listen_spl - R(f)`. Feeding zeros for `R` was not neutral: it widened the
+    /// ceiling by exactly the amount the driver is already sensitive, so a bin where the headphone
+    /// is +12 dB above its own 1 kHz reference was allowed the full 6 dB of boost even though it
+    /// had no headroom left at all.
+    #[test]
+    fn the_distortion_ceiling_is_lowered_by_the_models_own_sensitivity() {
+        let mut model = notch_cap_fixture();
+        // 1 kHz-normalised, and +12 dB up top: R(20 kHz) = 12.
+        model.raw_pts = vec![vec![20.0, 0.0], vec![1000.0, 0.0], vec![20000.0, 12.0]];
+        // Clean everywhere below 3 % at 94 dB, so L_max = 94 dB across the band.
+        model.distortion = Some(hypreq::driver::DistortionProfile {
+            sweeps: vec![hypreq::driver::DistortionSweep {
+                spl_db: 94.0,
+                points: vec![(20.0, 1.0), (1000.0, 1.0), (20000.0, 1.0)],
+            }],
+        });
+        // The fit is asked for +8 dB at the top, well past any ceiling.
+        let ctrl = vec![(20.0, 0.0), (1000.0, 0.0), (20000.0, 8.0)];
+        let args = argv(&["-H", "hd6xx", "--global-fit", "--listen-spl", "85"]);
+        let (q, lines) = global_fit_stage(&ctrl, &model, &args, None, &[]).expect("global fit");
+        let joined = lines.join("\n");
+        assert!(joined.contains("Boost ceiling"), "{joined}");
+        let at = |probe: f64| {
+            q.iter()
+                .min_by(|a, b| (a.0 - probe).abs().total_cmp(&(b.0 - probe).abs()))
+                .expect("a grid")
+        };
+        // 94 - 85 - 12 = -3 dB of headroom at the top, floored at 0: no boost at all.
+        let top = at(20_000.0);
+        assert!(
+            top.0 > 19_000.0,
+            "the last bin should be at the top of the band"
+        );
+        assert!(
+            top.1 <= 0.05,
+            "20 kHz has no headroom once R(f) is counted, got {:+.3} dB",
+            top.1
+        );
+        // Mid-band the ceiling is ~0.5 dB tighter than the 6 dB hard cap, and the fit sits on it
+        // (measured: +4.47 dB at 8.0 kHz). With h_cal = 0 the bound there is 9 dB, so the fit runs
+        // up to the 6 dB cap and this fails.
+        let mid = at(8_000.0).1;
+        assert!(
+            (3.5..6.0).contains(&mid),
+            "8 kHz should sit on its own ceiling (~4.5 dB), not the 6 dB cap, got {mid:+.3}"
+        );
+    }
+
+    /// A database that records `"excursion"` used to have that record parsed and then dropped: the
+    /// `--global-fit` block answered nothing about it. It is answered as a screen now, which makes
+    /// two claims worth pinning. The fit must come out identical with the record present or absent
+    /// — that equality *is* the "not a bound" claim, and it is what keeps a first-order rule from
+    /// turning into a silent sub-bass limiter. And the printed shortfall count and worst bin must be
+    /// the numbers an independent recomputation from the delivered curve reports, not a formatted
+    /// guess.
+    #[test]
+    fn a_recorded_excursion_model_is_reported_and_never_binds_the_fit() {
+        let mut model = notch_cap_fixture();
+        model.excursion = Some(hypreq::driver::ExcursionModel {
+            fs_hz: 45.0,
+            ref_xmax_spl_db: 96.0,
+        });
+        let args = argv(&["-H", "hd6xx", "--global-fit", "--listen-spl", "95"]);
+        let (q, lines) = global_fit_stage(&model.ctrl_pts, &model, &args, None, &[]).expect("fit");
+        let joined = lines.join("\n");
+        assert!(joined.contains("Excursion screen"), "{joined}");
+        assert!(joined.contains("not a bound"), "{joined}");
+
+        let plain = notch_cap_fixture();
+        let (solo, solo_lines) =
+            global_fit_stage(&plain.ctrl_pts, &plain, &args, None, &[]).expect("fit");
+        assert!(
+            !solo_lines.join("\n").contains("Excursion screen"),
+            "a model with no excursion record must not print the line"
+        );
+        assert_eq!(q.len(), solo.len());
+        for (i, (a, b)) in q.iter().zip(&solo).enumerate() {
+            assert_eq!(
+                (a.0, a.1),
+                (b.0, b.1),
+                "bin {i} moved: the screen bound the fit"
+            );
+        }
+
+        // The fixture's raw curve is flat, so R(f) = 0 at every bin and the recomputation below is
+        // the same arithmetic the report ran, written out here instead of trusted.
+        let f: Vec<f64> = q.iter().map(|p| p.0).collect();
+        let gains: Vec<f64> = q.iter().map(|p| p.1).collect();
+        let zero_cal = vec![0.0; f.len()];
+        let margins = model
+            .excursion
+            .expect("the record this test is about")
+            .margins_db(&f, &gains, &zero_cal, 95.0);
+        let short = margins.iter().filter(|m| **m < 0.0).count();
+        // `min_by` rather than a fold: a fold seeded with `f64::NEG_INFINITY` reports that seed for a
+        // free (`min(-inf, x) = -inf`), so an empty selection would masquerade as the worst bin. An
+        // empty selection has to be loud here, not plausible.
+        let worst = margins
+            .iter()
+            .copied()
+            .filter(|m| m.is_finite())
+            .min_by(f64::total_cmp)
+            .expect("the fixture must leave at least one finite margin to quote");
+        assert!(
+            short > 0 && worst < 0.0,
+            "the fixture must demand more travel than the record allows ({short}, {worst})"
+        );
+        assert!(
+            joined.contains(&format!("{short} of {} bins", f.len())),
+            "the report must count {short} short bins: {joined}"
+        );
+        assert!(
+            joined.contains(&format!("{worst:+.2} dB")),
+            "the report must quote a worst margin of {worst:+.4} dB: {joined}"
+        );
+    }
+
+    /// A baseline CSV with three rows (20 / 1000 / 20000 Hz) is ordinary, and both things added to a
+    /// baseline — the 105 Hz shelf and the 2.5 kHz bell, and an ISO 226 contour — live between those
+    /// rows. Evaluating them at the baseline's own knots turned them into straight lines and deleted
+    /// the bell.
+
+    #[test]
+    fn a_three_row_target_baseline_still_carries_the_mid_bell() {
+        let model = notch_cap_fixture();
+        let args = argv(&["-H", "hd6xx", "--target-mid", "-6"]);
+        let params = hypreq::target::TargetParams {
+            theta_mid: -6.0,
+            ..Default::default()
+        };
+        let sparse = vec![(20.0f64, 0.0f64), (1000.0, 0.0), (20000.0, 0.0)];
+        // The same flat baseline expressed densely. A row count is not a shape, so the derived
+        // filter must not care how many rows the file happened to use.
+        let sparse_f: Vec<f64> = sparse.iter().map(|p| p.0).collect();
+        let no_raw: &[f64] = &[];
+        let dense: Vec<(f64, f64)> = target_query_grid(&sparse_f, no_raw)
+            .into_iter()
+            .map(|f| (f, 0.0))
+            .collect();
+        let ctx = |baseline: Vec<(f64, f64)>| TargetContext {
+            baseline,
+            family: hypreq::target::TargetFamily::Harman,
+            family_label: "harman".to_string(),
+            params,
+            preset_info: None,
+        };
+        let (sparse_curve, lines) =
+            derive_with_target(&model, &args, None, &ctx(sparse)).expect("sparse");
+        assert!(
+            lines.is_empty(),
+            "--regularize off must print no block, got {lines:?}"
+        );
+        let (dense_curve, _) = derive_with_target(&model, &args, None, &ctx(dense)).expect("dense");
+
+        let read = |curve: &[(f64, f64)], hz| {
+            let f: Vec<f64> = curve.iter().map(|p| p.0).collect();
+            let g: Vec<f64> = curve.iter().map(|p| p.1).collect();
+            hypreq::pchip::Pchip::new(&f, &g).eval(hz)
+        };
+        let dip = read(&sparse_curve, 2500.0);
+        assert!(
+            dip < -3.0,
+            "the 2.5 kHz bell survived as {dip:+.2} dB of a requested -6.00 dB"
+        );
+        let drift = (dip - read(&dense_curve, 2500.0)).abs();
+        assert!(drift < 0.05, "row count moved the bell by {drift:.3} dB");
+    }
+
+    /// `--regularize` was computed against the model's shipped knots and then discarded by the target
+    /// derivation, so with any `--target-*` flag the knee changed nothing while the report printed
+    /// knot counts for a curve that never shipped.
+    #[test]
+    fn regularize_acts_on_the_target_derived_curve_and_reports_that_curve() {
+        let model = notch_cap_fixture();
+        // A demand well past the knee, which is where a load-based ceiling has something to say; on
+        // a demand inside the knee the correct answer is to change nothing, and this fixture's -6 dB
+        // bell measured exactly that (0.0000 dB at a 6 dB knee).
+        let plain_args = argv(&["-H", "hd6xx", "--target-mid", "-24"]);
+        let reg_args = argv(&["-H", "hd6xx", "--target-mid", "-24", "--regularize", "3"]);
+        let ctx = TargetContext {
+            baseline: vec![(20.0, 0.0), (1000.0, 0.0), (20000.0, 0.0)],
+            family: hypreq::target::TargetFamily::Harman,
+            family_label: "harman".to_string(),
+            params: hypreq::target::TargetParams {
+                theta_mid: -24.0,
+                ..Default::default()
+            },
+            preset_info: None,
+        };
+        let (plain, plain_lines) =
+            derive_with_target(&model, &plain_args, None, &ctx).expect("plain");
+        assert!(
+            plain_lines.is_empty(),
+            "off must print nothing: {plain_lines:?}"
+        );
+        let (done, lines) = derive_with_target(&model, &reg_args, None, &ctx).expect("regularized");
+        assert!(
+            lines.iter().any(|l| l.starts_with("=== Regularization")),
+            "no regularization block: {lines:?}"
+        );
+        let moved = lines
+            .iter()
+            .find(|l| l.starts_with("  Knots moved"))
+            .expect("a knots-moved line");
+
+        // The printed knee effect has to be the effect on the pair of curves that actually exists.
+        assert_eq!(
+            plain.len(),
+            done.len(),
+            "the two passes disagree on the grid"
+        );
+        let worst = plain
+            .iter()
+            .zip(&done)
+            .map(|((_, a), (_, b))| (b - a).abs())
+            .fold(0.0f64, f64::max);
+        assert!(
+            worst > 0.05,
+            "a 3.00 dB knee did nothing to a -24 dB demand: {worst:.4} dB"
+        );
+        let printed: f64 = moved
+            .split("largest ")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no largest value in {moved:?}"))
+            .split(" dB")
+            .next()
+            .expect("a dB field")
+            .parse()
+            .expect("a parsed number");
+        assert!(
+            (printed.abs() - worst).abs() < 0.005,
+            "the report says {printed:+.2} dB, the curves it describes differ by {worst:.4} dB"
+        );
+    }
+
+    /// The knee is sized from the measurement. Read by its last column, a two-ear model sizes it
+    /// from one ear, and the printed knee then describes a curve this run never fitted.
+    #[test]
+    fn the_regularization_knee_is_sized_from_the_ear_mean_not_from_one_ear() {
+        let mut model = notch_cap_fixture();
+        // `Policy::auto` sizes the knee from the rough tail of the curve, not from its slope: a
+        // smooth tilt in either ear lands on the same floor and tells the two readings apart by
+        // nothing (measured: 3.00 dB both ways). So the roughness lives in one ear only — a zigzag
+        // on the right, cancelled by its mirror on the left — which leaves the ear mean perfectly
+        // smooth and one ear visibly ragged. ±9 dB is the amplitude `fit::AUTO_TAIL_FACTOR` already
+        // documents as lifting the knee off its 3 dB floor on this kind of grid; ±3 dB does not.
+        model.raw_pts = model
+            .raw_pts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let ripple = if i % 2 == 0 { 9.0 } else { -9.0 };
+                vec![p[0], -ripple, ripple]
+            })
+            .collect();
+        let args = argv(&["-H", "hd6xx", "--regularize", "auto"]);
+        let f: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
+        let mean_g: Vec<f64> = model
+            .raw_pts
+            .iter()
+            .map(|p| hypreq::model::point_gain(p))
+            .collect();
+        let right_g: Vec<f64> = model.raw_pts.iter().map(|p| p[2]).collect();
+        let want = hypreq::fit::Policy::auto(&f, &mean_g).lambda_db;
+        let one_ear = hypreq::fit::Policy::auto(&f, &right_g).lambda_db;
+        assert!(
+            (want - one_ear).abs() > 0.05,
+            "the fixture must make the two readings differ: mean {want} vs right {one_ear}"
+        );
+        let (policy, borrowed) = trim_policy(&model, &args);
+        assert!(
+            !borrowed,
+            "--regularize auto must not report a borrowed knee"
+        );
+        assert_eq!(
+            policy.lambda_db, want,
+            "the knee was sized from one ear ({one_ear}), not the ear mean ({want})"
+        );
+    }
+
+    /// `c * tanh(g / c)` is below `g` for every positive `g`, so passing the already-capped shared
+    /// curve into `stereo_pair` and capping each ear again compressed every positive knot in the
+    /// notch band twice (measured on the old path: 4.26 dB → 1.4887 → 1.1364) and moved the shared
+    /// filter even when the two ears measure identically.
+    #[test]
+    fn stereo_split_caps_each_ear_once_so_identical_ears_reproduce_the_shared_filter() {
+        let mut model = notch_cap_fixture();
+        // Per-ear table [freq, left, right, average], both ears identical.
+        model.raw_pts = model
+            .raw_pts
+            .iter()
+            .map(|p| vec![p[0], 0.0, 0.0, 0.0])
+            .collect();
+        model.notch_range_hz = Some((1000.0, 8000.0));
+        model.safe_cap_db = 1.5;
+        let args = argv(&["-H", "hd6xx", "--stereo", "split", "--notch-mode", "safe"]);
+        let stages = corrected_curve_stages(&model, &args).expect("stages");
+        let shared = &stages.shared.0;
+
+        // The fixture has to actually exercise the ceiling, or the equality below proves nothing.
+        let moved = shared
+            .iter()
+            .zip(&stages.pre_cap)
+            .filter(|((_, a), (_, b))| a != b)
+            .count();
+        assert!(moved > 0, "the ceiling moved no knot; the fixture is flat");
+        let top = shared.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+        let twice = 1.5f64 * (top / 1.5f64).tanh();
+        assert!(
+            top - twice > 0.05,
+            "a second cap must be distinguishable, else this test cannot fail: {top} vs {twice}"
+        );
+
+        let (_, pair) = stereo_pair(&model, &args, &stages.pre_cap, hypreq::stereo::Mode::Split)
+            .expect("split");
+        let (gl, gr) = pair.expect("a pair from a per-ear model");
+        for (ear, curve) in [("left", &gl), ("right", &gr)] {
+            assert_eq!(curve.len(), shared.len(), "{ear} ear knot count drifted");
+            for (i, ((fh, gh), (fs, gs))) in curve.iter().zip(shared).enumerate() {
+                assert_eq!(fh, fs, "{ear} knot {i} frequency");
+                assert_eq!(
+                    *gh, *gs,
+                    "{ear} ear knot {i} at {fh} Hz differs from the shared filter ({gh} vs {gs}) — \
+                     the ceiling was applied twice"
+                );
+            }
+        }
+    }
+
+    /// The two lines the ceiling writes answer two different questions, so they cannot carry the
+    /// same number: "held N left / M right" says which side was cut back, "moved in K knot(s)" says
+    /// how many knots of the middle of the image moved. A knot the ceiling clipped on both ears
+    /// leaves the ears equal at the ceiling, so it is one knot of movement and two side-holds —
+    /// K is the union of the two masks, and `N + M` reports knots twice.
+    #[test]
+    fn a_knot_the_ceiling_clipped_on_both_ears_moves_the_centre_once() {
+        // left, right, bite, expected
+        let masks: &[([bool; 4], [bool; 4])] = &[
+            ([true, true, false, true], [true, false, true, true]),
+            ([true, true, true, true], [true, true, true, true]),
+            ([false, false, false, false], [false, false, false, false]),
+        ];
+        let want = [4usize, 4, 0];
+        for ((l, r), w) in masks.iter().zip(want) {
+            let held_l = l.iter().filter(|b| **b).count();
+            let held_r = r.iter().filter(|b| **b).count();
+            let bites = centre_bites(l, r);
+            assert_eq!(bites, w, "masks {l:?} {r:?}");
+            assert!(
+                bites >= held_l.max(held_r),
+                "a knot held on either side cannot fail to move the centre: {l:?} {r:?} -> {bites}"
+            );
+            assert!(
+                bites <= held_l + held_r,
+                "the union cannot exceed the sum: {l:?} {r:?}"
+            );
+        }
+        // The discriminating case on its own: one shared knot, two side-holds.
+        assert_eq!(centre_bites(&[true], &[true]), 1);
+        assert_eq!(centre_bites(&[true, false], &[false, true]), 2);
+        assert_eq!(centre_bites(&[], &[true, true]), 0);
+    }
+
+    /// The same claim at the CLI seam: a model whose two ears differ only by a level offset still
+    /// gets its notch band clipped on *both* sides, and the report must not count those knots twice.
+    #[test]
+    fn the_ears_report_counts_a_shared_ceiling_knot_once_not_twice() {
+        let mut model = notch_cap_fixture();
+        // [freq, left, right, average]: the ears are 0.4 dB apart in level and identical in shape,
+        // so the trim is a pure balance cancel and both curves stay over the ceiling where the
+        // shared one was.
+        model.raw_pts = model
+            .raw_pts
+            .iter()
+            .map(|p| vec![p[0], 0.2, -0.2, 0.0])
+            .collect();
+        let args = argv(&["-H", "hd6xx", "--stereo", "split", "--notch-mode", "safe"]);
+        let stages = corrected_curve_stages(&model, &args).expect("stages");
+        let (lines, pair) =
+            stereo_pair(&model, &args, &stages.pre_cap, hypreq::stereo::Mode::Split)
+                .expect("split");
+        assert!(pair.is_some(), "a per-ear model must yield a pair");
+        let text = lines.join("\n");
+
+        let count = |needle: &str| -> usize {
+            let tail = text.split(needle).nth(1).unwrap_or_else(|| {
+                panic!("no {needle:?} in the ears block; the ceiling bit nowhere:\n{text}")
+            });
+            tail.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|_| panic!("no count after {needle:?}:\n{text}"))
+        };
+        let moved = count("Centre            : moved in ");
+        let held_l = count("held ");
+        let held_r = count(" left / ");
+
+        // Without both sides biting the fixture proves nothing: one side alone makes union == sum.
+        assert!(
+            held_l > 0 && held_r > 0,
+            "the ceiling held {held_l} left / {held_r} right; the fixture does not exercise both ears:\n{text}"
+        );
+        assert!(
+            moved >= held_l.max(held_r),
+            "the centre moved in {moved} knot(s) but the ceiling held {held_l} left / {held_r} \
+             right — a knot held on one side moves the centre:\n{text}"
+        );
+        assert!(
+            moved < held_l + held_r,
+            "the centre was reported as moving in {moved} knot(s) = {held_l} + {held_r}: the two \
+             ears' bites were added instead of unioned, so knots clipped on both sides were \
+             counted twice:\n{text}"
+        );
+    }
+
     #[test]
     fn ensemble_and_global_fit_flags_run_end_to_end() {
         let model = notch_cap_fixture();
@@ -3424,6 +4462,141 @@ mod tests {
             "{joined}"
         );
         assert!(curve.iter().all(|p| p.1.is_finite()));
+    }
+
+    /// A database may record several placement curves for one model (`raw_ensemble`, inline or as
+    /// `raw_csvs`). Those are the same measurement `--ensemble-csv` takes, only already on disk, so
+    /// the flag is what overrides them and never the other way round: with no flag the recorded
+    /// placements are what the robust fit sees, and the report says where they came from.
+    ///
+    /// Recorded rows are `[freq, gain]` or `[freq, L, R]`, so this is also where the three-column
+    /// form enters through [`hypreq::model::point_gain`]: the run whose third placement carries
+    /// `L, R` must land on the run whose third placement was averaged by hand. That is a bit-for-bit
+    /// claim about the ear mean, not a tolerance — a reader taking `*p.last()` (the right ear alone)
+    /// moves every bin that placement touches.
+    #[test]
+    fn a_recorded_placement_ensemble_feeds_the_robust_fit_without_any_flag() {
+        let placements = |third: Vec<hypreq::model::Point>| {
+            vec![
+                vec![
+                    vec![20.0, 1.0],
+                    vec![1000.0, 0.0],
+                    vec![4000.0, -5.0],
+                    vec![20000.0, 0.0],
+                ],
+                vec![
+                    vec![20.0, 2.0],
+                    vec![1000.0, 1.0],
+                    vec![4000.0, -3.0],
+                    vec![20000.0, 2.0],
+                ],
+                third,
+            ]
+        };
+        let two_ear = vec![
+            vec![20.0, 0.0, 4.0],
+            vec![1000.0, 6.0, 10.0],
+            vec![4000.0, -8.0, -4.0],
+            vec![20000.0, 2.0, 6.0],
+        ];
+        let hand_averaged = vec![
+            vec![20.0, 2.0],
+            vec![1000.0, 8.0],
+            vec![4000.0, -6.0],
+            vec![20000.0, 4.0],
+        ];
+
+        let args = argv(&["-H", "hd6xx"]);
+        let mut model = notch_cap_fixture();
+        model.raw_ensemble = placements(two_ear);
+        let (curve, lines) = corrected_curve(&model, &args).expect("recorded ensemble");
+        let joined = lines.join("\n");
+        assert!(joined.contains("Placement Ensemble"), "{joined}");
+        assert!(joined.contains("read from the model database"), "{joined}");
+        assert!(joined.contains("3 resampled"), "{joined}");
+        assert_eq!(
+            curve.len(),
+            hypreq::global_fit::uniform_log_grid(20.0, 20000.0, 48).len()
+        );
+        assert!(curve.iter().all(|p| p.1.is_finite()));
+
+        let mut averaged = notch_cap_fixture();
+        averaged.raw_ensemble = placements(hand_averaged);
+        let (same, _) = corrected_curve(&averaged, &args).expect("pre-averaged ensemble");
+        for (i, (a, b)) in curve.iter().zip(&same).enumerate() {
+            assert_eq!(a.0, b.0, "bin {i} frequency drifted");
+            assert_eq!(
+                a.1, b.1,
+                "bin {i} at {} Hz: a [freq, L, R] row must enter as (L + R) / 2, the number the \
+                 hand-averaged row carries",
+                a.0
+            );
+        }
+
+        // Same model, ensemble cleared: no block, and a different filter — which is what makes the
+        // assertions above about the ensemble rather than about the fixture's own curve.
+        let plain = notch_cap_fixture();
+        let (solo, solo_lines) = corrected_curve(&plain, &args).expect("no ensemble");
+        assert!(
+            !solo_lines.join("\n").contains("Placement Ensemble"),
+            "an empty raw_ensemble must not print an ensemble block"
+        );
+        assert!(
+            curve
+                .iter()
+                .zip(&solo)
+                .any(|(a, b)| (a.1 - b.1).abs() > 0.5),
+            "the recorded placements must move the curve, not pass through"
+        );
+
+        // And an explicit --ensemble-csv wins over what the database recorded, saying so.
+        let dir = std::env::temp_dir().join(format!("hypreq-rec-ens-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = dir.join("placement.csv");
+        std::fs::write(&csv, "20,7\n1000,3\n4000,-1\n20000,5\n").unwrap();
+        let flagged = argv(&["-H", "hd6xx", "--ensemble-csv", csv.to_str().unwrap()]);
+        let (_, flag_lines) = corrected_curve(&model, &flagged).expect("flagged ensemble");
+        std::fs::remove_dir_all(&dir).ok();
+        let flag_joined = flag_lines.join("\n");
+        assert!(flag_joined.contains("Placement Ensemble"), "{flag_joined}");
+        assert!(
+            flag_joined.contains("read from --ensemble-csv"),
+            "the flag must replace the recorded placements, not join them: {flag_joined}"
+        );
+        assert!(flag_joined.contains("1 resampled"), "{flag_joined}");
+    }
+
+    /// Placement curves that carry fewer than two usable points are not an error and not an
+    /// ensemble: the guard in `ensemble_stage` is what turns them into "this model has no ensemble"
+    /// and lets the run fall back to the model's own curve. Without the guard the degenerate list
+    /// still counts as a source, `analyze_ensemble` then returns `None` over it, and the whole run
+    /// aborts with "could not resample the placement curves" over a model that measures fine.
+    #[test]
+    fn a_model_recording_unusable_placement_curves_still_derives_its_own_curve() {
+        let mut model = notch_cap_fixture();
+        model.raw_ensemble = vec![
+            Vec::new(),
+            vec![vec![1000.0, 3.0]],
+            vec![vec![-20.0, 1.0], vec![-1000.0, 2.0]],
+            vec![vec![20.0, f64::NAN], vec![1000.0, f64::INFINITY]],
+        ];
+        let args = argv(&["-H", "hd6xx"]);
+        let (curve, lines) = corrected_curve(&model, &args)
+            .expect("a model with no usable placement curve must still derive a curve");
+        assert!(
+            !lines.join("\n").contains("Placement Ensemble"),
+            "no usable curve must mean no ensemble block"
+        );
+        let plain = notch_cap_fixture();
+        let (solo, _) = corrected_curve(&plain, &args).expect("fixture curve");
+        assert_eq!(curve.len(), solo.len());
+        for (i, (a, b)) in curve.iter().zip(&solo).enumerate() {
+            assert_eq!(
+                (a.0, a.1),
+                (b.0, b.1),
+                "knot {i} differs from the model's own curve"
+            );
+        }
     }
 }
 

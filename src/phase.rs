@@ -241,6 +241,12 @@ fn group_delay_ms(phase: &[f64], freq: &[f64]) -> Vec<f64> {
 ///
 /// Prefix sums over the array doubled on itself, so every circular window is one subtraction. A plain
 /// scan would be `O(n·w)` on a 65 536-point grid.
+///
+/// Test-only, and kept because it is the baseline the shipped search is measured against: the
+/// pipeline runs [`best_window_valid_joint`] / [`best_window_valid_prefix`], which also respect the
+/// shift bound and the wrap-around guard this one ignores. A caller that wants the densest stretch
+/// full stop wants this; nothing in the pipeline does.
+#[cfg(test)]
 #[must_use]
 pub fn best_window(x: &[f64], w: usize) -> usize {
     let n = x.len();
@@ -253,6 +259,7 @@ pub fn best_window(x: &[f64], w: usize) -> usize {
 }
 
 /// Helper that evaluates `best_window` directly on precomputed prefix sums of `doubled`.
+#[cfg(test)]
 fn best_window_prefix(prefix: &[f64], n: usize, w: usize) -> usize {
     if w == 0 || w >= n {
         return 0;

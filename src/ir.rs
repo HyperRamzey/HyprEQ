@@ -406,7 +406,10 @@ pub fn apply_notch_mode(
             match mode {
                 NotchMode::Zero => out.push((f, 0.0)),
                 NotchMode::Safe => {
-                    if safe_cap_db <= 0.0 {
+                    // `<= 0.0` alone let both non-finite caps through: `NaN <= 0.0` is false, and
+                    // `inf * tanh(g / inf)` is `inf * 0` = NaN. Either one painted NaN across every
+                    // knot in the notch band, which then reached the filter as NaN coefficients.
+                    if !(safe_cap_db.is_finite() && safe_cap_db > 0.0) {
                         return Err(IrError(format!(
                             "safe_cap_db must be positive for notch-mode=safe (got {safe_cap_db})"
                         )));
@@ -462,7 +465,12 @@ pub fn export_audit_csv_in(
     let g_ctrl: Vec<f64> = ctrl_pts.iter().map(|p| p.1).collect();
 
     let f_raw: Vec<f64> = raw_pts.iter().map(|p| p[0]).collect();
-    let g_raw: Vec<f64> = raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+    // The ear-mean accessor, not `p.last()`: a two-ear audit table would otherwise be written out
+    // as its right channel and the audit would disagree with the filter it claims to describe.
+    let g_raw: Vec<f64> = raw_pts
+        .iter()
+        .map(|p| crate::model::point_gain(p))
+        .collect();
     let raw_at_ctrl = crate::pchip::pchip_log_interp(&f_raw, &g_raw, &f_ctrl);
 
     let f_h: Vec<f64> = harm_pts.iter().map(|p| p.0).collect();
@@ -705,6 +713,38 @@ mod tests {
         );
     }
 
+    /// A ceiling that is not a positive finite number is not a ceiling. The guard read
+    /// `safe_cap_db <= 0.0`, which NaN fails outright, and `+inf * tanh(g / +inf)` is `inf * 0` —
+    /// so both non-finite caps passed the guard and painted NaN over every knot in the notch band,
+    /// which the filter then carried into its coefficients.
+    #[test]
+    fn a_non_finite_safe_ceiling_is_refused_rather_than_spreading_nan() {
+        let c = [(3703.0, 8.0), (4000.0, 2.0)];
+        let range = Some((2800.0, 4400.0));
+        for cap in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.5] {
+            let e = apply_notch_mode(&c, NotchMode::Safe, cap, range)
+                .err()
+                .unwrap_or_else(|| panic!("a ceiling of {cap} was accepted"));
+            assert!(
+                e.to_string().contains("safe_cap_db"),
+                "the refusal did not name the field: {e}"
+            );
+        }
+        // Outside the notch band there is nothing to cap, so a broken ceiling cannot be reached —
+        // the guard belongs to the mode that uses it, not to every curve.
+        let outside = [(1000.0, 8.0)];
+        assert_eq!(
+            apply_notch_mode(&outside, NotchMode::Safe, f64::NAN, range).unwrap(),
+            outside,
+            "a knot outside the range must not be touched by a ceiling it never uses"
+        );
+        assert_eq!(
+            apply_notch_mode(&c, NotchMode::Original, f64::NAN, range).unwrap(),
+            c,
+            "original mode never consults the ceiling"
+        );
+    }
+
     #[test]
     fn notch_mode_round_trips_names() {
         for name in NotchMode::CHOICES {
@@ -800,6 +840,48 @@ mod tests {
         assert!(
             synthesize_minimum_phase_ir(&flat(), 48000, 4096, 5000, 0, -1.5, false, 18.0).is_err()
         );
+    }
+
+    /// A raw curve can carry the two ears as `[freq, left, right]`. This table is what a reviewer
+    /// diffs the shipped filter against, so a row scored by its last column prints one ear under a
+    /// heading the rest of the report computes as the ear mean.
+    #[test]
+    fn the_audit_table_scores_a_two_ear_raw_curve_by_its_ear_mean() {
+        let dir = std::env::temp_dir().join(format!("hypreq_audit_ears_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = vec![
+            Point::from(vec![20.0, -6.0, -2.0]),
+            Point::from(vec![1000.0, 1.0, 3.0]),
+        ];
+        let target = vec![(20.0, 0.0), (1000.0, 0.0)];
+        let ctrl = vec![(20.0, 0.0), (1000.0, 0.0)];
+        let p = export_audit_csv_in(&dir, "earmodel", &raw, &target, 0.0, &ctrl).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        let raw_dbr = |line: &str| {
+            line.split(',')
+                .nth(1)
+                .unwrap_or_else(|| panic!("no raw column in {line:?}"))
+                .trim()
+                .parse::<f64>()
+                .unwrap_or_else(|e| panic!("raw column is not a number in {line:?}: {e}"))
+        };
+        let rows: Vec<&str> = text
+            .lines()
+            .skip(1)
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        assert_eq!(rows.len(), 2, "{text}");
+        assert_eq!(
+            raw_dbr(rows[0]),
+            -4.0,
+            "the 20 Hz row must be the ear mean, not the right ear"
+        );
+        assert_eq!(
+            raw_dbr(rows[1]),
+            2.0,
+            "the 1 kHz row must be the ear mean, not the right ear"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -1158,7 +1158,13 @@ impl PlotData {
             .collect();
 
         let f_raw: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
-        let g_raw: Vec<f64> = model.raw_pts.iter().map(|p| *p.last().unwrap()).collect();
+        // The averaged trace has to be the ear mean the fit uses. `p.last()` on a [freq, L, R] table
+        // plots the right ear and labels it the average.
+        let g_raw: Vec<f64> = model
+            .raw_pts
+            .iter()
+            .map(|p| crate::model::point_gain(p))
+            .collect();
         let raw_avg = pchip::pchip_log_interp(&f_raw, &g_raw, &f_plot);
         let (raw_l, raw_r) = if model.raw_pts.first().is_some_and(|p| p.len() >= 4) {
             let gl: Vec<f64> = model.raw_pts.iter().map(|p| p[1]).collect();
@@ -2986,6 +2992,51 @@ mod tests {
                 "phase trace escaped the fixed window"
             );
         }
+    }
+
+    /// The "raw" trace is the measurement the correction was built from, and on a database that
+    /// carries the two ears separately that means the ear mean — the same convention the fit uses.
+    /// Scoring the row by its last column draws the right ear and labels it the average.
+    #[test]
+    fn the_plotted_raw_trace_of_a_two_ear_table_is_the_ear_mean() {
+        let (ir, mag) = inputs_64();
+        let mut two_ear = model();
+        // Drop the stored average column and keep [freq, left, right], with the ears 4 dB apart.
+        two_ear.raw_pts = two_ear
+            .raw_pts
+            .iter()
+            .map(|p| vec![p[0], p[1] + 2.0, p[1] - 2.0])
+            .collect();
+        let mut means = model();
+        means.raw_pts = two_ear
+            .raw_pts
+            .iter()
+            .map(|p| vec![p[0], crate::model::point_gain(p)])
+            .collect();
+
+        let a = PlotData::build(&two_ear, &inputs(&ir, &mag));
+        let b = PlotData::build(&means, &inputs(&ir, &mag));
+        assert_eq!(
+            a.raw_avg.len(),
+            b.raw_avg.len(),
+            "the two runs disagree on the axis"
+        );
+        assert!(!a.raw_avg.is_empty(), "no trace to compare");
+        for (i, (x, y)) in a.raw_avg.iter().zip(&b.raw_avg).enumerate() {
+            assert!(
+                (x - y).abs() < 1e-9,
+                "plot point {i}: two-ear table drew {x:+.3} dB where the ear-mean table drew {y:+.3} dB"
+            );
+        }
+        // The comparison above is what pins the semantics: either ear sits 2 dB off the mean, so a
+        // trace drawn from one column rather than both is 2 dB away from `b` everywhere.
+        assert!(
+            a.raw_avg
+                .iter()
+                .zip(&b.raw_avg)
+                .all(|(x, y)| (x - y).abs() < 1e-9),
+            "the average trace is not the ear mean"
+        );
     }
 
     #[test]

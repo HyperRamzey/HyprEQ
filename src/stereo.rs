@@ -394,7 +394,8 @@ pub struct Trim {
     pub level_db: f64,
     /// Knots where the skew bound was the last word rather than the measurement.
     pub bound_bands: usize,
-    /// Knots where the notch ceiling was re-applied after the trim and moved one ear's curve.
+    /// Knots where the notch ceiling was re-applied after the trim and moved at least one ear's
+    /// curve — distinct knots, so a knot it cut back on both sides counts once.
     ///
     /// Zero is the normal case and the one the design intends: the trim is applied as `±`, so the
     /// pair's mean is the shared curve. The ceiling is the last word on a notch band, though, so a
@@ -599,7 +600,7 @@ pub fn report_lines(m: &Mismatch, points: usize, t: Option<&Trim>) -> Vec<String
                 .to_string()
         } else {
             format!(
-                "  Centre            : moved in {} knot(s) — the notch ceiling was applied after the trim and cut one side back",
+                "  Centre            : moved in {} knot(s) — the notch ceiling was applied after the trim and cut one or both ears back",
                 t.cap_bites
             )
         });

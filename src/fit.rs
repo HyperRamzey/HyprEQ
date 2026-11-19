@@ -331,6 +331,18 @@ pub fn smooth_octave(f: &[f64], g: &[f64], fraction: f64) -> Vec<f64> {
             out[i] = f64::NAN;
         } else if weight > 0.0 {
             out[i] = wsum / weight;
+        } else {
+            // Zero total weight means every cell under this window is zero wide, which is what a
+            // repeated frequency does: cells are bounded by midpoints between neighbours, so two
+            // samples at the same log2 sit in cells of width 0 and carry no weight at all. A grid
+            // that repeats one frequency therefore had nothing to average and fell through to the
+            // NaN it was initialised with — and that NaN travelled into the residual, into the load
+            // built from it, and from there into the filter.
+            //
+            // At a single frequency there is nothing to smooth *across*, so the smoothed value is
+            // the sample itself. `val[p]` is finite here: a non-finite value under the window was
+            // already returned as NaN by the `bad` prefix above.
+            out[i] = val[p];
         }
         p += 1;
     }
@@ -549,6 +561,33 @@ pub fn regularized_curve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cells are bounded by the midpoints between neighbouring frequencies, so two samples at the
+    /// same frequency sit in cells of width zero and carry no weight. On a grid that repeats one
+    /// frequency every cell was zero-wide, the window summed to nothing, and the smoothed curve came
+    /// back as the NaN it started as — which then travelled through the residual and the load into
+    /// the filter.
+    #[test]
+    fn a_repeated_frequency_leaves_the_smoothed_curve_finite() {
+        let f = [1000.0, 1000.0, 1000.0];
+        let g = [1.0, 2.0, 3.0];
+        let s = smooth_octave(&f, &g, 1.0 / 3.0);
+        assert_eq!(s.len(), 3);
+        assert!(
+            s.iter().all(|v| v.is_finite()),
+            "duplicates poisoned: {s:?}"
+        );
+        // At one frequency there is nothing to smooth across, so each sample is its own smoothed
+        // value rather than a hole or a borrow from a neighbour.
+        assert_eq!(s, g, "at a single frequency smoothing must be the identity");
+
+        // Duplicates inside a real grid must not leak a NaN into the window that contains them,
+        // nor into the neighbours on either side.
+        let f = [100.0, 1000.0, 1000.0, 1000.0, 20_000.0];
+        let g = [-2.0, 1.0, 2.0, 3.0, -1.0];
+        let s = smooth_octave(&f, &g, 1.0 / 3.0);
+        assert!(s.iter().all(|v| v.is_finite()), "window hole: {s:?}");
+    }
 
     /// A 1/12-octave grid from 20 Hz to 20 kHz, the density the shipped measurements use.
     fn grid(n: usize) -> Vec<f64> {

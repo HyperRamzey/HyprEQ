@@ -1200,6 +1200,81 @@ fn a_recorded_conflict_ok_unlocks_the_shipped_pairing_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The audit CSV's target column must follow the `--target-preset` that ran, not the database's
+/// shipped target.
+///
+/// Two runs of one model differing only in the preset's flat baseline (0 dB and +12 dB): the
+/// `harman_target_dBr` column must sit exactly 12 dB apart between the two files. This
+/// discriminates without knowing the model's `harm_offset`, and it fails loudly at 0 dB of
+/// difference if the export reads `model.target_pts` again -- the historic bug where a preset
+/// run tabulated the target of the shipped pairing under the filter of the run's own target.
+#[test]
+fn audit_csv_target_column_follows_the_preset_that_ran() {
+    let dir = scratch("audit-preset-target");
+    let db = write_fixture_db(
+        &dir,
+        "auditpreset.json",
+        &[(
+            "flatmodel",
+            "Flat Set [GRAS 45CA]",
+            "gras_45ca",
+            "harman_2018",
+        )],
+    );
+    std::fs::write(dir.join("base0.csv"), "20,0.0\n1000,0.0\n20000,0.0\n").expect("base0");
+    std::fs::write(dir.join("base12.csv"), "20,12.0\n1000,12.0\n20000,12.0\n").expect("base12");
+    for (recipe, base) in [("r0.json", "base0"), ("r12.json", "base12")] {
+        std::fs::write(
+            dir.join(recipe),
+            format!(
+                r#"{{"name":"flat_{base}","family":"harman","baseline_csv":"{base}.csv","params":{{"bass":0.0,"mid":0.0,"tilt":0.0}},"source":"audit threading test"}}"#
+            ),
+        )
+        .expect("recipe");
+    }
+    for recipe in ["r0.json", "r12.json"] {
+        let (code, stdout, stderr) = run_db(
+            &dir,
+            &db,
+            &[
+                "-H",
+                "flatmodel",
+                "--target-preset",
+                recipe,
+                "--export-csv",
+                "--no-plot",
+            ],
+        );
+        assert_eq!(code, Some(0), "{recipe} failed:\n{stderr}\n{stdout}");
+        std::fs::rename(
+            dir.join("flatmodel_audit_data.csv"),
+            dir.join(format!("audit_{recipe}.csv")),
+        )
+        .expect("keep the audit this run wrote");
+    }
+    let target_col = |f: &str| -> Vec<f64> {
+        std::fs::read_to_string(dir.join(f))
+            .expect("audit readable")
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split(',').nth(2).and_then(|c| c.trim().parse().ok()))
+            .collect()
+    };
+    let a = target_col("audit_r0.json.csv");
+    let b = target_col("audit_r12.json.csv");
+    assert!(!a.is_empty() && a.len() == b.len(), "audit rows diverged");
+    let worst = a
+        .iter()
+        .zip(&b)
+        .map(|(x, y)| (y - x - 12.0).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst <= 0.011,
+        "a +12 dB preset moved the audit target column by {worst} away from 12.0 dB: the export is not describing the run's target"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn force_equalises_anyway_and_says_which_refusal_it_overrode() {
     let dir = scratch("fixture-force");

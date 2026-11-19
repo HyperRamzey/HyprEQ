@@ -1115,6 +1115,36 @@ fn run_model(
     let stages = corrected_curve_stages(model, args)?;
     let (active_ctrl, reg_lines) = stages.shared;
 
+    // When the run replaced the target (--target-preset / --target-csv / a parameterized shelf),
+    // the audit table and the plot's target trace must speak of the curve this run equalised to,
+    // not the database's shipped one. Both used to read `model.target_pts`, which made a preset
+    // run print target and error columns describing a different curve than the filter the same
+    // run wrote. Without a replacement this stays `None` and both consumers keep taking
+    // `model.target_pts` -- the unchanged run stays byte-identical to the reference.
+    let run_target_ctx = if target_extension_active(args) {
+        Some(target_context(model, args)?)
+    } else {
+        None
+    };
+    let run_target: Option<Vec<(f64, f64)>> = match run_target_ctx.as_ref() {
+        Some(ctx) => {
+            let f_raw: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
+            Some(run_target_curve(args, ctx, &f_raw)?)
+        }
+        None => None,
+    };
+    // Panel 1's legend names the target from the database record and the model's plot_meta,
+    // both written when the shipped pairing was the only one. A run that replaced the target
+    // must caption its own curve: the preset's name, the csv baseline, or the parameterized
+    // shape of the shipped one -- the same honesty the audit table now gets.
+    let target_label: Option<String> = run_target_ctx.as_ref().map(|ctx| {
+        match (ctx.preset_name.as_ref(), args.target_csv.as_ref()) {
+            (Some(name), _) => format!("Target Curve ({name})"),
+            (None, Some(_)) => "Target Curve (csv baseline)".to_string(),
+            (None, None) => format!("Target Curve ({} + params)", model.target_name),
+        }
+    });
+
     let f64_wav = format!("{prefix}_f64_{rate_tag}.wav");
     let mono_rt = format!("{prefix}_mastering_mono_{rate_tag}.wav");
     let stereo_rt = format!("{prefix}_mastering_stereo_{rate_tag}.wav");
@@ -1313,7 +1343,7 @@ fn run_model(
         let csv_path = export_audit_csv(
             &model.key,
             &model.raw_pts,
-            &model.target_pts,
+            run_target.as_deref().unwrap_or(&model.target_pts),
             model.harm_offset,
             &active_ctrl,
         )?;
@@ -1330,6 +1360,8 @@ fn run_model(
             pre_rt: rt.preamp_db,
             unwin_rt: rt.unwindowed_floor_dbfs,
             active_ctrl: &active_ctrl,
+            target_override: run_target.as_deref(),
+            target_label_override: target_label.as_deref(),
             notch_mode: notch_mode.as_str(),
             // The ears trace is opt-in like the rest of the flag: an unchanged run writes the
             // unchanged figure, even for a model that happens to carry two ear columns.
@@ -2038,6 +2070,9 @@ struct TargetContext {
     params: hypreq::target::TargetParams,
     /// Human-readable attribution of a recipe: name, rig it was defined on, published source.
     preset_info: Option<String>,
+    /// The recipe's short name, for report labels that must not print the database's target
+    /// name under a curve this run replaced (`None` when no `--target-preset` ran).
+    preset_name: Option<String>,
 }
 
 fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
@@ -2045,6 +2080,7 @@ fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
     let mut family = args.target_family.clone();
     let mut params = groundwork_target_params(args);
     let mut preset_info: Option<String> = None;
+    let mut preset_name: Option<String> = None;
     if let Some(path) = args.target_csv.as_ref() {
         let rows = hypreq::model::load_csv_points(path)
             .map_err(|e| Error::msg(format!("--target-csv '{}': {e}", path.display())))?;
@@ -2088,6 +2124,7 @@ fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
         if args.target_tilt.is_none() {
             params.theta_tilt = preset.params.theta_tilt;
         }
+        preset_name = Some(preset.name.clone());
         preset_info = Some(format!(
             "{} ({}) — {}",
             preset.name,
@@ -2106,6 +2143,7 @@ fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
     Ok(TargetContext {
         baseline,
         preset_info,
+        preset_name,
         family_label: family,
         family: family_enum,
         params,
@@ -2154,37 +2192,8 @@ fn derive_with_target(
         None => model.raw_pts.clone(),
     };
     let f_raw: Vec<f64> = raw.iter().map(|p| p[0]).collect();
-    let f_t: Vec<f64> = ctx.baseline.iter().map(|p| p.0).collect();
-    let g_t: Vec<f64> = ctx.baseline.iter().map(|p| p.1).collect();
-
-    // The target is sampled where the fit will read it, not where the baseline file happens to have
-    // rows. `--target-baseline` CSVs are often three rows (20 / 1000 / 20000 Hz), and both things
-    // that get added to a baseline are functions of frequency, not of those rows: the parameterized
-    // deviation (whose 105 Hz shelf and 2500 Hz bell live entirely between them) and an ISO 226
-    // contour. Sampled at the baseline's own knots they collapsed to straight lines between three
-    // points and the shelf vanished; sampled on the merged grid they survive whatever the file's
-    // row spacing is. The grid is a superset of the baseline knots, so nothing is lost — a PCHIP
-    // passes through its own nodes — and every point added is one the inversion was going to
-    // interpolate onto anyway.
-    let grid = target_query_grid(&f_t, &f_raw);
-    let mut target: Vec<(f64, f64)> = if target_extension_active(args) {
-        let vals = hypreq::target::evaluate_target(&ctx.baseline, &grid, ctx.family, ctx.params);
-        grid.iter().copied().zip(vals).collect()
-    } else {
-        let baseline = hypreq::pchip::Pchip::new(&f_t, &g_t);
-        grid.iter().map(|&f| (f, baseline.eval(f))).collect()
-    };
-    if let (Some(phon), Some(path)) = (args.listen_spl, args.iso226_table.as_ref()) {
-        let table = hypreq::target::Iso226Table::from_json_file(path)
-            .map_err(|e| Error::msg(format!("--iso226-table: {e}")))?;
-        // Read at the target curve's own frequencies: a contour is a function of frequency, and
-        // pairing it with a different axis than the one it was evaluated on would shift it.
-        let f_target: Vec<f64> = target.iter().map(|p| p.0).collect();
-        let delta = table.contour_delta_db(&f_target, phon, 65.0);
-        for ((_, g), d) in target.iter_mut().zip(delta) {
-            *g += d;
-        }
-    }
+    // One derivation shared with the report path: see run_target_curve.
+    let target = run_target_curve(args, ctx, &f_raw)?;
 
     // `--regularize` acts on the curve this run actually derives, so it cannot be overwritten by the
     // derivation. The unregularized pass is kept as the baseline for the report, which is the only
@@ -2218,6 +2227,57 @@ fn derive_with_target(
         hypreq::model::Regularized::Derived(Vec::new()).describe(),
     );
     Ok((done, lines))
+}
+
+/// The target curve this run equalises against: the (possibly replaced) baseline sampled on the
+/// merged grid with the parameterized deviation -- and the listening-SPL contour when one was
+/// requested -- applied to it.
+///
+/// One function because two report consumers (the audit CSV and the verification plot's target
+/// trace) used to read `model.target_pts` -- the database's shipped target -- while the fit read
+/// this curve. With `--target-preset` or `--target-csv` in play they then tabulated and drew a
+/// target that was not the one the run's own filter had been fitted to. Deriving the curve for
+/// the reports from the same code the fit uses is what keeps that from splitting again.
+///
+/// `harm_offset` is deliberately NOT applied here: the fit's derivation and both report paths add
+/// it at their own call sites, so this returns the identical object to what each of them had.
+fn run_target_curve(
+    args: &Args,
+    ctx: &TargetContext,
+    raw_axis: &[f64],
+) -> Result<Vec<(f64, f64)>, Error> {
+    let f_t: Vec<f64> = ctx.baseline.iter().map(|p| p.0).collect();
+    let g_t: Vec<f64> = ctx.baseline.iter().map(|p| p.1).collect();
+
+    // The target is sampled where the fit will read it, not where the baseline file happens to have
+    // rows. `--target-baseline` CSVs are often three rows (20 / 1000 / 20000 Hz), and both things
+    // that get added to a baseline are functions of frequency, not of those rows: the parameterized
+    // deviation (whose 105 Hz shelf and 2500 Hz bell live entirely between them) and an ISO 226
+    // contour. Sampled at the baseline's own knots they collapsed to straight lines between three
+    // points and the shelf vanished; sampled on the merged grid they survive whatever the file's
+    // row spacing is. The grid is a superset of the baseline knots, so nothing is lost -- a PCHIP
+    // passes through its own nodes -- and every point added is one the inversion was going to
+    // interpolate onto anyway.
+    let grid = target_query_grid(&f_t, raw_axis);
+    let mut target: Vec<(f64, f64)> = if target_extension_active(args) {
+        let vals = hypreq::target::evaluate_target(&ctx.baseline, &grid, ctx.family, ctx.params);
+        grid.iter().copied().zip(vals).collect()
+    } else {
+        let baseline = hypreq::pchip::Pchip::new(&f_t, &g_t);
+        grid.iter().map(|&f| (f, baseline.eval(f))).collect()
+    };
+    if let (Some(phon), Some(path)) = (args.listen_spl, args.iso226_table.as_ref()) {
+        let table = hypreq::target::Iso226Table::from_json_file(path)
+            .map_err(|e| Error::msg(format!("--iso226-table: {e}")))?;
+        // Read at the target curve's own frequencies: a contour is a function of frequency, and
+        // pairing it with a different axis than the one it was evaluated on would shift it.
+        let f_target: Vec<f64> = target.iter().map(|p| p.0).collect();
+        let delta = table.contour_delta_db(&f_target, phon, 65.0);
+        for ((_, g), d) in target.iter_mut().zip(delta) {
+            *g += d;
+        }
+    }
+    Ok(target)
 }
 
 /// Frequencies to evaluate a target on: both input axes plus a 1/48-octave log grid across their
@@ -4158,6 +4218,7 @@ mod tests {
             family_label: "harman".to_string(),
             params,
             preset_info: None,
+            preset_name: None,
         };
         let (sparse_curve, lines) =
             derive_with_target(&model, &args, None, &ctx(sparse)).expect("sparse");
@@ -4201,6 +4262,7 @@ mod tests {
                 ..Default::default()
             },
             preset_info: None,
+            preset_name: None,
         };
         let (plain, plain_lines) =
             derive_with_target(&model, &plain_args, None, &ctx).expect("plain");

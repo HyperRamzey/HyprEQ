@@ -22,7 +22,16 @@ The baseline is `bk5128_df.csv` relative to this directory, with two numeric col
 
 Supply the 5128 DF response **for the exact fixture and pinna you measured on**. Do not fabricate
 one from the Harman 45CA curve — the whole point of a rig-specific target is that the two are not
-interchangeable. With the baseline in place:
+interchangeable.
+
+If you have not measured a 5128 diffuse field of your own, an honest stand-in is the community
+5128 diffuse-field response distributed as `Diffuse field 5128.csv` in the AutoEq repository
+(jaakkopasanen/AutoEq, MIT; 696 points, 20 Hz - 19.96 kHz, the diffuse-field target behind
+headphones.com's and Crinacle's 5128 databases): download it into this directory under the name
+`bk5128_df.csv`. It stands in for the pilot's baseline, which was never published, and carries
+its own measurement chain; the repo does not track it, like every CSV here.
+
+With the baseline in place:
 
 ```sh
 hypreq -H your_model --target-preset targets/harman_beta_2024_5128.json
@@ -55,6 +64,15 @@ GRAS 45CA-10 with the **KB5000** pinna (a 35 Shore OO anthropometric pinna that 
 45BB/45BC KEMAR and the 43AG fixture, mounted on a 711-style IEC 60318-4 ear simulator), so the
 recipe declares `fixture: "gras_kb5000"`. Check your reading of the authors' terms at their own
 post before redistributing the CSV — the repo neither hosts nor embeds it.
+
+The post's own attachment list (web.archive snapshot of 2026-04-30, checked 2026-11-19 — Head-Fi
+refuses direct fetches) carries exactly one curve file, `KB5000_7 any frequency.txt`, and no
+licence text with it: that is the only target the authors have published *as data* so far. The
+paper's other curves — the single-headphone calibrations and the `_7`/`_20` averaged variants for
+both fixtures — exist as figures only, and no third-party data publication for them was found
+either. There is therefore no recipe here for them, and digitizing the paper's figures is not an
+acceptable route to one: they would be copyrighted curves with unexamined terms, stripped of the
+per-headphone scatter the paper itself calls the finding.
 
 ## Which target belongs on which rig
 

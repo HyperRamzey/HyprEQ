@@ -481,3 +481,40 @@ and `sofa_to_ensemble.py --self-test` (479 bins, 20–20000 Hz, 4 flat curves) b
 `shellcheck scripts/*.sh` exit 0 · end-to-end smokes: KB5000_7 guard 4-case table and the
 five-flag matrix (regularize+ensemble+preset, global-fit, stereo split + notch safe, synth
 parallel-iir @ 44.1 kHz, rig-calibration refuse/force/unverified) all behaved as reported above.
+
+## A preset run reported another target (2026-11-19, found while generating the Olive & Clark IR set)
+
+Symptom: two runs of one model, `--target-preset targets/harman_kb5000_7.json` versus
+`--target-preset targets/harman_beta_2024_5128.json`, wrote `<model>_audit_data.csv` files whose
+`harman_target_dBr` column agreed to 0.01 dB everywhere while `applied_eq_dB` legitimately
+differed. The audit table — the figure's panel-1 target trace, and its legend — described the
+database's shipped `harman_2018` target, not the curve the run's own filter was fitted to;
+`raw_error_dB` was wrong with it. The filter was never wrong: `derive_with_target` fitted the
+replaced baseline all along.
+
+Root cause: three report-side consumers kept reading the shipped pairing (`model.target_pts`,
+`model.target_name`, `plot_meta.target_label`) where only the fit received `TargetContext`'s
+replaced baseline. Inherited from the Python reference program, invisible until `--target-preset`
+existed — the reference has no preset.
+
+Fix: one `run_target_curve` (baseline sampled on the merged grid, parameterized deviation, ISO 226
+contour) now serves the fit and both report paths; `PlotInputs.target_override` and
+`PlotInputs.target_label_override` make the figure draw and name the run's curve; `TargetContext`
+carries `preset_name` for the legend. With no replacement the overrides stay `None` and an
+unchanged run renders byte-identically — the reference-parity tests hold that shut.
+
+Discrimination (each sabotage restored byte-identical, md5-checked):
+- `audit_csv_target_column_follows_the_preset_that_ran` (tests/cli_report.rs): two flat presets,
+  0 dB and +12 dB — the target column must move by exactly 12 dB on every row. Post-fix measured:
+  12.00 dB everywhere. With the export sabotaged back to `model.target_pts` the measured move was
+  0.00 dB and the test failed naming it ("moved the audit target column by 12 away from 12.0").
+- `the_target_trace_follows_the_override_a_preset_run_used` (src/plot.rs): a flat +12 dB override
+  must draw 13.0 dB at 1 kHz (12 + the model's offset). Removing the trace read fails
+  "the override changed nothing"; removing the label read fails
+  `left: "Harman Over-Ear 2018 Target", right: "Target Curve (test_preset)"` — both observed.
+- End-to-end after the fix: KB5000_7 versus Beta-5128 now differ in the audit by −5.1 dB at
+  8.5 kHz (the Harman-translated curve sits below the 5128 diffuse field there — the expected
+  physics), where before the fix the pair differed by exactly 0.00 dB for every model.
+
+Test counts: 415 -> 417 (lib 341 + bin 41 + cli 33 executed, 0 failed, 2 ignored); fmt,
+clippy `-D warnings` and the suite all green with the change in.

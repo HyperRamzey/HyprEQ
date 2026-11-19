@@ -15,3 +15,9 @@ __pycache__/
 # Target recipes are recipes, not curves: every CSV a recipe points at is data the
 # user supplied (published target tables are copyrighted). Never commit one.
 /targets/*.csv
+
+# The authors' published curve files themselves land in the repo root as user data —
+# e.g. the Olive & Clark ARTA export "KB5000_7 any frequency.txt". Convert it with
+# scripts/import_kb5000_7.py into targets/kb5000_7.csv (itself ignored above); the
+# raw published export stays out of git history like the CSV derived from it.
+/*_any_frequency.txt

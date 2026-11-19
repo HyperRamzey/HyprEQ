@@ -216,3 +216,32 @@ and had a silent-failure mode. Measured on the tree, not inferred:
 - Never commit/push unasked. (State 2026-11-19: all device-tree/kernel/Derp fixes committed
   and pushed under the user's explicit instruction — hashes in B4; nothing uncommitted left
   to revert.)
+
+## Phase C - Olive & Clark target expansion (2026-11-19, user ask)
+
+- [x] C1. Published-data scope verified against the publisher: the Head-Fi/ASR post (web.archive
+      snapshot 2026-04-30; direct fetch 403 even via the local proxy) attaches exactly one data
+      file, `KB5000_7 any frequency.txt` - the user's copy sits at the repo root and is now
+      gitignored (`/*_any_frequency.txt`). The single-headphone, `_7` and `_20` variants for both
+      fixtures are figures only; no third-party data publication exists (searched) and digitizing
+      the figures was rejected (copyrighted curves, unexamined terms, scatter lost). Documented in
+      targets/README.md; no recipes invented for figure-only targets.
+- [x] C2. Beta-5128 baseline gap: filled locally with the AutoEq `Diffuse field 5128.csv` stand-in
+      (696 pts, 20 Hz-19.96 kHz, MIT repo; provenance + "stand-in, not the pilot's curve" recorded
+      in targets/README.md). Installed as targets/bk5128_df.csv - gitignored like every CSV.
+- [x] C3. `--regularize auto` IR set generated: 3 models x {KB5000_7, Beta-5128} = 6 runs,
+      `--force` on every cross-fixture pairing with the refusal printed (the 43AG-family captures
+      vs KB5000/5128 targets are README route 3: accepted mismatch, documented, not native).
+      Knees 4.29 / 4.27 / 3.00 dB - per model, from the capture's own deviation, identical across
+      the two targets BY DESIGN of the flag. 18 WAVs in backup/irs/*_regauto_*, 6 figures in
+      docs/plots/*_regauto_20261119.png. Audit spot-check: KB5000_7 vs Beta-5128 targets differ
+      by -5.1 dB at 8.5 kHz per model.
+- [x] C4. Generating the set exposed a report bug: the audit CSV, the figure's target trace and
+      its panel-1 legend described the shipped `harman_2018` pairing during preset runs while the
+      filter fitted the preset (the fit itself was always right). Fixed by one shared
+      `run_target_curve` + `PlotInputs.target_override`/`target_label_override`; full story,
+      measurements and sabotage results in BUGFIX.md ("A preset run reported another target").
+      Two new discriminating tests; suite 415 -> 417 executed, gate green (fmt/clippy/doc/tests).
+- [ ] C5. Loop closure pending: `--verify-with` needs a real capture taken after convolution on
+      the target's own fixture - none of the three repo models is a KB5000 or 5128 capture, so
+      all six IRs remain cross-fixture estimates until the user measures on one.

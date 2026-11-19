@@ -242,6 +242,14 @@ pub struct PlotInputs<'a> {
     pub unwin_rt: f64,
     /// Control knots after the notch policy was applied.
     pub active_ctrl: &'a [(f64, f64)],
+    /// The target curve the run actually equalised to, when the run replaced the database's
+    /// (a `--target-preset`/`--target-csv` run). `None` keeps the shipped `model.target_pts`
+    /// trace, so an unchanged run renders the byte-identical reference figure.
+    pub target_override: Option<&'a [(f64, f64)]>,
+    /// Legend text for that trace, from the same run (`Some` together with `target_override`
+    /// only). It outranks the model's `plot_meta` target label, which names the shipped
+    /// pairing and would caption the drawn curve with a target it is not.
+    pub target_label_override: Option<&'a str>,
     /// Name of the notch policy in effect, for labels.
     pub notch_mode: &'a str,
     /// Draw the two ears' difference on panel 2.
@@ -1150,8 +1158,11 @@ impl PlotData {
             .collect();
         let wav_eq = fft::interp_grid(&f_plot, &freqs, &mag_db);
 
-        let f_tar: Vec<f64> = model.target_pts.iter().map(|p| p.0).collect();
-        let g_tar: Vec<f64> = model.target_pts.iter().map(|p| p.1).collect();
+        // The run's target when the run replaced it (see PlotInputs::target_override): a panel
+        // that draws the database's target under an EQ fitted to another one is a false figure.
+        let tar_pts = in_.target_override.unwrap_or(&model.target_pts);
+        let f_tar: Vec<f64> = tar_pts.iter().map(|p| p.0).collect();
+        let g_tar: Vec<f64> = tar_pts.iter().map(|p| p.1).collect();
         let harm_plot: Vec<f64> = pchip::pchip_log_interp(&f_tar, &g_tar, &f_plot)
             .iter()
             .map(|v| v + model.harm_offset)
@@ -1322,13 +1333,21 @@ impl PlotData {
             raw_label: subst(
                 str_meta("raw_label").unwrap_or_else(|| format!("Raw {}", model.name)),
             ),
-            target_label: subst(str_meta("target_label").unwrap_or_else(|| {
-                if model.target_name == "harman_2018" {
-                    "Harman Over-Ear 2018 Target".to_string()
-                } else {
-                    format!("Target Curve ({})", model.target_name)
-                }
-            })),
+            target_label: subst(
+                // A replaced target brings its own name; the meta/default texts describe
+                // the shipped pairing, not this run's curve.
+                in_.target_label_override
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        str_meta("target_label").unwrap_or_else(|| {
+                            if model.target_name == "harman_2018" {
+                                "Harman Over-Ear 2018 Target".to_string()
+                            } else {
+                                format!("Target Curve ({})", model.target_name)
+                            }
+                        })
+                    }),
+            ),
             autoeq_label: subst(
                 str_meta("autoeq_ax1_label")
                     .unwrap_or_else(|| "Standard AutoEq Response".to_string()),
@@ -2350,6 +2369,8 @@ mod tests {
             pre_rt: -1.5,
             unwin_rt: -120.0,
             active_ctrl: &[(20.0, 2.0), (1000.0, 0.0), (20000.0, 4.0)],
+            target_override: None,
+            target_label_override: None,
             notch_mode: "safe",
             show_ears: false,
             added_latency: 0,
@@ -2677,10 +2698,55 @@ mod tests {
             pre_rt: -6.5,
             unwin_rt: -152.6,
             active_ctrl: &[(20.0, 2.0), (1000.0, 0.0), (20000.0, 4.0)],
+            target_override: None,
+            target_label_override: None,
             notch_mode: "safe",
             show_ears: false,
             added_latency: 0,
         }
+    }
+
+    #[test]
+    fn the_target_trace_follows_the_override_a_preset_run_used() {
+        // The shipped model's target is (20,4),(1000,0),(20000,-2) with harm_offset 1.0.
+        // A run that replaced the target with a flat +12 dB line must draw 13.0 dB of
+        // target everywhere (12 + the offset), not the shipped curve around it. Deleting
+        // the override read in `build` pins this trace back to `model.target_pts` and
+        // turns the mid-band assertion red.
+        let (ir, mag) = full_inputs();
+        let flat = [(20.0, 12.0), (1000.0, 12.0), (20000.0, 12.0)];
+        let on = PlotInputs {
+            target_override: Some(&flat),
+            ..full_inputs_ref(&ir, &mag)
+        };
+        let d_on = PlotData::build(&model(), &on);
+        let mid = d_on
+            .f_plot
+            .iter()
+            .position(|&f| f > 900.0 && f < 1100.0)
+            .expect("plot grid crosses 1 kHz");
+        assert!(
+            (d_on.harm_plot[mid] - 13.0).abs() < 0.05,
+            "the override target drew {:.2} dB at 1 kHz, not 12 + offset",
+            d_on.harm_plot[mid]
+        );
+        let d_off = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        assert!(
+            (d_off.harm_plot[mid] - d_on.harm_plot[mid]).abs() > 2.0,
+            "the override changed nothing: shipped {:.2} vs override {:.2}",
+            d_off.harm_plot[mid],
+            d_on.harm_plot[mid]
+        );
+        // The legend follows the trace: a replaced target must not be captioned with the
+        // shipped pairing's name, and an unchanged run must keep that name byte-steady.
+        let named = PlotInputs {
+            target_label_override: Some("Target Curve (test_preset)"),
+            target_override: Some(&flat),
+            ..full_inputs_ref(&ir, &mag)
+        };
+        let d_named = PlotData::build(&model(), &named);
+        assert_eq!(d_named.target_label, "Target Curve (test_preset)");
+        assert_eq!(d_off.target_label, "Harman Over-Ear 2018 Target");
     }
 
     #[test]

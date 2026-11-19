@@ -7,7 +7,7 @@ All target curves and headphone measurement datasets are decoupled from the DSP 
 ## Implementation
 
 The DSP is a single self-contained Rust crate — a library plus a `hypreq` binary — with no
-external service, plugin host, or path dependency, covered by an extensive 415-test suite
+external service, plugin host, or path dependency, covered by an extensive 458-test suite
 (`cargo test --all-targets`). The behaviour is pinned inside the crate rather than by a second
 implementation: the reference program this was ported from and the harness that used to diff the
 two side by side are no longer in the tree, so the tests — byte comparisons of stdout, WAV
@@ -65,7 +65,7 @@ cargo build --release
 
 ### Current-Tree Re-Verification Figures (2026-11-19)
 
-Regenerated with the tree at this commit (full 415-test gate green) so the figures match
+Regenerated with the tree at this commit (full 458-test gate green) so the figures match
 the shipped binary rather than the PR 1 build. First figure: shipped default. Second
 figure: the same model with `--regularize auto`.
 
@@ -88,14 +88,20 @@ figure: the same model with `--regularize auto`.
 
 ### Reference Model Profiles & Convolver Metrics
 
-| Model Key | Mode | Max Boost | Preamp | Truncation Floor ($f_{64}$) | Causal Energy | HF Taper | Generated Convolvers |
+| Model Key | Target Profile / Mode | Max Boost | Preamp | Truncation Floor ($f_{64}$) | Causal Energy | HF Taper | Generated Convolvers / Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`jbl770nc`** | Baseline | $+5.00\text{ dB}$ | $-6.50\text{ dB}$ | $-311.18\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | `jbl770nc_f64_48k.wav`<br>`jbl770nc_mastering_mono_48k.wav`<br>`jbl770nc_mastering_stereo_48k.wav` |
-| **`jbl770nc`** | **PR 1 Auto** | $+5.00\text{ dB}$ | $-6.50\text{ dB}$ | $-311.18\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$, 20 knots moved ($8.48\text{k}$ softened) |
-| **`dt770_80`** | Baseline | $+4.10\text{ dB}$ | $-5.60\text{ dB}$ | $-294.53\text{ dBFS}$ | $99.9999999983\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `dt770_80ohm_f64_48k.wav`<br>`dt770_80ohm_mastering_mono_48k.wav`<br>`dt770_80ohm_mastering_stereo_48k.wav` |
-| **`dt770_80`** | **PR 1 Auto** | $+4.06\text{ dB}$ | $-5.56\text{ dB}$ | $-294.50\text{ dBFS}$ | $99.9999999983\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $4.27\text{ dB}$, $3.7\text{k}$ concha null bypassed ($+0.10\text{ dB}$) |
-| **`ft1pro`** | Baseline | $+4.07\text{ dB}$ | $-5.57\text{ dB}$ | $-309.00\text{ dBFS}$ | $99.9999999999\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `ft1pro_f64_48k.wav`<br>`ft1pro_mastering_mono_48k.wav`<br>`ft1pro_mastering_stereo_48k.wav` |
-| **`ft1pro`** | **PR 1 Auto** | $+4.03\text{ dB}$ | $-5.53\text{ dB}$ | $-308.92\text{ dBFS}$ | $99.9999999999\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 62 knots moved ($9.18\text{k}$ moderated) |
+| **`jbl770nc`** | **KB5000_7 Baseline (Shipped Default)** | $+11.69\text{ dB}$ | $-13.19\text{ dB}$ | $-289.74\text{ dBFS}$ | $99.9999999967\%$ | $0.00\text{ dB}$ HF Wire | `targets/harman_kb5000_7.json` default; IR Peak $-12.00\text{ dBTP}$ |
+| **`jbl770nc`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+11.38\text{ dB}$ | $-12.88\text{ dB}$ | $-289.55\text{ dBFS}$ | $99.9999999968\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$, 28 knots moved ($8.48\text{k}$ softened) |
+| **`jbl770nc`** | Harman 2018 Baseline (`--no-target-preset`) | $+5.00\text{ dB}$ | $-6.50\text{ dB}$ | $-319.21\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | `jbl770nc_f64_48k.wav`<br>`jbl770nc_mastering_mono_48k.wav`<br>`jbl770nc_mastering_stereo_48k.wav` |
+| **`jbl770nc`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+5.00\text{ dB}$ | $-6.50\text{ dB}$ | $-319.20\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$, 20 knots moved ($8.48\text{k}$ softened) |
+| **`dt770_80`** | **KB5000_7 Baseline (Shipped Default)** | $+4.54\text{ dB}$ | $-6.04\text{ dB}$ | $-287.67\text{ dBFS}$ | $99.9999999977\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json` default; IR Peak $-7.26\text{ dBTP}$ |
+| **`dt770_80`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+4.50\text{ dB}$ | $-6.00\text{ dB}$ | $-288.23\text{ dBFS}$ | $99.9999999969\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $4.27\text{ dB}$, 38 knots moved ($3.78\text{k}$ concha null bypassed $+0.57\text{ dB}$) |
+| **`dt770_80`** | Harman 2018 Baseline (`--no-target-preset`) | $+4.10\text{ dB}$ | $-5.60\text{ dB}$ | $-293.39\text{ dBFS}$ | $99.9999999981\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `dt770_80ohm_f64_48k.wav`<br>`dt770_80ohm_mastering_mono_48k.wav`<br>`dt770_80ohm_mastering_stereo_48k.wav` |
+| **`dt770_80`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+4.06\text{ dB}$ | $-5.56\text{ dB}$ | $-293.36\text{ dBFS}$ | $99.9999999982\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $4.27\text{ dB}$, $3.7\text{k}$ concha null bypassed ($+0.10\text{ dB}$) |
+| **`ft1pro`** | **KB5000_7 Baseline (Shipped Default)** | $+3.97\text{ dB}$ | $-5.47\text{ dB}$ | $-301.19\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json` default; IR Peak $-5.56\text{ dBTP}$ |
+| **`ft1pro`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+3.95\text{ dB}$ | $-5.45\text{ dB}$ | $-300.90\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 67 knots moved ($9.18\text{k}$ moderated) |
+| **`ft1pro`** | Harman 2018 Baseline (`--no-target-preset`) | $+4.07\text{ dB}$ | $-5.57\text{ dB}$ | $-311.60\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `ft1pro_f64_48k.wav`<br>`ft1pro_mastering_mono_48k.wav`<br>`ft1pro_mastering_stereo_48k.wav` |
+| **`ft1pro`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+4.03\text{ dB}$ | $-5.53\text{ dB}$ | $-311.45\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 62 knots moved ($9.18\text{k}$ moderated) |
 
 ### Acoustic Scope & Limitations
 A coupler measurement captures one unit on one artificial pinna/ear simulator. Pad wear, seal leakage, and individual pinna geometry shift sub-bass (`<60 Hz`) and high-frequency pinna interference notches (`>3 kHz`) by several dB from ear to ear. For example, even between the Left and Right earcups of the measured DT 770 Pro 80 Ω unit on Crinacle's GRAS 43AG-7 rig, the `~3.76 kHz` concha reflection null shifts by `135 Hz` and `6.6 dB` (`-2.16 dBr` Left vs. `-8.78 dBr` Right at `3,838 Hz`), while the FiiO FT1 Pro exhibits a `4.05 dB` L/R channel split across its `~3.84–4.05 kHz` concha/driver notch (`+4.32 dBr` Left vs. `+8.37 dBr` Right at `3,839 Hz`).
@@ -618,6 +624,110 @@ hypreq -H dt770_80 --experimental-phase 200
 - `jbl770nc_final_verification.png` / `dt770_80ohm_final_verification.png` / `ft1pro_final_verification.png`: 4-panel before/after frequency, filter gain, minimum-phase angle, and time-domain impulse response plots.
 - `*_audit_data.csv`: Auditable CSV tables (when `--export-csv` is passed) listing frequency, raw measurement, Harman target, raw error, and applied EQ.
 - `*_verification.csv`: Per-band verification table (only when `--verify-with` is passed) with measured, predicted, target, residual, in-band scatter, design shortfall, and the pass/fail/uncovered status for every third-octave band.
+
+---
+
+## CLI Tunables & Target Option Matrix
+
+HyprEQ provides comprehensive control over target curve design, acoustic regularization, synthesis backends, fixture verification, limiter dynamics, stereo matching, and test auditing.
+
+### Currently Supported Target Curves
+
+| Target Key / Path | Acoustic Fixture & Reference Pinna | Baseline Source & Provenance | Default Constants | Repo Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **`targets/harman_kb5000_7.json`**<br>(`kb5000_7`) | **GRAS 45CA-10 / 43AG** with anthropometric **KB5000** pinna on IEC 60318-4 coupler | Olive & Clark, *A Preferred Headphone Target Curve Defined for the B&K 5128 and GRAS45CA-10 Test Fixtures* (AES 159 Express Paper 394, Oct 2025). | Baseline CSV (`kb5000_7.csv`) with `params = [0.0, 0.0, 0.0]` (curve already incorporates translated target). | **Shipped Model Default** for `jbl770nc`, `dt770_80`, and `ft1pro`. Pairs `Same` with zero fixture warnings. |
+| **`harman_2018`** | **GRAS 45CA** + RA0045/RA0045-S1 + custom **Welti** pinna | Harman International (Olive, Welti, Khonsaripour, AES 2018). Built-in curve points in `measurements.json`. | Native Harman target with baseline shelf profile. | Shipped database fallback. Accessible via `--no-target-preset`. |
+| **`targets/harman_beta_2024_5128.json`**<br>(`harman_beta_2024_5128`) | **Brüel & Kjær Type 5128** HATS (Type 4.3 ear simulator) | Sean Olive, CanJam NYC 2024 pilot / SoundGuys. 5128 diffuse-field baseline (`bk5128_df.csv`). | $+6.40\text{ dB}$ bass shelf ($<105\text{ Hz}$), $-1.40\text{ dB}$ presence shelf ($>2.5\text{ kHz}$). | Opt-in recipe. Cross-fixture runs against 43AG/KB5000 captures require `--force` or `--rig-calibration`. |
+| **`flat`** | Universal / Fixture-neutral reference | $0.00\text{ dB}$ linear pressure line across $20\text{ Hz} - 20\text{ kHz}$ in `measurements.json`. | Inverts raw headphone response directly to free-field pressure. | Shipped in database. Selected via `--no-target-preset` with custom model or `--target-csv`. |
+| **Custom CSV / Presets** | User-defined | User-supplied 2-column CSV (`freq,dB`) or custom JSON recipe. | Custom user baseline and shelf parameters. | `--target-csv` unlocks fixture enforcement (unspecified target fixture). |
+
+---
+
+### Option Matrix: Tunables & Target Interactions
+
+#### 1. Target Selection, Presets & Parametric Trims
+
+| CLI Flag | Type / Domain | Default State | Core DSP Behavior | Target-Specific Behavior across Supported Targets |
+| :--- | :--- | :--- | :--- | :--- |
+| `--target-preset <JSON>` | Path to JSON | **Active on shipped models** (`targets/harman_kb5000_7.json`); CLI default `None` | Loads a rig-specific target recipe specifying baseline CSV, declared fixture, target family, and shelf constants. | • **`harman_kb5000_7`**: Active by default. Pairs `Same` fixture for KB5000 captures.<br>• **`harman_beta_2024_5128`**: Applies 5128 DF baseline + $+6.4\text{ dB}$ bass / $-1.4\text{ dB}$ presence; triggers fixture guard on 43AG/KB5000 captures unless `--force` is passed.<br>• **Custom JSON**: Overrides model record and executes custom target recipe. |
+| `--no-target-preset` | Flag | **Off** | Disables the model record's default recipe; forces fallback to database target (`harman_2018` or model's declared `target`). | • **`harman_2018`**: Direct route to legacy built-in curve. On shipped models, triggers `fixture_conflict_ok` recorded pairing without refusal.<br>• **`flat`**: Reverts to flat line if model JSON specifies `target: "flat"`.<br>• Mutually conflicts with `--target-preset`. |
+| `--target-csv <CSV>` | Path to CSV | **Off** (`None`) | Injects a raw 2-column baseline curve (`freq_hz,dB`), suppressing the model's recorded `target_preset`. | • **All targets**: Replaces baseline grid knots. Fixture is treated as unrecorded/unlocked, allowing free experimentation without `--force`.<br>• Fully combines with `--target-bass`, `--target-mid`, `--target-tilt`, and `--regularize`. |
+| `--target-family <FAMILY>` | Enum: `harman`, `spatial`, `custom` | **Default:** `harman` (or preset family) | Sets target slope behavior: `harman` (flat slope), `spatial` (adds $-1.0\text{ dB/oct}$ diffuse slope), or `custom`. | • **`harman_kb5000_7`**: Shipped preset specifies `harman`. Specifying `--target-family spatial` adds $-1\text{ dB/oct}$ tilt for spatialized audio.<br>• **`harman_2018`**: Applies $-1\text{ dB/oct}$ if set to `spatial`.<br>• **`flat`**: `spatial` applies downward tilt from 1 kHz reference point. |
+| `--target-bass <DB>` | Float (dB) | **Default:** `0.0` (or preset's constant) | Adjusts parametric low-shelf bass level evaluated below $105\text{ Hz}$ ($12\text{ dB/oct}$ transition). Explicit value overrides preset. | • **`harman_kb5000_7`**: Preset defaults to $0.0\text{ dB}$ (bass already in curve). Explicit `--target-bass +2.0` adds $+2.0\text{ dB}$ sub-bass boost.<br>• **`harman_beta_2024_5128`**: Preset has $+6.4\text{ dB}$; CLI flag overrides this value (e.g. `--target-bass 0.0` removes the shelf).<br>• **`flat`**: Adds bass shelf to flat line. |
+| `--target-mid <DB>` | Float (dB) | **Default:** `0.0` (or preset's constant) | Adjusts parametric presence-shelf mid level evaluated above $2.5\text{ kHz}$. Explicit value overrides preset. | • **`harman_kb5000_7`**: Preset defaults to $0.0\text{ dB}$. CLI adjusts presence/ear-gain energy.<br>• **`harman_beta_2024_5128`**: Preset has $-1.4\text{ dB}$; CLI flag explicitly overrides.<br>• **`flat`**: Adds high-frequency presence shelf directly to flat target. |
+| `--target-tilt <DB_PER_OCT>` | Float (dB/oct) | **Default:** `0.0` (or preset's constant) | Applies a continuous log-frequency slope across the entire audio band pivoted at $1\text{ kHz}$. Explicit value overrides preset. | • **All targets**: Tilts target around $1\text{ kHz}$. Positive values brighten; negative values warm the presentation (e.g. `--target-tilt -0.8`). |
+| `--listen-spl <PHON>` | Float [20, 100] | **Off** (`None`) | Dynamic equal-loudness contour delta compensation per ISO 226:2023 relative to $80\text{ phon}$ reference. | • **All targets**: Dynamically shifts bass and treble boost according to human auditory loudness perception curves. Sub-bass boost expands as listening level decreases below $80\text{ phon}$. |
+| `--iso226-table <JSON>` | Path to JSON | **Off** (`None`) | External path to copyrighted ISO 226:2023 Table 1 threshold data. | • **All targets**: Supplies official tabulated values when running `--listen-spl` without embedded estimation. |
+
+#### 2. Filter Regularization, Notch Control & Alternative Synthesis
+
+| CLI Flag | Type / Domain | Default State | Core DSP Behavior | Target-Specific Behavior across Supported Targets |
+| :--- | :--- | :--- | :--- | :--- |
+| `--regularize <REG>` | `off`, `auto`, or Float (dB) | **Off** (`off`) | Shrinks correction curve toward half-octave smoothed self-envelope: $G_\text{reg} = \frac{|S|^2 G + \beta}{|S|^2 + \beta}$. | • **`harman_kb5000_7`**: Evaluates deviation of raw capture; adaptive knee ($4.29\text{ dB}$ JBL, $4.27\text{ dB}$ DT 770, $3.00\text{ dB}$ FT1 Pro) bypasses concha nulls and coupler mismatch while keeping driver modes.<br>• **`harman_2018`**: Reproduces identical knee deviations per headphone; softens pinna cuts ($8.48\text{ kHz}$ on JBL) and concha dips.<br>• **`harman_beta_2024_5128`**: Mitigates coupler-to-coupler transfer impedance spikes where 5128 canal geometry deviates from 711 couplers.<br>• **`flat`**: Prevents extreme narrowband boosts into deep measurement cancellation notches. |
+| `--notch-mode <MODE>` | Enum: `safe`, `original`, `zero` | **Default:** `safe` | Controls non-minimum-phase concha reflection null handling in model's `notch_range_hz` ($2.8–4.5\text{ kHz}$). | • **`safe`** (Default): Compresses narrow boosts to $+1.50\text{ dB}$ via $C \cdot \tanh(g / C)$ across all targets, preventing glare.<br>• **`original`**: Allows raw target inversion fill ($+4.26\text{ dB}$ on DT 770; $+2.01\text{ dB}$ on FT1 Pro).<br>• **`zero`**: Enforces $0.00\text{ dB}$ flat wire through notch band, skipping concha correction entirely. |
+| `--apodize` | Flag | **Off** (model-defined in JSON) | Forces Gaussian Nyquist roll-off ($>20.2\text{ kHz}$) to eliminate Gibbs ringing on legacy brickwall DACs. | • Overrides model JSON: forces apodization even on flat-wire profiles (e.g. `jbl770nc`). Target-independent. |
+| `--no-apodize` | Flag | **Off** (model-defined in JSON) | Forces non-apodizing $0.00\text{ dB}$ ultrasonic wire up to Nyquist, disabling model's `gauss_apodize`. | • Overrides model JSON: preserves flat wire to Nyquist on DT 770 and FT1 Pro. Target-independent. |
+| `--synth <BACKEND>` | Enum: `fir`, `peq`, `parallel-iir` | **Default:** `fir` | Synthesis engine: `fir` (65,536-tap minimum-phase FIR), `peq` (parametric biquads + APO export), `parallel-iir` (parallel second-order sections). | • **`fir`** (Default): Evaluates Hilbert-Cepstral minimum-phase impulse response.<br>• **`peq`**: Fits $N$ peaking/shelf filters using Vicanek/RBJ biquads and exports EqualizerAPO config with dense-grid verified preamp.<br>• **`parallel-iir`**: Generates parallel second-order sections for ultra-low latency hardware DSP engines. |
+| `--peq-bands <N>` | Integer [1, 32] | **Default:** `8` | Number of parametric biquad bands allocated when `--synth peq`. | • Fits available biquad budget to dominant acoustic features of target error curve. Target-independent. |
+| `--global-fit` | Flag | **Off** | Solves a global curvature-constrained box-QP over the dense 1/48-octave grid. | • Solves bounded convex optimization penalizing second-derivative roughness while respecting driver excursion/headroom boundaries. Operates across any target. |
+
+#### 3. Fixture Hardware Validation, Cross-Rig Translation & Ensembles
+
+| CLI Flag | Type / Domain | Default State | Core DSP Behavior | Target-Specific Behavior across Supported Targets |
+| :--- | :--- | :--- | :--- | :--- |
+| `--force` | Flag | **Off** | Overrides fixture mismatch refusal between model fixture and target defined fixture (Olive & Clark 2025). | • **`harman_kb5000_7`**: Not needed for shipped models (paired `Same`). If used with a 45CA or 5128 raw capture, `--force` overrides refusal and prints warning.<br>• **`harman_beta_2024_5128`**: Required when equalizing 43AG/KB5000 captures to 5128 target (prints acoustic impedance warning).<br>• **`harman_2018`**: Not needed with `--no-target-preset` because model records `fixture_conflict_ok`. |
+| `--rig-calibration <JSON>` | Path to JSON | **Off** (`None`) | Ingests empirical transfer function ($\Delta_\text{mean}, \sigma$) to translate raw measurement from source rig to target rig. | • **All targets**: Correctly applied to `raw_active` **before** target derivation and regularization, guaranteeing $0.00\text{ dB}$ HF bypass flat wire and preventing notch distortion. |
+| `--ensemble-csv <CSV>` | Path to CSV (repeatable) | **Off** (`None`) | Ingests multiple repeated-placement raw measurement CSVs to compute spatial variance across seatings. | • Computes spatial variance grid; feeds robust fit and excursion protection without overfitting single seatings. Target-independent. |
+| `--ensemble-alpha <VAL>` | Float [0.0, 1.0] | **Default:** `0.0` (median) | Masiero & Fels upper-variance weighting on 1/6-octave smoothed ensemble curves. | • Tunes conservative placement envelope: `0.0` fits spatial median; `1.0` biases against upper placement leakage. Target-independent. |
+
+#### 4. Dynamics, Preamp Headroom & Polyphase True-Peak Limiter
+
+| CLI Flag | Type / Domain | Default State | Core DSP Behavior | Target-Specific Behavior across Supported Targets |
+| :--- | :--- | :--- | :--- | :--- |
+| `--headroom-db <DB>` | Float (dB) | **Default:** `-1.50 dB` | Steady-state convolver preamp headroom added to inverse max filter boost: $\text{Preamp} = -(\text{Max Boost}) + \text{Headroom}$. | • Scales static FIR gain to guarantee 0 dBFS sine inputs never clip linear convolvers. Active on all targets.<br>• On `harman_kb5000_7` with JBL 770NC (max boost $+11.69\text{ dB}$), total preamp is $-13.19\text{ dB}$. On Harman 2018 (max boost $+5.00\text{ dB}$), total preamp is $-6.50\text{ dB}$. |
+| `--no-tp-limiter` | Flag | **Off** (limiter enabled) | Disables the two-stage true-peak ceiling limiter on audio playback/test probes (measurements still execute). | • Allows unbounded linear convolution for offline analysis or bit-transparent mastering chains. Target-independent. |
+| `--tp-ceiling <DBTP>` | Float [-24.0, 0.0] | **Default:** `-3.0 dBTP` | Sets the hard true-peak ceiling for the dynamic limiter. | • Bounds inter-sample peaks across DAC reconstruction filters. Target-independent. |
+| `--tp-ratio <RATIO>` | Enum: `x2`, `x4`, `x8`, `x16`, `x32` | **Default:** `x16` | Polyphase Kaiser oversampling ratio for true-peak detection and side-chain tracking. | • Exceeds standard ITU-R BS.1770-5 (x4) detection accuracy, catching sub-sample transients up to Nyquist. Target-independent. |
+| `--tp-lookahead <MS>` | Float [0.2, 2.0] | **Default:** `2.0 ms` | Lookahead buffer for transparent gain reduction ramp-up. | • Prevents transient waveshape clipping without audible distortion. Target-independent. |
+| `--tp-attack <MS>` | Float [1.0, 200.0] | **Default:** `60.0 ms` | Slow-stage RMS envelope attack time constant. | • Shapes macro-dynamic levelling without pumping. Target-independent. |
+| `--tp-release <MS>` | Float [10.0, 5000.0] | **Default:** `900.0 ms` | Slow-stage release time constant. | • Smooth dynamic decay recovery. Target-independent. |
+| `--tp-link-transient <VAL>` | Float [0.0, 1.0] | **Default:** `1.0` (100%) | Channel linking ratio for transient peak limiter stage. | • Prevents stereo image shifting on sharp unilateral transients. Target-independent. |
+| `--tp-link-release <VAL>` | Float [0.0, 1.0] | **Default:** `0.75` (75%) | Channel linking ratio for slow dynamic stage. | • Natural independent ambient breathing with cohesive stereo image. Target-independent. |
+
+#### 5. Stereo Interaural Processing & Phase Linearization
+
+| CLI Flag | Type / Domain | Default State | Core DSP Behavior | Target-Specific Behavior across Supported Targets |
+| :--- | :--- | :--- | :--- | :--- |
+| `--stereo <MODE>` | Enum: `off`, `report`, `split` | **Default:** `off` | Multi-ear processing: `off` (single shared filter), `report` (audit L/R asymmetry), `split` (independent per-ear filters; requires `--synth fir` and stereo input). | • **`off`**: Uses channel-average measurement.<br>• **`report`**: Audits interaural imbalance without modifying filter.<br>• **`split`**: Generates independent Left and Right IRs to correct driver imbalance. Target-independent. |
+| `--stereo-max-skew <DB>` | Float (dB) | **Default:** `6.0 dB` | Clamps maximum allowable interaural filter divergence in any 1/3-octave band. | • Prevents artificial spatial tilting due to earcup placement asymmetry or coupler leakage differences. Active across all targets under `--stereo split`. |
+| `--experimental-phase <HZ>` | Float (Hz) | **Off** (`0.0`) | Replaces minimum-phase group delay below `<HZ>` with linear-phase line while carrying magnitude curve through untouched. | • Eliminates bass phase rotation from boost EQ without pre-ringing in the mid/high frequencies. Group delay audit and added latency printed in report. Active across all targets. |
+
+#### 6. Audio File Processing, Formats & Dither
+
+| CLI Flag | Type / Domain | Default State | Core DSP Behavior | Target-Specific Behavior across Supported Targets |
+| :--- | :--- | :--- | :--- | :--- |
+| `--input <PATH>` | Path to WAV | **Off** (`None`) | Input WAV file to convolve with headphone EQ and true-peak limit. | • Convolves stream through generated minimum-phase filter and passes through dynamic limiter. Target-independent. |
+| `--output <PATH>` | Path to WAV | **Off** (`<in>_<model>_tp_<ratio>.wav`) | Output WAV destination path for convolved audio stream. | • Target-independent. |
+| `--out-bits <BITS>` | Integer: 16, 24, 32, 64 | **Default:** `32` (float) | Output WAV bit depth: 16/24-bit TPDF PCM or 32/64-bit IEEE float. | • 16-bit and 24-bit paths apply exact triangular PDF (TPDF) dither, eliminating quantization distortion. Target-independent. |
+| `--bypass-eq` | Flag | **Off** | Bypasses EQ convolution stage; runs true-peak limiter and audio metering only. | • Useful for mastering-grade true-peak limiting of existing master files. Target-independent. |
+| `--trim-tail` | Flag | **Off** | Trims convolver and limiter latency tails to match exact input frame count. | • Guarantees frame-accurate synchronization for video production workflows. Target-independent. |
+| `--measure-only` | Flag | **Off** | Analyzes true-peak levels and meter reports without writing WAV output. | • Evaluates audio peaks, crest factors, and BS.1770 loudness without disk I/O. Target-independent. |
+| `--measure-wav <PATH>` | Path to WAV | **Off** (`None`) | Shorthand convenience flag for `--input <wav> --bypass-eq --measure-only`. | • Instant command-line true-peak audio analysis. Target-independent. |
+
+#### 7. Verification, Auditing, Reporting & Diagnostics
+
+| CLI Flag | Type / Domain | Default State | Core DSP Behavior | Target-Specific Behavior across Supported Targets |
+| :--- | :--- | :--- | :--- | :--- |
+| `--assess` | Flag | **Off** | Reports per-1/3-octave band acoustic energy demands on content and amplifier headroom. | • Identifies frequency bands requiring heavy electrical amplifier drive or driver excursion. Active across all targets. |
+| `--assess-budget <DB>` | Float (dB) | **Default:** `6.0 dB` | Boost threshold at which `--assess` flags a demanding band. | • Highlights bands where filter boost exceeds budget threshold. Target-independent. |
+| `--verify-with <CSV>` | Path to CSV | **Off** (`None`) | Verifies written filter against post-equalization acoustic capture CSV (`freq,dB`). | • Compares realized filter against target curve on a 1/3-octave grid. Accurately evaluates against the **run's active target** (KB5000_7, Harman 2018, Beta-5128, or flat). Writes `<prefix>_verification.csv`. |
+| `--verify-pass-db <DB>` | Float (dB) | **Default:** `3.0 dB` | Tolerance threshold for post-EQ residual pass/fail verdict. | • Evaluates maximum residual error across analyzed third-octave bands. Target-independent. |
+| `--verify-snr-db <DB>` | Float (dB) | **Default:** `20.0 dB` | Noise floor cutoff below capture's median band level. | • Discards acoustic noise floor bands from verification scoring. Target-independent. |
+| `--ppr-mode <MODE>` | `over-ear` or `in-ear` | **Default:** `over-ear` | Form-factor mode for calculating Harman Predicted Preference Rating (PPR) after verification. | • Calculates statistical preference rating based on acoustic deviation from Harman target. |
+| `--export-csv` | Flag | **Off** | Exports auditable `<prefix>_audit_data.csv` table. | • Contains 5 columns: `frequency_hz`, `raw_measurement_dBr`, `target_dBr`, `raw_error_dB`, and `applied_eq_dB`. Columns strictly track the **active target** of the run. |
+| `--no-plot` | Flag | **Off** | Skips 4-panel PNG verification figure generation. | • Speeds up batch headless execution or CI pipelines. Target-independent. |
+| `--list-models` | Flag | **Off** | Lists all loaded headphone models and metadata from `measurements.json` and `models/` directory, then exits. | • Diagnostic query flag. |
+| `--upgrade-json` | Flag | **Off** | Enriches `measurements.json` in-place with built-in metadata and callout annotations. | • Schema migration flag. |
 
 ---
 

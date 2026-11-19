@@ -33,6 +33,11 @@ pub const FIG_W: u32 = 1950;
 /// Figure height in pixels.
 pub const FIG_H: u32 = 1725;
 
+/// Font family used across all panels. "Liberation Sans" is preferred on Linux
+/// because DejaVu Sans has a negative side-bearing/descender on uppercase Latin 'J'
+/// that plotters 0.3's ttf rasterizer clips at the top stem.
+pub const FONT_FAMILY: &str = "Liberation Sans";
+
 /// Space above the first panel, for nothing but margin.
 const M_TOP: u32 = 95;
 /// Plot-area left edge; a panel's y labels occupy the 62 px to its left.
@@ -446,7 +451,7 @@ pub fn arrow_head_points(
 /// y label bottom-to-top, which is the 270-degree variant.
 fn label(band: &BitmapArea<'_>, x: i32, y: i32, spec: &TextSpec<'_>) -> PlotResult {
     use plotters::prelude::*;
-    let style = ("sans-serif", f64::from(spec.size))
+    let style = (FONT_FAMILY, f64::from(spec.size))
         .into_font()
         .color(&spec.color.color())
         .pos(spec.anchor);
@@ -478,7 +483,7 @@ fn solid(c: Rgb) -> plotters::style::ShapeStyle {
 /// The rendered width of a string, measured on the active backend.
 fn text_w(band: &BitmapArea<'_>, text: &str, size: u32) -> Plot<i32> {
     use plotters::prelude::*;
-    let style = ("sans-serif", f64::from(size))
+    let style = (FONT_FAMILY, f64::from(size))
         .into_font()
         .color(&TEXT.color());
     let (w, _) = band.estimate_text_size(text, &style).map_err(dv)?;
@@ -1057,7 +1062,7 @@ pub fn callout_tail_point(
     if lines.is_empty() || centres.is_empty() {
         return xytext;
     }
-    let font = ("sans-serif", ANNOT_FONT).into_font();
+    let font = (FONT_FAMILY, ANNOT_FONT).into_font();
     let mut text_w_px = 10.0f64;
     let mut font_h_px = 15.0f64;
     for l in lines {
@@ -1200,7 +1205,10 @@ macro_rules! annotations {
                     .draw_series(vec![Text::new(
                         line.to_string(),
                         (a.xytext.0, ty),
-                        ("sans-serif", $crate::plot::ANNOT_FONT)
+                        (
+                            $crate::plot::FONT_FAMILY,
+                            $crate::plot::ANNOT_FONT,
+                        )
                             .into_font()
                             .color(&color.color()),
                     )])

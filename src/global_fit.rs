@@ -196,7 +196,7 @@ pub fn solve_global_qp(input: &GlobalFitInput, cfg: &GlobalFitConfig) -> Option<
             1e12
         };
         let erb_w = if cfg.use_erb_weights && f.is_finite() && f > 0.0 {
-            crate::psycho::erb_density(f)
+            crate::psycho::erb_log_density(f)
         } else {
             1.0
         };
@@ -319,10 +319,10 @@ fn box_bounds(q_min_db: &[f64], q_max_db: &[f64]) -> (Vec<f64>, Vec<f64>) {
             q_max_db[i]
         };
 
-        let (l, h) = if is_q_min_inf && b.is_finite() {
-            (b, b)
-        } else if is_q_max_neg_inf && a.is_finite() {
-            (a, a)
+        let (l, h) = if is_q_min_inf && q_max_db[i].is_finite() {
+            (q_max_db[i], q_max_db[i])
+        } else if is_q_max_neg_inf && q_min_db[i].is_finite() {
+            (q_min_db[i], q_min_db[i])
         } else if a <= b {
             (a, b)
         } else if a.is_finite() && b.is_finite() {
@@ -434,6 +434,14 @@ mod tests {
         let (lo3, hi3) = box_bounds(&[f64::NEG_INFINITY], &[f64::INFINITY]);
         assert_eq!(lo3[0], f64::MIN);
         assert_eq!(hi3[0], f64::MAX);
+
+        let (lo4, hi4) = box_bounds(&[f64::INFINITY], &[f64::INFINITY]);
+        assert_eq!(lo4[0], 0.0);
+        assert_eq!(hi4[0], 0.0);
+
+        let (lo5, hi5) = box_bounds(&[f64::INFINITY], &[f64::NEG_INFINITY]);
+        assert_eq!(lo5[0], 0.0);
+        assert_eq!(hi5[0], 0.0);
     }
 
     #[test]

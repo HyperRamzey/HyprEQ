@@ -65,7 +65,7 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     json!({
       "jbl770nc": {
         "short_title": "JBL Live 770NC (Passive)",
-        "notch_ref_hz": null,
+        "notch_ref_hz": 5365.9,
         "autoeq_offset_db": 0.0,
         "gauss_apodize": false,
         "plot_meta": {
@@ -78,16 +78,16 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
           "autoeq_ax2_label": "Standard AutoEq Curve (2.0 oct treble blur boosts 6.88k/8.48kHz peaks)",
           "ax1_ylim": [-15.0, 9.0],
           "ax1_yticks": [-15, -10, -5, 0, 5],
-          "ax2_ylim": [-11.0, 10.0],
-          "ax2_yticks": [-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0],
+          "ax2_ylim": [-11.0, 14.0],
+          "ax2_yticks": [-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0, 12.5],
           "annotations": [
-            {"text": "1. KB006x Stiff-Pinna Leak Fix\n(+0.12dB @ 20Hz vs AutoEq +2.7dB)", "xy": [20.5, 0.12], "xytext": [22.0, 5.8], "color": "cyan"},
-            {"text": "2. Coupled Passive ANC Cup Dipole\n(-7.04dB @ 160Hz, +2.60dB @ 455Hz)", "xy": [156.9, -7.03], "xytext": [95.0, 5.2], "color": "cyan"},
-            {"text": "", "xy": [454.9, 2.60], "xytext": [275.0, 5.2], "color": "cyan"},
-            {"text": "3. 1.05kHz Nasal Cut & Ear-Gain\n(-2.45dB @ 1.05kHz; +5.00dB @ 4.06kHz)", "xy": [1049.4, -2.45], "xytext": [480.0, 3.2], "color": "cyan"},
-            {"text": "4. 5.37kHz Concha Notch Shelf Bridge\n(+3.70dB flat bridge across 4.8-5.5kHz;\nignores narrow +8.75dB null spike)", "xy": [5365.9, 3.70], "xytext": [1450.0, 7.3], "color": "green"},
-            {"text": "5. 6.88kHz & 8.48kHz Breakup Poles\n(-2.31dB & -3.16dB Surgical Cuts)", "xy": [6881.4, -2.31], "xytext": [3200.0, -8.5], "color": "green"},
-            {"text": "", "xy": [8480.6, -3.16], "xytext": [6200.0, -6.8], "color": "green"},
+            {"text": "1. KB006x Stiff-Pinna Leak Fix\n({curve_db:+.2}dB @ 20Hz vs AutoEq +2.7dB)", "xy": [20.5, "curve"], "xytext": [22.0, 5.8], "color": "cyan"},
+            {"text": "2. Coupled Passive ANC Cup Dipole\n({curve_db:+.2}dB @ 160Hz, +2.60dB @ 455Hz)", "xy": [156.9, "curve"], "xytext": [95.0, 5.2], "color": "cyan"},
+            {"text": "", "xy": [454.9, "curve"], "xytext": [275.0, 5.2], "color": "cyan"},
+            {"text": "3. 1.05kHz Nasal Cut & Ear-Gain\n(-2.45dB @ 1.05kHz; +5.00dB @ 4.06kHz)", "xy": [1049.4, "curve"], "xytext": [480.0, 3.2], "color": "cyan"},
+            {"text": "4. 5.37kHz Concha Notch Shelf Bridge\n(+3.70dB flat bridge across 4.8-5.8kHz;\nignores narrow +8.75dB null spike)", "xy": [5365.9, "curve"], "xytext": [1450.0, 7.3], "color": "green"},
+            {"text": "5. 6.88kHz & 8.48kHz Breakup Poles\n(-2.31dB & -3.16dB Surgical Cuts)", "xy": [6881.4, "curve"], "xytext": [3200.0, -8.5], "color": "green"},
+            {"text": "", "xy": [8480.6, "curve"], "xytext": [6200.0, -6.8], "color": "green"},
             {"text": "6. >9.1kHz Uncorrected Coupler Null Zone\n(0.0dB wire: ignores 9.75k & 11.2kHz nulls)", "xy": [10347.9, 0.0], "xytext": [5900.0, 4.8], "color": "cyan"}
           ]
         }
@@ -200,6 +200,8 @@ pub struct Model {
     pub harm_offset: f64,
     pub gauss_apodize: bool,
     pub hf_bypass_hz: f64,
+    pub hf_taper_start_hz: Option<f64>,
+    pub subbass_leak_discount_db: Option<f64>,
     pub notch_range_hz: Option<(f64, f64)>,
     pub notch_ref_hz: Option<f64>,
     pub safe_cap_db: f64,
@@ -1148,6 +1150,8 @@ pub fn normalize_model_entry(
             .or_else(|| defaults.get("gauss_apodize").and_then(Value::as_bool))
             .unwrap_or(false),
         hf_bypass_hz,
+        hf_taper_start_hz: cfg.get("hf_taper_start_hz").and_then(as_f64),
+        subbass_leak_discount_db: cfg.get("subbass_leak_discount_db").and_then(as_f64),
         notch_range_hz,
         notch_ref_hz,
         safe_cap_db: f64_or(cfg, "safe_cap_db", 1.50),
@@ -2053,6 +2057,8 @@ mod tests {
                 harm_offset: 0.0,
                 gauss_apodize: false,
                 hf_bypass_hz: 9500.0,
+                hf_taper_start_hz: None,
+                subbass_leak_discount_db: None,
                 notch_range_hz: None,
                 notch_ref_hz: None,
                 safe_cap_db: 1.5,
@@ -2119,6 +2125,8 @@ mod tests {
             harm_offset: 0.0,
             gauss_apodize: false,
             hf_bypass_hz: 20000.0,
+            hf_taper_start_hz: None,
+            subbass_leak_discount_db: None,
             notch_range_hz: None,
             notch_ref_hz: None,
             safe_cap_db: 1.5,

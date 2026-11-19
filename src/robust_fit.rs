@@ -80,6 +80,7 @@ pub fn analyze_ensemble(
             .filter(|(f, g)| f.is_finite() && *f > 0.0 && g.is_finite())
             .collect();
         pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        pts.dedup_by(|a, b| a.0 == b.0);
         if pts.len() < 2 {
             continue;
         }

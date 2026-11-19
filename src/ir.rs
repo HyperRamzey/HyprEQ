@@ -186,7 +186,7 @@ pub fn synthesize_minimum_phase_ir(
     if gauss_apodize {
         // Nyquist-adaptive Gaussian roll-off: w(f) = 2^(-0.5 * x^2) where x = (f - f_start) / width.
         // In dB: -10 * log10(2) * x^2 ~= -3.0103 * x^2 dB (-3.0103 dB at x = 1).
-        let f_nyq = (fs_f / 2.0).max(24000.0);
+        let f_nyq = fs_f / 2.0;
         let f_start = f_nyq * (20200.0 / 24000.0);
         let width = (f_nyq - f_start) / (3800.0 / 1650.0);
         for (f, db) in freqs.iter().zip(target_db.iter_mut()) {
@@ -322,30 +322,23 @@ pub fn synthesize_stereo_minimum_phase_ir(
     let shared_max_boost = left.max_boost_db.max(right.max_boost_db);
     let shared_preamp = headroom_db - shared_max_boost;
 
-    if (left.preamp_db - shared_preamp).abs() > 1e-9 {
-        left = synthesize_minimum_phase_ir(
-            left_ctrl,
-            fs,
-            n_fft,
-            n_taps,
-            n_tail,
-            shared_preamp + left.max_boost_db,
-            gauss_apodize,
-            kaiser_beta,
-        )?;
-    }
-    if (right.preamp_db - shared_preamp).abs() > 1e-9 {
-        right = synthesize_minimum_phase_ir(
-            right_ctrl,
-            fs,
-            n_fft,
-            n_taps,
-            n_tail,
-            shared_preamp + right.max_boost_db,
-            gauss_apodize,
-            kaiser_beta,
-        )?;
-    }
+    let scale_channel = |ch: &mut IrResult| {
+        let diff = shared_preamp - ch.preamp_db;
+        if diff.abs() > 1e-9 {
+            let scale = 10.0f64.powf(diff / 20.0);
+            for x in &mut ch.ir {
+                *x *= scale;
+            }
+            for m in &mut ch.mag_lin {
+                *m *= scale;
+            }
+            ch.preamp_db = shared_preamp;
+            ch.unwindowed_floor_dbfs = db_floor(&ch.ir, 128);
+            ch.windowed_floor_dbfs = db_floor(&ch.ir, 100);
+        }
+    };
+    scale_channel(&mut left);
+    scale_channel(&mut right);
     Ok((left, right))
 }
 
@@ -478,8 +471,7 @@ pub fn export_audit_csv_in(
     let g_h: Vec<f64> = harm_pts.iter().map(|p| p.1 + harm_offset).collect();
     let harm_at_ctrl = crate::pchip::pchip_log_interp(&f_h, &g_h, &f_ctrl);
 
-    let mut s =
-        String::from("frequency_hz,raw_dBr,harman_target_dBr,raw_error_dB,applied_eq_dB\r\n");
+    let mut s = String::from("frequency_hz,raw_dBr,target_dBr,raw_error_dB,applied_eq_dB\r\n");
     for (((freq, r_val), h_val), eq_val) in f_ctrl
         .iter()
         .zip(&raw_at_ctrl)
@@ -916,8 +908,7 @@ mod tests {
         // process-global state and `cargo test` runs this test beside every other one.
         let p = export_audit_csv_in(&dir, "unitmodel", &raw, &target, 0.0, &ctrl).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text
-            .starts_with("frequency_hz,raw_dBr,harman_target_dBr,raw_error_dB,applied_eq_dB\r\n"));
+        assert!(text.starts_with("frequency_hz,raw_dBr,target_dBr,raw_error_dB,applied_eq_dB\r\n"));
         assert!(text.ends_with("\r\n"));
         let row1 = text.lines().nth(1).unwrap();
         assert!(row1.starts_with("20.0,"), "{row1}");

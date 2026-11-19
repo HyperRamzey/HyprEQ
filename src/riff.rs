@@ -231,6 +231,10 @@ impl WavWriter {
 
     pub fn finish(mut self) -> Result<u64> {
         let total = self.data_len;
+        if !total.is_multiple_of(2) {
+            self.f.seek(SeekFrom::End(0))?;
+            self.f.write_all(&[0u8])?;
+        }
         let (riff, data) = riff_sizes(total, self.hdr_len)?;
         self.f.seek(SeekFrom::Start(4))?;
         self.f.write_all(&riff.to_le_bytes())?;
@@ -829,5 +833,23 @@ mod tests {
         assert_eq!(u32::from_le_bytes([h[46], h[47], h[48], h[49]]), 0);
         assert_eq!(&h[50..54], b"data");
         assert_eq!(u32::from_le_bytes([h[54], h[55], h[56], h[57]]), 0);
+    }
+
+    #[test]
+    fn odd_sized_data_chunk_appends_pad_byte_and_aligns_riff_size() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_odd_wav_pad.wav");
+        let mut w = WavWriter::create(&path, 48000, 1, 8, false, None).unwrap();
+        // 3 bytes is odd payload
+        w.write(&[1, 2, 3]).unwrap();
+        let total = w.finish().unwrap();
+        assert_eq!(total, 3);
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        // Total file length must be even (header + 3 bytes + 1 pad byte)
+        assert_eq!(bytes.len() % 2, 0);
+        let riff_len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        assert_eq!(riff_len, bytes.len() - 9);
+        assert_eq!(*bytes.last().unwrap(), 0u8);
     }
 }

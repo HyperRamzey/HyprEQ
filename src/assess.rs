@@ -156,11 +156,13 @@ pub fn nominal(k: i32) -> f64 {
 /// demand, and no `Pchip` panic on a degenerate curve.
 #[must_use]
 pub fn curve_at(bands: &[Band], ctrl: &[(f64, f64)]) -> Vec<f64> {
-    let usable: Vec<(f64, f64)> = ctrl
+    let mut usable: Vec<(f64, f64)> = ctrl
         .iter()
         .filter(|(f, g)| f.is_finite() && *f > 0.0 && g.is_finite())
         .copied()
         .collect();
+    usable.sort_by(|a, b| a.0.total_cmp(&b.0));
+    usable.dedup_by(|a, b| a.0 == b.0);
     if usable.len() < 2 {
         return vec![0.0; bands.len()];
     }

@@ -49,8 +49,8 @@ impl TargetParams {
         };
         let x_bass = (f / 105.0).powi(2);
         let b = 1.0 / (1.0 + x_bass);
-        let z_mid = (f / 2500.0).log2() / 0.65;
-        let m = (-0.5 * z_mid * z_mid).exp();
+        let x_mid = (f / 2500.0).powi(2);
+        let m = x_mid / (1.0 + x_mid);
         let s = (f / 1000.0).log2();
         [b, m, s]
     }
@@ -232,7 +232,20 @@ mod tests {
             (b - 1.0).abs() < 1e-9,
             "the shelf saturates to 1 as f -> 0, got {b}"
         );
-        assert!(m.abs() < 1e-12, "the bell vanishes as f -> 0, got {m}");
+        assert!(
+            m.abs() < 1e-12,
+            "the high-shelf vanishes as f -> 0, got {m}"
+        );
+        let [_, m_mid, _] = TargetParams::features(2500.0);
+        assert!(
+            (m_mid - 0.5).abs() < 1e-12,
+            "high-shelf is 0.5 at 2.5 kHz, got {m_mid}"
+        );
+        let [_, m_inf, _] = TargetParams::features(1e9);
+        assert!(
+            (m_inf - 1.0).abs() < 1e-6,
+            "high-shelf saturates to 1 as f -> inf, got {m_inf}"
+        );
         assert!(s < -30.0 && s.is_finite(), "the tilt is finite, got {s}");
         // Bad input stays visible instead of being invented as something plausible.
         assert!(

@@ -128,11 +128,9 @@ fn run_files(
         .args(args)
         .output()
         .expect("the binary runs");
-    let dir2 = dir.clone();
     let code = out.status.code();
     let stdout = String::from_utf8(out.stdout).expect("stdout is utf-8");
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-    let _ = dir2;
     (dir, code, stdout, stderr)
 }
 
@@ -1295,7 +1293,7 @@ fn a_recorded_conflict_ok_unlocks_the_shipped_pairing_only() {
 /// shipped target.
 ///
 /// Two runs of one model differing only in the preset's flat baseline (0 dB and +12 dB): the
-/// `harman_target_dBr` column must sit exactly 12 dB apart between the two files. This
+/// `target_dBr` column must sit exactly 12 dB apart between the two files. This
 /// discriminates without knowing the model's `harm_offset`, and it fails loudly at 0 dB of
 /// difference if the export reads `model.target_pts` again -- the historic bug where a preset
 /// run tabulated the target of the shipped pairing under the filter of the run's own target.

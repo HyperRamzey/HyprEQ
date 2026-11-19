@@ -683,7 +683,6 @@ fn run(args: Args) -> Result<(), Error> {
             // The recipe alone is the override here; a database that records its target rigs is the
             // ordinary case, not a replacement, and `fixture_conflict_ok` speaks about that case.
             fixture_guard(
-                &models,
                 m,
                 target_fixture,
                 recipe_fixture.is_some(),
@@ -808,7 +807,6 @@ fn preset_fixture_only(path: &Path) -> Option<hypreq::fixture::Fixture> {
 /// like a replacement on every ordinary run — which would silence the `fixture_conflict_ok`
 /// exemption for exactly the models that carry it, and refuse the program's built-in path.
 fn fixture_guard(
-    _models: &Database,
     model: &Model,
     target_fixture: Option<hypreq::fixture::Fixture>,
     recipe_active: bool,
@@ -1123,7 +1121,7 @@ fn limit_ir(ir: &mut [f64], lim_cfg: &hypreq::limiter::Cfg, headroom_db: f64) ->
     if !lim_cfg.enable {
         return 0.0;
     }
-    let ceiling_db = lim_cfg.ceiling_db.max(headroom_db).min(0.0);
+    let ceiling_db = lim_cfg.ceiling_db.min(headroom_db).min(0.0);
     let mut tp = TruePeak::new(lim_cfg.ratio, 1);
     tp.push_ch(0, ir);
     tp.drain();
@@ -1208,6 +1206,10 @@ fn run_model(
 
     let gr_mpv = limit_ir(&mut mpv.ir, lim_cfg, headroom_db);
     if gr_mpv > 0.0 {
+        let scale = 10.0f64.powf(-gr_mpv / 20.0);
+        for m in &mut mpv.mag_lin {
+            *m *= scale;
+        }
         mpv.preamp_db -= gr_mpv;
         mpv.unwindowed_floor_dbfs -= gr_mpv;
         mpv.windowed_floor_dbfs = hypreq::ir::db_floor(&mpv.ir, 100);
@@ -1227,7 +1229,7 @@ fn run_model(
     let ir_l1_db = l1_gain_db(&mpv.ir);
 
     let f_nyq = f64::from(fs) / 2.0;
-    let f_apod_start = f_nyq.max(24000.0) * (20200.0 / 24000.0);
+    let f_apod_start = f_nyq * (20200.0 / 24000.0);
     let apod_desc = if use_apodize {
         format!("Gaussian Apodizer (>{:.1} kHz)", f_apod_start / 1000.0)
     } else {
@@ -1315,6 +1317,10 @@ fn run_model(
     }
     let gr_rt = limit_ir(&mut rt.ir, lim_cfg, headroom_db);
     if gr_rt > 0.0 {
+        let scale = 10.0f64.powf(-gr_rt / 20.0);
+        for m in &mut rt.mag_lin {
+            *m *= scale;
+        }
         rt.preamp_db -= gr_rt;
         rt.unwindowed_floor_dbfs -= gr_rt;
         rt.windowed_floor_dbfs = hypreq::ir::db_floor(&rt.ir, 100);
@@ -1607,7 +1613,16 @@ fn run_audio_wav_mode(
         };
         let phase = if per_ear.is_none() {
             if let Some(mpv) = mpv_filter.as_mut() {
-                phase_stage(mpv, fs, "applied", args)?
+                let p = phase_stage(mpv, fs, "applied", args)?;
+                let gr = limit_ir(&mut mpv.ir, lim_cfg, args.headroom_db);
+                if gr > 0.0 {
+                    let scale = 10.0f64.powf(-gr / 20.0);
+                    for m in &mut mpv.mag_lin {
+                        *m *= scale;
+                    }
+                    mpv.preamp_db -= gr;
+                }
+                p
             } else {
                 None
             }
@@ -1678,6 +1693,22 @@ fn run_audio_wav_mode(
                 } else {
                     Vec::new()
                 };
+                let gr_l = limit_ir(&mut left.ir, lim_cfg, args.headroom_db);
+                if gr_l > 0.0 {
+                    let scale = 10.0f64.powf(-gr_l / 20.0);
+                    for m in &mut left.mag_lin {
+                        *m *= scale;
+                    }
+                    left.preamp_db -= gr_l;
+                }
+                let gr_r = limit_ir(&mut right.ir, lim_cfg, args.headroom_db);
+                if gr_r > 0.0 {
+                    let scale = 10.0f64.powf(-gr_r / 20.0);
+                    for m in &mut right.mag_lin {
+                        *m *= scale;
+                    }
+                    right.preamp_db -= gr_r;
+                }
                 for (tag, ir) in [("left", &left), ("right", &right)] {
                     // Padded to the width the shared line's `(prefix)   ` occupies, so the two
                     // variants of this line put their numbers in the same column.
@@ -2005,7 +2036,11 @@ fn derivation_params(model: &Model) -> (f64, f64, f64) {
             d.hf_bypass_hz,
             d.subbass_leak_discount_db,
         ),
-        None => (model.hf_bypass_hz * 0.88, model.hf_bypass_hz, 0.0),
+        None => (
+            model.hf_taper_start_hz.unwrap_or(model.hf_bypass_hz * 0.88),
+            model.hf_bypass_hz,
+            model.subbass_leak_discount_db.unwrap_or(0.0),
+        ),
     }
 }
 
@@ -2699,21 +2734,28 @@ fn global_fit_stage(
     } else {
         vec![0.0; k]
     };
-    let q_max = match model.distortion.as_ref() {
-        Some(d) => d.q_max_bounds(&f, &h_cal, listen_spl, 3.0, 6.0),
-        None => vec![6.0; k],
+    let mut q_max = match model.distortion.as_ref() {
+        Some(d) => d.q_max_bounds(&f, &h_cal, listen_spl, 3.0, 12.0),
+        None => vec![12.0; k],
     };
+    let mut q_min = vec![-24.0; k];
+    for (i, &hz) in f.iter().enumerate() {
+        if hz >= model.hf_bypass_hz {
+            q_min[i] = 0.0;
+            q_max[i] = 0.0;
+        }
+    }
     // Counted before `q_max` moves into the solver: the report has to say how much of the band the
     // ceiling actually binds, or a reader cannot tell a bound from a coincidence.
     let ceiling_sweeps = model.distortion.as_ref().map_or(0, |d| d.sweeps.len());
-    let ceiling_bins = q_max.iter().filter(|q| **q < 6.0 - 1e-9).count();
+    let ceiling_bins = q_max.iter().filter(|q| **q < 12.0 - 1e-9).count();
     let r_peak = h_cal.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let input = hypreq::global_fit::GlobalFitInput {
         f_hz: f.clone(),
         raw_error_db: err,
         total_sigma_db: total_sigma,
         anchor_db: vec![0.0; k],
-        q_min_db: vec![-12.0; k],
+        q_min_db: q_min,
         q_max_db: q_max,
     };
     let res = hypreq::global_fit::solve_global_qp(
@@ -2866,17 +2908,23 @@ fn synth_stage(
                         Error::msg("--synth parallel-iir: the IIR fit did not converge")
                     })?;
             let pred = bank.eval_mag_db(&cf);
-            (
-                pred,
-                vec![
-                    "=== Bank Fixed-Pole Parallel IIR Synthesis ===".to_string(),
-                    format!(
-                        "  Sections        : {} parallel biquads + d0 {:+.3}",
-                        bank.sections.len(),
-                        bank.d0
-                    ),
-                ],
-            )
+            let mut lines = vec![
+                "=== Bank Fixed-Pole Parallel IIR Synthesis ===".to_string(),
+                format!(
+                    "  Sections        : {} parallel biquads + d0 {:+.3}",
+                    bank.sections.len(),
+                    bank.d0
+                ),
+            ];
+            if write_files {
+                let path = format!("{prefix}_parallel_iir.txt");
+                std::fs::write(&path, bank.to_text())
+                    .map_err(|e| Error::msg(format!("cannot write '{path}': {e}")))?;
+                lines.push(format!("  IIR bank file   : {path}"));
+            } else {
+                lines.push("  IIR bank file   : not written (--measure-only)".to_string());
+            }
+            (pred, lines)
         }
         other => return Err(Error::msg(format!("unknown --synth backend '{other}'"))),
     };
@@ -3904,6 +3952,8 @@ mod tests {
             harm_offset: 0.0,
             gauss_apodize: false,
             hf_bypass_hz: 20000.0,
+            hf_taper_start_hz: None,
+            subbass_leak_discount_db: None,
             notch_range_hz: Some((3000.0, 6000.0)),
             notch_ref_hz: Some(4000.0),
             safe_cap_db: 1.5,
@@ -4247,6 +4297,11 @@ mod tests {
                     "{path} was not written"
                 );
                 std::fs::remove_file(path).ok();
+            } else {
+                let path = format!("{}_parallel_iir.txt", model.file_prefix);
+                if std::path::Path::new(&path).exists() {
+                    std::fs::remove_file(path).ok();
+                }
             }
         }
     }
@@ -4549,19 +4604,10 @@ mod tests {
         let mut model = notch_cap_fixture();
         model.fixture = Some(hypreq::fixture::Fixture::GrasKb5000);
         model.target_name = "harman_5128".to_string();
-        let mut target_fixtures = std::collections::BTreeMap::new();
-        target_fixtures.insert("harman_5128".to_string(), hypreq::fixture::Fixture::Bk5128);
-        let models = Database {
-            targets: std::collections::BTreeMap::new(),
-            target_fixtures,
-            order: vec![model.key.clone()],
-            models: vec![model.clone()],
-        };
-
         // When a custom target is used (args.target_csv), target_fixture is None,
         // so fixture_guard must not inherit models.target_fixtures("harman_5128") and fail!
         let target_fixture = None;
-        let res = fixture_guard(&models, &model, target_fixture, false, false, false);
+        let res = fixture_guard(&model, target_fixture, false, false, false);
         assert!(
             res.is_ok(),
             "custom target with unknown fixture must not be rejected: {res:?}"
@@ -4746,11 +4792,11 @@ mod tests {
         };
         let dip = read(&sparse_curve, 2500.0);
         assert!(
-            dip < -3.0,
-            "the 2.5 kHz bell survived as {dip:+.2} dB of a requested -6.00 dB"
+            dip <= -2.95,
+            "the 2.5 kHz shelf survived as {dip:+.2} dB of a requested -6.00 dB"
         );
         let drift = (dip - read(&dense_curve, 2500.0)).abs();
-        assert!(drift < 0.05, "row count moved the bell by {drift:.3} dB");
+        assert!(drift < 0.05, "row count moved the shelf by {drift:.3} dB");
     }
 
     /// `--regularize` was computed against the model's shipped knots and then discarded by the target

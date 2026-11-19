@@ -616,10 +616,24 @@ pub fn psycho_summary(rep: &Report, mode: crate::psycho::PprMode) -> Option<Psyc
         Vec::new()
     };
     let centres = [100.0_f64, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
-    let ex = crate::psycho::roex_excitation_db(&f, &levels, &centres);
+    let (eval_f, eval_levels, eval_err) = if f.len() >= 2 && f[0] > 0.0 && f[f.len() - 1] > f[0] {
+        let grid = crate::global_fit::uniform_log_grid(f[0], f[f.len() - 1], 48);
+        let p_levels = crate::pchip::Pchip::new(&f, &levels);
+        let dense_levels = p_levels.eval_grid(&grid);
+        let dense_err = if scored_against_target {
+            let p_err = crate::pchip::Pchip::new(&f, &err);
+            p_err.eval_grid(&grid)
+        } else {
+            Vec::new()
+        };
+        (grid, dense_levels, dense_err)
+    } else {
+        (f.clone(), levels.clone(), err.clone())
+    };
+    let ex = crate::psycho::roex_excitation_db(&eval_f, &eval_levels, &centres);
     Some(PsychoSummary {
         ppr: if scored_against_target {
-            crate::psycho::harman_ppr(&f, &err, mode)
+            crate::psycho::harman_ppr(&eval_f, &eval_err, mode)
         } else {
             None
         },
@@ -659,7 +673,7 @@ pub fn psycho_report_lines(s: &PsychoSummary, mode: crate::psycho::PprMode) -> V
         .excitation
         .iter()
         .filter(|(_, db)| db.is_finite())
-        .map(|&(hz, db)| format!("{} Hz {:+.1} dB", crate::assess::band_name(hz), db))
+        .map(|&(hz, db)| format!("{} {:+.1} dB", crate::assess::band_name(hz), db))
         .collect::<Vec<_>>()
         .join(", ");
     out.push(format!("  Roex excitation    : {exc}"));

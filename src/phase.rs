@@ -472,7 +472,7 @@ fn reshape_filter(
             .iter()
             .map(|&i| gd_now[i])
             .fold(f64::NEG_INFINITY, f64::max);
-        (hi - lo).max((mean_gd - lo).max(hi - mean_gd))
+        hi - lo
     };
     let f_lo_active = BAND_FLOOR_HZ / 2.0;
     let mut correction: Vec<f64> = freq
@@ -609,10 +609,11 @@ fn build_adjustment(
     let gd_before = &r.gd_now;
     let phase_after = unwrap(&after.iter().map(|c| c.arg()).collect::<Vec<_>>());
     let gd_after = group_delay_ms(&phase_after, &r.freq);
+    let added_latency_ms = added_latency_samples as f64 / f64::from(fs) * 1000.0;
     let mut max_change = 0.0f64;
     let mut at_hz = 0.0f64;
     for (i, &f) in r.freq.iter().enumerate() {
-        let d = (gd_after[i] - gd_before[i]).abs();
+        let d = (gd_after[i] - added_latency_ms - gd_before[i]).abs();
         if d > max_change {
             max_change = d;
             at_hz = f;
@@ -633,7 +634,7 @@ fn build_adjustment(
         max_gd_change_hz: at_hz,
         max_mag_error_db,
         added_latency_samples,
-        added_latency_ms: added_latency_samples as f64 / f64::from(fs) * 1000.0,
+        added_latency_ms,
         retained_energy_pct: if r.energy > 0.0 {
             kept / r.energy * 100.0
         } else {

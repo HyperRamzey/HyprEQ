@@ -16,6 +16,22 @@ pub fn erb_density(f_hz: f64) -> f64 {
     erb_hz(1000.0) / erb_hz(f_hz)
 }
 
+/// Dimensionless ERB density weight on log-frequency grids, normalized to `1.0` at 1 kHz:
+/// `(f / ERB(f)) / (1000 / ERB(1000))`.
+///
+/// On a log-frequency grid ($\Delta \ln f = \mathrm{const}$), the differential frequency step
+/// is $df = f\, d(\ln f)$. Weighting an error integral by ERB density
+/// $d(\mathrm{Cam}) = df / \mathrm{ERB}(f)$ therefore requires weighting by
+/// $f / \mathrm{ERB}(f)$ to avoid double-counting the logarithmic bin density.
+#[must_use]
+pub fn erb_log_density(f_hz: f64) -> f64 {
+    if f_hz <= 0.0 || !f_hz.is_finite() {
+        return 0.0;
+    }
+    let norm = 1000.0 / erb_hz(1000.0);
+    (f_hz / erb_hz(f_hz)) / norm
+}
+
 /// Auditory excitation level (dB) over each center frequency using symmetric Glasberg & Moore
 /// `roex(p)` filters: `W(g) = (1 + p * |g|) * exp(-p * |g|)`, `p = 4 * fc / ERB(fc)`.
 #[must_use]
@@ -126,12 +142,14 @@ pub struct PprScore {
 /// design target — not a rig-tracking residual. See [`crate::verify::psycho_summary`].
 #[must_use]
 pub fn harman_ppr(f_hz: &[f64], error_db: &[f64], mode: PprMode) -> Option<PprScore> {
-    let valid: Vec<(f64, f64)> = f_hz
+    let mut valid: Vec<(f64, f64)> = f_hz
         .iter()
         .zip(error_db)
         .filter(|(&f, &e)| f.is_finite() && f > 0.0 && e.is_finite())
         .map(|(&f, &e)| (f, e))
         .collect();
+    valid.sort_by(|a, b| a.0.total_cmp(&b.0));
+    valid.dedup_by(|a, b| a.0 == b.0);
     if valid.len() < 2 {
         return None;
     }
@@ -194,6 +212,12 @@ mod tests {
     #[test]
     fn erb_and_ppr_match_published_baselines() {
         assert!((erb_hz(1000.0) - 132.639).abs() < 0.01);
+        assert!((erb_log_density(1000.0) - 1.0).abs() < 1e-12);
+        assert!((erb_log_density(20.0) - 0.0988).abs() < 0.001);
+        assert!((erb_log_density(20000.0) - 1.2149).abs() < 0.001);
+        assert_eq!(erb_log_density(0.0), 0.0);
+        assert_eq!(erb_log_density(-50.0), 0.0);
+        assert_eq!(erb_log_density(f64::NAN), 0.0);
         let grid = crate::global_fit::uniform_log_grid(20.0, 20000.0, 48);
         let flat = vec![0.0; grid.len()];
         let ppr = harman_ppr(&grid, &flat, PprMode::OverEar).unwrap();

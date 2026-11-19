@@ -120,9 +120,10 @@ pub fn measure_signal_block(
         // rest of the crate already reaches for.
         let mean_sq = crate::accum::sum_of_squares(ch) / ch.len() as f64;
         rms_ch_lin.push(mean_sq.sqrt());
-        tp_main.push_ch(c, ch);
+        let ch_slice = &ch[..frames];
+        tp_main.push_ch(c, ch_slice);
         if let Some(tp) = &mut tp_itu {
-            tp.push_ch(c, ch);
+            tp.push_ch(c, ch_slice);
         }
     }
     tp_main.drain();

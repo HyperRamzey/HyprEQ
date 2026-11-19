@@ -7,7 +7,6 @@
 //! diffed on is now pinned by the tests in this crate (the reference script and the diffing harness
 //! were removed from the tree, so a test — not a comparison against a second implementation — is
 //! what a change has to satisfy).
-//! implementations' artefacts.
 //!
 //! ## What it produces
 //!

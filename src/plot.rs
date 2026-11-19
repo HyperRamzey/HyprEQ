@@ -26,6 +26,7 @@ use crate::error::{Error, Result};
 use crate::fft::{self, Complex64};
 use crate::model::Model;
 use crate::pchip;
+use plotters::style::IntoFont;
 
 /// Figure size in pixels: the reference figure's 13.0 x 11.5 in at 150 dpi.
 pub const FIG_W: u32 = 1950;
@@ -1042,6 +1043,95 @@ pub fn callout_layout(lines: usize, xytext_y: f64, xy_y: f64, dy: f64) -> (Vec<f
     (centres, tail_y)
 }
 
+/// Finds the perimeter exit point from the text bounding box facing the target tip (data coords).
+#[must_use]
+pub fn callout_tail_point(
+    lines: &[&str],
+    xytext: (f64, f64),
+    xy_target: (f64, f64),
+    centres: &[f64],
+    _dy: f64,
+    w: Window,
+    rect: (i32, i32, i32, i32),
+) -> (f64, f64) {
+    if lines.is_empty() || centres.is_empty() {
+        return xytext;
+    }
+    let font = ("sans-serif", ANNOT_FONT).into_font();
+    let mut text_w_px = 10.0f64;
+    let mut font_h_px = 15.0f64;
+    for l in lines {
+        if let Ok((w, h)) = font.box_size(l) {
+            text_w_px = text_w_px.max(w as f64);
+            font_h_px = font_h_px.max(h as f64);
+        } else {
+            text_w_px = text_w_px.max(l.len() as f64 * 8.5);
+        }
+    }
+
+    let tx0 = x_pix_f(xytext.0, w.xr.0, w.xr.1, w.log_x, rect) - 4.0;
+    let tx1 = tx0 + text_w_px + 8.0;
+
+    let y_top_data = centres.first().copied().unwrap_or(xytext.1);
+    let y_bot_data = centres.last().copied().unwrap_or(xytext.1);
+
+    let ty_top = y_pix_f(y_top_data, w.yr.0, w.yr.1, rect) - 3.0;
+    let ty_bot = y_pix_f(y_bot_data, w.yr.0, w.yr.1, rect) + font_h_px + 3.0;
+
+    let tip_x = x_pix_f(xy_target.0, w.xr.0, w.xr.1, w.log_x, rect);
+    let tip_y = y_pix_f(xy_target.1, w.yr.0, w.yr.1, rect);
+
+    let cx = 0.5 * (tx0 + tx1);
+    let cy = 0.5 * (ty_top + ty_bot);
+    let dx = tip_x - cx;
+    let dy_ray = tip_y - cy;
+
+    if dx.abs() < 1e-9 && dy_ray.abs() < 1e-9 {
+        return (
+            x_from_pix(cx, w.xr.0, w.xr.1, w.log_x, rect),
+            y_from_pix(cy, w.yr.0, w.yr.1, rect),
+        );
+    }
+
+    let mut best_t = f64::INFINITY;
+    let mut exit_px = (cx, cy);
+
+    if dx > 1e-9 {
+        let t = (tx1 - cx) / dx;
+        let y = cy + t * dy_ray;
+        if y >= ty_top - 1e-6 && y <= ty_bot + 1e-6 && t > 0.0 && t < best_t {
+            best_t = t;
+            exit_px = (tx1, y);
+        }
+    } else if dx < -1e-9 {
+        let t = (tx0 - cx) / dx;
+        let y = cy + t * dy_ray;
+        if y >= ty_top - 1e-6 && y <= ty_bot + 1e-6 && t > 0.0 && t < best_t {
+            best_t = t;
+            exit_px = (tx0, y);
+        }
+    }
+
+    if dy_ray > 1e-9 {
+        let t = (ty_bot - cy) / dy_ray;
+        let x = cx + t * dx;
+        if x >= tx0 - 1e-6 && x <= tx1 + 1e-6 && t > 0.0 && t < best_t {
+            exit_px = (x, ty_bot);
+        }
+    } else if dy_ray < -1e-9 {
+        let t = (ty_top - cy) / dy_ray;
+        let x = cx + t * dx;
+        if x >= tx0 - 1e-6 && x <= tx1 + 1e-6 && t > 0.0 && t < best_t {
+            exit_px = (x, ty_top);
+        }
+    }
+
+    (
+        x_from_pix(exit_px.0, w.xr.0, w.xr.1, w.log_x, rect),
+        y_from_pix(exit_px.1, w.yr.0, w.yr.1, rect),
+    )
+}
+
 /// The panel-2 callouts: a shaft from the text block to the point on the curve, a filled
 /// arrow head at the tip (the reference's `arrowstyle="->"`), and the text.
 ///
@@ -1065,28 +1155,39 @@ macro_rules! annotations {
             } else {
                 a.text.split('\n').collect()
             };
-            let (centres, block_tail) =
-                $crate::plot::callout_layout(lines.len(), a.xytext.1, a.xy_y, dy);
-            let tail_y = block_tail.clamp(y_lo, y_hi);
+            let (centres, _) = $crate::plot::callout_layout(lines.len(), a.xytext.1, a.xy_y, dy);
+            let win = $crate::plot::Window {
+                xr: ($crate::plot::F_MIN, $crate::plot::F_MAX),
+                yr: (y_lo, y_hi),
+                log_x: true,
+            };
+            let clamped_y = a.xy_y.clamp(y_lo, y_hi);
+            let tip_x_px = $crate::plot::x_pix_f(a.xy_x, win.xr.0, win.xr.1, win.log_x, $rect);
+            let mut tip_y_px = $crate::plot::y_pix_f(clamped_y, win.yr.0, win.yr.1, $rect);
+
+            // Avoid piercing into the lower-left legend box
+            let leg_x1 = ($rect.0 + 8 + 620).min($rect.2 - 8) as f64;
+            let leg_y0 = ($rect.3 - 8 - 80) as f64;
+            if tip_x_px <= leg_x1 && tip_y_px >= leg_y0 {
+                tip_y_px = leg_y0 - 4.0;
+            }
+            let target_pt = (
+                $crate::plot::x_from_pix(tip_x_px, win.xr.0, win.xr.1, win.log_x, $rect),
+                $crate::plot::y_from_pix(tip_y_px, win.yr.0, win.yr.1, $rect),
+            );
+
+            let tail_pt = $crate::plot::callout_tail_point(
+                &lines, a.xytext, target_pt, &centres, dy, win, $rect,
+            );
             $chart
                 .draw_series(vec![PathElement::new(
-                    vec![(a.xytext.0, tail_y), (a.xy_x, a.xy_y)],
+                    vec![tail_pt, target_pt],
                     $crate::plot::stroke_a(color, 2, 0.95),
                 )])
                 .map_err($crate::plot::dv)?;
             // A filled head, sized in pixels: matplotlib's `->` arrow keeps its size at
             // every frequency, which a data-coordinate triangle on a log axis cannot.
-            let head = $crate::plot::arrow_head_points(
-                (a.xytext.0, tail_y),
-                (a.xy_x, a.xy_y),
-                $crate::plot::Window {
-                    xr: ($crate::plot::F_MIN, $crate::plot::F_MAX),
-                    yr: (y_lo, y_hi),
-                    log_x: true,
-                },
-                $rect,
-                (12.0, 5.0),
-            );
+            let head = $crate::plot::arrow_head_points(tail_pt, target_pt, win, $rect, (12.0, 5.0));
             $chart
                 .draw_series(vec![plotters::element::Polygon::new(
                     head.to_vec(),
@@ -1228,10 +1329,14 @@ impl PlotData {
             .iter()
             .fold(0.0f64, |a, &v| a.max(v.abs()))
             .max(f64::from(f32::EPSILON));
+        let peak_lin = ir_lin_centered
+            .iter()
+            .fold(0.0f64, |a, &v| a.max(v.abs()))
+            .max(f64::from(f32::EPSILON));
         let (lin_t_ms, lin_ir): (Vec<f64>, Vec<f64>) = (0..in_.n_fft_rt)
             .map(|i| ((i as f64 - (in_.n_fft_rt / 2) as f64) / fs * 1000.0, i))
             .filter(|&(t, _)| (-1.0..=4.0).contains(&t))
-            .map(|(t, i)| (t, ir_lin_centered[i] / peak_mp))
+            .map(|(t, i)| (t, ir_lin_centered[i] / peak_lin))
             .unzip();
         let span_samples = ((fs * (250.0 / 48000.0)).round() as usize).max(1);
         let (mp_t_ms, mp_ir) = if lat == 0 {
@@ -1323,7 +1428,7 @@ impl PlotData {
             )
         });
 
-        let annotations = meta_annotations(meta, notch_db)
+        let annotations = meta_annotations(meta, notch_db, &f_plot, &wav_eq)
             .unwrap_or_else(|| build_auto_annotations(&f_plot, &wav_eq, model.hf_bypass_hz))
             .into_iter()
             .map(|mut a| {
@@ -1621,15 +1726,16 @@ impl PlotData {
             .zip(&self.raw_avg)
             .map(|(&h, &r)| h - r)
             .collect();
-        widen_to(
-            self.ax2_ylim,
-            &[
-                (&err, 1.0),
-                (&self.autoeq, 1.0),
-                (&self.wav_eq, 1.0),
-                (&[0.0][..], 0.0),
-            ],
-        )
+        let mut traces: Vec<(&[f64], f64)> = vec![
+            (&err, 1.0),
+            (&self.autoeq, 1.0),
+            (&self.wav_eq, 1.0),
+            (&[0.0][..], 0.0),
+        ];
+        if !self.raw_lr_diff.is_empty() {
+            traces.push((&self.raw_lr_diff, 1.0));
+        }
+        widen_to(self.ax2_ylim, &traces)
     }
 
     /// Panel 1's legend, in the reference's order.
@@ -2306,6 +2412,8 @@ fn meta_ticks(
 fn meta_annotations(
     meta: &serde_json::Map<String, serde_json::Value>,
     notch_db: f64,
+    f_plot: &[f64],
+    wav_eq: &[f64],
 ) -> Option<Vec<Annotation>> {
     let arr = meta.get("annotations")?.as_array()?;
     let mut out = Vec::with_capacity(arr.len());
@@ -2313,18 +2421,29 @@ fn meta_annotations(
         let obj = item.as_object()?;
         let xy = obj.get("xy")?.as_array()?;
         let xytext = obj.get("xytext")?.as_array()?;
+        let x = xy.first()?.as_f64()?;
         let y = if xy.get(1)?.as_str() == Some("notch_db") {
             notch_db
+        } else if xy.get(1)?.as_str() == Some("curve") {
+            crate::fft::interp(x, f_plot, wav_eq)
         } else {
             xy.get(1)?.as_f64()?
         };
+        let mut text = obj
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if text.contains("{curve_db") {
+            let curve_val = crate::fft::interp(x, f_plot, wav_eq);
+            text = text
+                .replace("{curve_db:+.2f}", &format!("{curve_val:+.2}"))
+                .replace("{curve_db:+.2}", &format!("{curve_val:+.2}"))
+                .replace("{curve_db}", &format!("{curve_val:+.2}"));
+        }
         out.push(Annotation {
-            text: obj
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            xy_x: xy.first()?.as_f64()?,
+            text,
+            xy_x: x,
             xy_y: y,
             xytext: (xytext.first()?.as_f64()?, xytext.get(1)?.as_f64()?),
             green: obj.get("color").and_then(|v| v.as_str()) == Some("green"),
@@ -2358,6 +2477,8 @@ mod tests {
             harm_offset: 1.0,
             gauss_apodize: false,
             hf_bypass_hz: 10000.0,
+            hf_taper_start_hz: None,
+            subbass_leak_discount_db: None,
             notch_range_hz: None,
             notch_ref_hz: None,
             safe_cap_db: 1.5,
@@ -3459,6 +3580,28 @@ mod tests {
         let (one, tail_one) = callout_layout(1, 4.5, 0.0, dy);
         assert_eq!(one.len(), 1);
         assert!((tail_one - 4.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn callout_tail_point_exits_on_perimeter_toward_target() {
+        let lines = ["Long label text here that spans some width"];
+        let xytext = (1000.0, 5.0);
+        let tip_right = (5000.0, 5.0);
+        let centres = vec![5.0];
+        let dy = 0.8;
+        let win = Window {
+            xr: (20.0, 20000.0),
+            yr: (-15.0, 15.0),
+            log_x: true,
+        };
+        let rect = (50, 50, 1000, 500);
+        let exit = callout_tail_point(&lines, xytext, tip_right, &centres, dy, win, rect);
+        assert!(
+            exit.0 > xytext.0 * 1.5,
+            "for a target to the right, exit x must be significantly right of the text start: {} vs {}",
+            exit.0,
+            xytext.0
+        );
     }
 
     #[test]

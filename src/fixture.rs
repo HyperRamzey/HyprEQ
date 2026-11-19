@@ -38,7 +38,10 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Fixture {
     /// GRAS 43AG / 43AG-7 fixture: ear simulator plus a swappable pinna. The fixture behind most of
-    /// the community measurements that reach AutoEq, including all three shipped models.
+    /// the community measurements that reach AutoEq. The three shipped models were captured on this
+    /// fixture family but declare the *acoustic* ear instead - a KB5000-series pinna on a 711-style
+    /// ear, per targets/README.md route 1 - which is what their targets are pairable with; the body
+    /// stays in their `rig_info` prose.
     Gras43ag,
     /// A non-GRAS build of the 43AG form factor. Named separately because a clone with a different
     /// pinna is a different acoustic object, and a model that says "clone" should not be recorded as

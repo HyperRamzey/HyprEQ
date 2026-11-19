@@ -19,11 +19,12 @@
   },
   "models": {
     "jbl770nc": {
-      "name": "JBL Live 770NC (Passive / Wired Mode) [Clone GRAS 43AG]",
+      "name": "JBL Live 770NC (Passive / Wired Mode) [GRAS KB5000]",
       "file_prefix": "jbl770nc",
       "rig_info": "Filk (Clone GRAS 43AG / KB006x Pinna + IEC 60318-4 711 Coupler), via AutoEq",
-      "fixture": "gras_43ag_clone",
-      "fixture_conflict_ok": "No published GRAS 43AG equivalent of this target exists to switch to, so this AutoEq-derived 43AG capture is equalised to the Harman 2018 target as the project shipped it. Recorded here so the inherited pairing is a decision on file rather than an accident nobody noticed.",
+      "fixture": "gras_kb5000",
+      "target_preset": "targets/harman_kb5000_7.json",
+      "fixture_conflict_ok": "Since 2026-11-19 this model's default target is targets/harman_kb5000_7.json, recorded on the fixture declared here, so an ordinary run pairs Same. This record covers the legacy curve behind it: the built-in 'harman_2018' target was defined on GRAS 45CA, and a run that opts out of the default preset (--no-target-preset) or brings its own --target-csv still equalises this capture to that foreign-fixture curve, the pairing this project shipped before the KB5000_7 recipe existed. Recorded so the opt-out path stays a decision on file, not an accident nobody noticed. The acoustic ear of this capture is a KB006x clone pinna, not a genuine GRAS KB5000: gras_kb5000 is declared here as the nearest published acoustic object, not as an identity - the paper's scatter figures do not cover clone hardware.",
       "target": "harman_2018",
       "harm_offset": -2.45,
       "gauss_apodize": false,
@@ -78,11 +79,12 @@
       ]
     },
     "dt770_80": {
-      "name": "Beyerdynamic DT 770 Pro (80 Ω) [GRAS 43AG]",
+      "name": "Beyerdynamic DT 770 Pro (80 Ω) [GRAS KB5000]",
       "file_prefix": "dt770_80ohm",
       "rig_info": "Crinacle (Genuine GRAS 43AG-7: RA0402 711 Coupler + KB500X Pinna), via AutoEq",
-      "fixture": "gras_43ag",
-      "fixture_conflict_ok": "No published GRAS 43AG equivalent of this target exists to switch to, so this AutoEq-derived 43AG capture is equalised to the Harman 2018 target as the project shipped it. Recorded here so the inherited pairing is a decision on file rather than an accident nobody noticed.",
+      "fixture": "gras_kb5000",
+      "target_preset": "targets/harman_kb5000_7.json",
+      "fixture_conflict_ok": "Since 2026-11-19 this model's default target is targets/harman_kb5000_7.json, recorded on the fixture declared here, so an ordinary run pairs Same. This record covers the legacy curve behind it: the built-in 'harman_2018' target was defined on GRAS 45CA, and a run that opts out of the default preset (--no-target-preset) or brings its own --target-csv still equalises this capture to that foreign-fixture curve, the pairing this project shipped before the KB5000_7 recipe existed. Recorded so the opt-out path stays a decision on file, not an accident nobody noticed.",
       "target": "harman_2018",
       "harm_offset": 0.00,
       "gauss_apodize": true,
@@ -165,11 +167,12 @@
       ]
     },
     "ft1pro": {
-      "name": "FiiO FT1 Pro (Open-Back Planar Magnetic) [GRAS 43AG]",
+      "name": "FiiO FT1 Pro (Open-Back Planar Magnetic) [GRAS KB5000]",
       "file_prefix": "ft1pro",
       "rig_info": "oratory1990 / Kuulokenurkka (GRAS 43AG / KB50xx Anthropometric Pinna + IEC 711), via AutoEq",
-      "fixture": "gras_43ag",
-      "fixture_conflict_ok": "No published GRAS 43AG equivalent of this target exists to switch to, so this AutoEq-derived 43AG capture is equalised to the Harman 2018 target as the project shipped it. Recorded here so the inherited pairing is a decision on file rather than an accident nobody noticed.",
+      "fixture": "gras_kb5000",
+      "target_preset": "targets/harman_kb5000_7.json",
+      "fixture_conflict_ok": "Since 2026-11-19 this model's default target is targets/harman_kb5000_7.json, recorded on the fixture declared here, so an ordinary run pairs Same. This record covers the legacy curve behind it: the built-in 'harman_2018' target was defined on GRAS 45CA, and a run that opts out of the default preset (--no-target-preset) or brings its own --target-csv still equalises this capture to that foreign-fixture curve, the pairing this project shipped before the KB5000_7 recipe existed. Recorded so the opt-out path stays a decision on file, not an accident nobody noticed.",
       "target": "harman_2018",
       "harm_offset": 0.00,
       "gauss_apodize": true,

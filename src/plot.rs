@@ -2334,6 +2334,7 @@ mod tests {
             rig_calibration: None,
             fixture: None,
             fixture_conflict_ok: None,
+            target_preset: None,
             key: "t".into(),
             name: "Test Set".into(),
             short_title: "TEST".into(),

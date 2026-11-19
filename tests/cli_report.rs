@@ -40,7 +40,14 @@ fn run(tag: &str, args: &[&str]) -> String {
 fn the_regularization_block_sits_under_the_model_it_describes() {
     let stdout = run(
         "auto",
-        &["-H", "dt770_80", "--regularize", "auto", "--no-plot"],
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--regularize",
+            "auto",
+            "--no-plot",
+        ],
     );
     let banner = stdout.find("MODEL: ").expect("the report names the model");
     let block = stdout
@@ -139,7 +146,13 @@ fn a_target_csv_is_read_in_its_own_order_and_a_single_knot_is_refused() {
     let (dir, code, stdout, stderr) = run_files(
         "target-csv-unsorted",
         &[("unsorted.csv", unsorted)],
-        &["-H", "dt770_80", "--target-csv", "unsorted.csv"],
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--target-csv",
+            "unsorted.csv",
+        ],
     );
     assert_eq!(code, Some(0), "exit {code:?}, stderr: {stderr}");
     assert!(
@@ -152,7 +165,13 @@ fn a_target_csv_is_read_in_its_own_order_and_a_single_knot_is_refused() {
     let (dir, code, _, stderr) = run_files(
         "target-csv-one-knot",
         &[("dup.csv", one_knot)],
-        &["-H", "dt770_80", "--target-csv", "dup.csv"],
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--target-csv",
+            "dup.csv",
+        ],
     );
     assert_eq!(code, Some(1), "exit {code:?}, stderr: {stderr}");
     assert!(
@@ -172,7 +191,14 @@ fn read_bytes(path: &Path) -> Vec<u8> {
 fn the_ears_block_sits_under_the_model_it_describes() {
     let stdout = run(
         "ears",
-        &["-H", "dt770_80", "--stereo", "report", "--no-plot"],
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--stereo",
+            "report",
+            "--no-plot",
+        ],
     );
     let banner = stdout.find("MODEL: ").expect("the report names the model");
     let block = stdout
@@ -217,7 +243,10 @@ fn the_ears_block_sits_under_the_model_it_describes() {
 /// The default path is the parity-pinned one, and `--stereo report` must not disturb its bytes.
 #[test]
 fn a_default_run_says_nothing_about_the_ears_and_report_writes_the_same_filter() {
-    let (dir_off, code, stdout, err) = run_keep("stereo-off", &["-H", "dt770_80", "--no-plot"]);
+    let (dir_off, code, stdout, err) = run_keep(
+        "stereo-off",
+        &["-H", "dt770_80", "--no-target-preset", "--no-plot"],
+    );
     assert_eq!(code, Some(0), "stderr: {err}");
     assert!(
         !stdout.contains("Ears"),
@@ -226,7 +255,14 @@ fn a_default_run_says_nothing_about_the_ears_and_report_writes_the_same_filter()
 
     let (dir_rep, code, _, _) = run_keep(
         "stereo-rep",
-        &["-H", "dt770_80", "--stereo", "report", "--no-plot"],
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--stereo",
+            "report",
+            "--no-plot",
+        ],
     );
     assert_eq!(code, Some(0));
     for name in [
@@ -250,7 +286,14 @@ fn a_default_run_says_nothing_about_the_ears_and_report_writes_the_same_filter()
 fn a_model_measured_as_one_curve_says_so() {
     let stdout = run(
         "mono-ears",
-        &["-H", "jbl770nc", "--stereo", "report", "--no-plot"],
+        &[
+            "-H",
+            "jbl770nc",
+            "--no-target-preset",
+            "--stereo",
+            "report",
+            "--no-plot",
+        ],
     );
     assert!(
         stdout.contains("Single capture"),
@@ -266,7 +309,10 @@ fn a_model_measured_as_one_curve_says_so() {
 /// the ceiling cannot be negative, and a mode outside the vocabulary is argparse's exit 2.
 #[test]
 fn the_ear_flags_refuse_what_they_cannot_do() {
-    let (dir, code, _, err) = run_keep("split-no-audio", &["-H", "dt770_80", "--stereo", "split"]);
+    let (dir, code, _, err) = run_keep(
+        "split-no-audio",
+        &["-H", "dt770_80", "--no-target-preset", "--stereo", "split"],
+    );
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(
         code,
@@ -287,6 +333,7 @@ fn the_ear_flags_refuse_what_they_cannot_do() {
         &[
             "-H",
             "dt770_80",
+            "--no-target-preset",
             "--stereo",
             "split",
             "--stereo-max-skew",
@@ -300,7 +347,14 @@ fn the_ear_flags_refuse_what_they_cannot_do() {
     for value in ["both", "OFF", ""] {
         let (dir, code, _, err) = run_keep(
             &format!("stereo-bad-{}", value.len()),
-            &["-H", "dt770_80", "--stereo", value, "--no-plot"],
+            &[
+                "-H",
+                "dt770_80",
+                "--no-target-preset",
+                "--stereo",
+                value,
+                "--no-plot",
+            ],
         );
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(code, Some(2), "`{value}` should exit 2: {err}");
@@ -318,7 +372,10 @@ fn the_ear_flags_refuse_what_they_cannot_do() {
 fn report_leaves_the_audio_alone_and_split_changes_it() {
     // Model mode writes the pair of mastering test files, which is the stereo material this test
     // needs without committing a fixture.
-    let (dir, code, _, err) = run_keep("audio-seed", &["-H", "dt770_80", "--no-plot"]);
+    let (dir, code, _, err) = run_keep(
+        "audio-seed",
+        &["-H", "dt770_80", "--no-target-preset", "--no-plot"],
+    );
     assert_eq!(code, Some(0), "stderr: {err}");
     let stereo = dir
         .join("dt770_80ohm_mastering_stereo_48k.wav")
@@ -335,6 +392,7 @@ fn report_leaves_the_audio_alone_and_split_changes_it() {
             &[
                 "-H",
                 "dt770_80",
+                "--no-target-preset",
                 "--no-plot",
                 "--input",
                 &stereo,
@@ -403,6 +461,7 @@ fn report_leaves_the_audio_alone_and_split_changes_it() {
         &[
             "-H",
             "dt770_80",
+            "--no-target-preset",
             "--no-plot",
             "--input",
             &mono,
@@ -435,7 +494,10 @@ fn report_leaves_the_audio_alone_and_split_changes_it() {
 /// The default path is the parity-pinned one. A flag nobody passed must not add a line.
 #[test]
 fn a_default_run_says_nothing_about_regularization() {
-    let stdout = run("off", &["-H", "dt770_80", "--no-plot"]);
+    let stdout = run(
+        "off",
+        &["-H", "dt770_80", "--no-target-preset", "--no-plot"],
+    );
     assert!(
         !stdout.contains("Regularization"),
         "the default report gained a section:\n{stdout}"
@@ -463,7 +525,14 @@ fn a_notch_mode_outside_the_vocabulary_is_a_usage_error() {
             .current_dir(&dir)
             .arg("--data-file")
             .arg(&data)
-            .args(["-H", "dt770_80", "--no-plot", "--notch-mode", value])
+            .args([
+                "-H",
+                "dt770_80",
+                "--no-target-preset",
+                "--no-plot",
+                "--notch-mode",
+                value,
+            ])
             .output()
             .expect("the binary runs");
         let _ = std::fs::remove_dir_all(&dir);
@@ -663,7 +732,10 @@ fn a_known_capture_error_is_named_by_band_and_by_number() {
 fn stereo_bytes(tag: &str) -> Vec<u8> {
     // The tag is the caller's: these tests run in parallel, and a shared scratch name means one
     // deletes the seed directory while another is still reading it out of.
-    let (dir, code, _, err) = run_keep(&format!("stereo-{tag}"), &["-H", "dt770_80", "--no-plot"]);
+    let (dir, code, _, err) = run_keep(
+        &format!("stereo-{tag}"),
+        &["-H", "dt770_80", "--no-target-preset", "--no-plot"],
+    );
     assert_eq!(code, Some(0), "stderr: {err}");
     let bytes = read_bytes(&dir.join("dt770_80ohm_mastering_stereo_48k.wav"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -746,6 +818,7 @@ fn verification_refuses_before_writing_a_single_file() {
             vec![
                 "-H",
                 "dt770_80",
+                "--no-target-preset",
                 "--no-plot",
                 "--bypass-eq",
                 "--verify-with",
@@ -792,6 +865,7 @@ fn a_capture_that_cannot_be_read_fails_before_any_convolver_is_written() {
         &[
             "-H",
             "dt770_80",
+            "--no-target-preset",
             "--no-plot",
             "--verify-with",
             "nowhere.csv",
@@ -912,7 +986,10 @@ fn realtime_filter_scales_with_the_sample_rate_it_is_written_for() {
 
 #[test]
 fn verification_reports_nothing_when_it_was_not_asked_for() {
-    let stdout = run("verify-absent", &["-H", "dt770_80", "--no-plot"]);
+    let stdout = run(
+        "verify-absent",
+        &["-H", "dt770_80", "--no-target-preset", "--no-plot"],
+    );
     assert!(
         !stdout.contains("Verification (post-EQ"),
         "the default report grew a verification section:\n{stdout}"
@@ -1025,15 +1102,29 @@ fn broken_fixture_db(dir: &Path) -> PathBuf {
 }
 
 fn write_fixture_db(dir: &Path, name: &str, models: &[(&str, &str, &str, &str)]) -> PathBuf {
+    let rich: Vec<(&str, &str, &str, &str, &str)> = models
+        .iter()
+        .map(|(k, n, f, t)| (*k, *n, *f, *t, ""))
+        .collect();
+    write_fixture_db_extra(dir, name, &rich)
+}
+
+/// Same database, with per-entry extra raw JSON fields — each string is inserted verbatim
+/// after `"target"`, so it must end with a comma (e.g. `"target_preset":"p.json",`).
+fn write_fixture_db_extra(
+    dir: &Path,
+    name: &str,
+    models: &[(&str, &str, &str, &str, &str)],
+) -> PathBuf {
     let raw: Vec<String> = (0..500)
         .map(|i| format!("[{:.1},0.0]", 20.0 + 20.0 * i as f64))
         .collect();
     let raw = raw.join(",");
     let entries: Vec<String> = models
         .iter()
-        .map(|(key, name, fixture, target)| {
+        .map(|(key, name, fixture, target, extra)| {
             format!(
-                r#""{key}": {{"name":"{name}","fixture":"{fixture}","target":"{target}","raw_pts":[{raw}],"ctrl_pts":[[20.0,0.0],[1000.0,0.0],[20000.0,0.0]]}}"#
+                r#""{key}": {{"name":"{name}","fixture":"{fixture}","target":"{target}",{extra}"raw_pts":[{raw}],"ctrl_pts":[[20.0,0.0],[1000.0,0.0],[20000.0,0.0]]}}"#
             )
         })
         .collect();
@@ -1397,39 +1488,61 @@ fn a_run_that_applies_no_filter_has_no_pairing_to_refuse() {
 }
 
 #[test]
-fn the_shipped_database_records_fixtures_and_the_pairing_it_inherited() {
-    // A content check on the shipped data, because the two facts it carries can go missing without
-    // any test failing elsewhere: dropping `target_fixtures` silently switches the whole comparison
-    // off, and dropping a model's reason would make its own run refuse.
+fn the_shipped_database_declares_its_acoustic_fixture_and_default_recipe() {
+    // A content check on the shipped data, because the facts it carries can go missing without any
+    // test failing elsewhere. Since the 2026-11-19 route-1 re-declaration (targets/README.md) the
+    // three shipped models declare the acoustic ear they were really measured on - a KB5000-series
+    // pinna on a 711-style ear - and record `harman_kb5000_7.json` as their default target, which
+    // pairs Same and needs no excuse. What must therefore stay written down is: the built-in
+    // curve's fixture (so the opt-out pairing is checked, not switched off), the per-model default
+    // recipe (so a plain run is the documented pairing), and the conflict record (so the
+    // built-in-curve fallback stays an excused, recorded decision).
     let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("measurements.json");
     let text = std::fs::read_to_string(&data).expect("database");
-    for fixture in ["gras_43ag", "gras_43ag_clone", "gras_45ca"] {
-        assert!(
-            text.contains(fixture),
-            "no model or target records {fixture}"
-        );
-    }
     assert!(
         text.contains("\"target_fixtures\"") && text.contains("\"harman_2018\": \"gras_45ca\""),
-        "the target's fixture went unrecorded, which turns the refusal off quietly"
+        "the built-in target's fixture went unrecorded, which turns the refusal off quietly"
+    );
+    assert_eq!(
+        text.matches("\"fixture\": \"gras_kb5000\"").count(),
+        3,
+        "all three shipped models must declare the acoustic ear of their rig"
+    );
+    assert_eq!(
+        text.matches("\"target_preset\": \"targets/harman_kb5000_7.json\"")
+            .count(),
+        3,
+        "every shipped model's default target is the Olive & Clark recipe"
+    );
+    assert_eq!(
+        text.matches("\"fixture_conflict_ok\":").count(),
+        3,
+        "the built-in-curve fallback path needs its recorded reason, or --no-target-preset refuses"
+    );
+    assert!(
+        text.contains("--no-target-preset"),
+        "the conflict records must name the path they actually excuse"
+    );
+    assert!(
+        !text.contains("[GRAS 43AG]") && !text.contains("[Clone GRAS 43AG]"),
+        "a name must not keep naming a fixture the model no longer declares"
     );
     let stdout = run("shipped-fixture-list", &["--list-models"]);
     assert_eq!(
-        stdout.matches("[GRAS 43AG]").count(),
-        2,
-        "two models are genuine 43AG captures and should say so:\n{stdout}"
+        stdout.matches("[GRAS KB5000]").count(),
+        3,
+        "every shipped model lists its acoustic fixture:\n{stdout}"
     );
-    assert!(
-        stdout.contains("[Clone GRAS 43AG]"),
-        "the clone should not be listed as genuine:\n{stdout}"
-    );
+    // The opted-out (built-in harman_2018) path: recorded conflict, so it runs without a note -
+    // and without touching the gitignored recipe baseline, which is what keeps this test hermetic
+    // on a fresh clone.
     let (code, stdout, stderr) = {
         let dir = scratch("shipped-run");
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_hypreq"))
             .current_dir(&dir)
             .arg("--data-file")
             .arg(&data)
-            .args(["--no-plot"])
+            .args(["--no-plot", "--no-target-preset"])
             .output()
             .expect("the binary runs");
         let r = (
@@ -1443,11 +1556,302 @@ fn the_shipped_database_records_fixtures_and_the_pairing_it_inherited() {
     assert_eq!(
         code,
         Some(0),
-        "the shipped pairing stopped running:\n{stderr}"
+        "the recorded built-in fallback stopped running:\n{stderr}"
     );
     assert!(
         !stdout.contains("[Note]"),
-        "a shipped pairing printed a refusal it is not supposed to have:\n{stdout}"
+        "a recorded pairing printed a refusal it is not supposed to have:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Preset"),
+        "with the opt-out, no recipe may claim to have run:\n{stdout}"
+    );
+}
+
+#[test]
+fn the_shipped_default_recipe_drives_a_plain_run_when_its_curve_is_present() {
+    // The real default pairing on the real database. The KB5000_7 baseline CSV is user-supplied
+    // data (gitignored, targets/README.md), so this check skips with a visible note on a fresh
+    // clone that has not imported it; the wiring itself is covered hermetically by
+    // a_models_recorded_default_recipe_runs_and_the_audit_follows_it below.
+    let csv = Path::new(env!("CARGO_MANIFEST_DIR")).join("targets/kb5000_7.csv");
+    if !csv.exists() {
+        eprintln!(
+            "SKIP: targets/kb5000_7.csv absent (user data; import with \
+             scripts/import_kb5000_7.py) - not asserting the shipped default pairing"
+        );
+        return;
+    }
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("measurements.json");
+    let dir = scratch("shipped-default");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hypreq"))
+        .current_dir(&dir)
+        .arg("--data-file")
+        .arg(&data)
+        .args(["-H", "dt770_80", "--no-plot"])
+        .output()
+        .expect("the binary runs");
+    let code = out.status.code();
+    let stdout = String::from_utf8(out.stdout).expect("stdout");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        code,
+        Some(0),
+        "the shipped model's default recipe failed:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("kb5000_7_olive_clark_2025"),
+        "a plain run did not name the recipe the database records as this model's target:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("(gras_kb5000)"),
+        "the report must show the fixture the running curve was defined on:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("[Note]"),
+        "gras_kb5000 on a gras_kb5000 capture pairs Same; a note means the guard objects:\n{stdout}"
+    );
+}
+
+#[test]
+fn a_models_recorded_default_recipe_runs_and_the_audit_follows_it() {
+    let dir = scratch("default-preset");
+    let db = write_fixture_db_extra(
+        &dir,
+        "defaultpreset.json",
+        &[(
+            "kbmodel",
+            "KB Set [GRAS KB5000]",
+            "gras_kb5000",
+            "harman_2018",
+            r#""fixture_conflict_ok":"built-in fallback record","target_preset":"p12.json","#,
+        )],
+    );
+    std::fs::write(dir.join("base12.csv"), "20,12.0\n1000,12.0\n20000,12.0\n").expect("base12");
+    std::fs::write(dir.join("base0.csv"), "20,0.0\n1000,0.0\n20000,0.0\n").expect("base0");
+    for (recipe, base) in [("p12.json", "base12"), ("p0.json", "base0")] {
+        std::fs::write(
+            dir.join(recipe),
+            format!(
+                r#"{{"name":"flat_{base}","fixture":"gras_kb5000","family":"harman","baseline_csv":"{base}.csv","params":{{"bass":0.0,"mid":0.0,"tilt":0.0}},"source":"default wiring test"}}"#
+            ),
+        )
+        .expect("recipe");
+    }
+    let (code, stdout, stderr) = run_db(&dir, &db, &["-H", "kbmodel", "--export-csv", "--no-plot"]);
+    assert_eq!(
+        code,
+        Some(0),
+        "the recorded default did not run:\n{stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("flat_base12"),
+        "the report did not name the recorded recipe that ran:\n{stdout}"
+    );
+    std::fs::rename(
+        dir.join("kbmodel_audit_data.csv"),
+        dir.join("audit_default.csv"),
+    )
+    .expect("keep the default run's audit");
+
+    let (code, stdout, stderr) = run_db(
+        &dir,
+        &db,
+        &[
+            "-H",
+            "kbmodel",
+            "--target-preset",
+            "p0.json",
+            "--export-csv",
+            "--no-plot",
+        ],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "an explicit recipe lost to the record:\n{stderr}\n{stdout}"
+    );
+    assert!(
+        stdout.contains("flat_base0"),
+        "the database's record outranked the recipe named on the command line:\n{stdout}"
+    );
+    std::fs::rename(
+        dir.join("kbmodel_audit_data.csv"),
+        dir.join("audit_cli.csv"),
+    )
+    .expect("keep the explicit run's audit");
+
+    let target_col = |f: &str| -> Vec<f64> {
+        std::fs::read_to_string(dir.join(f))
+            .expect("audit readable")
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split(',').nth(2).and_then(|c| c.trim().parse().ok()))
+            .collect()
+    };
+    let a = target_col("audit_default.csv");
+    let b = target_col("audit_cli.csv");
+    assert!(!a.is_empty() && a.len() == b.len(), "audit rows diverged");
+    let worst = a
+        .iter()
+        .zip(&b)
+        .map(|(x, y)| (x - y - 12.0).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        worst <= 0.011,
+        "the audit's target column did not move 12 dB between the default and the explicit \
+         recipe (worst deviation {worst}); one of the two runs did not fit the recipe it named"
+    );
+}
+
+#[test]
+fn target_csv_and_the_opt_out_flag_both_switch_the_recorded_recipe_off() {
+    let dir = scratch("default-suppress");
+    let db = write_fixture_db_extra(
+        &dir,
+        "suppress.json",
+        &[(
+            "kbmodel",
+            "KB Set [GRAS KB5000]",
+            "gras_kb5000",
+            "harman_2018",
+            r#""fixture_conflict_ok":"built-in fallback record","target_preset":"p12.json","#,
+        )],
+    );
+    std::fs::write(dir.join("base12.csv"), "20,12.0\n1000,12.0\n20000,12.0\n").expect("base12");
+    std::fs::write(
+        dir.join("p12.json"),
+        r#"{"name":"flat_base12","fixture":"gras_kb5000","family":"harman","baseline_csv":"base12.csv","params":{"bass":0.0,"mid":0.0,"tilt":0.0},"source":"suppression test"}"#,
+    )
+    .expect("recipe");
+    std::fs::write(dir.join("flat5.csv"), "20,5.0\n1000,5.0\n20000,5.0\n").expect("flat5");
+
+    // A `--target-csv` is a baseline the user brought; the record must not overwrite it.
+    let (code, stdout, stderr) = run_db(
+        &dir,
+        &db,
+        &[
+            "-H",
+            "kbmodel",
+            "--target-csv",
+            "flat5.csv",
+            "--export-csv",
+            "--no-plot",
+        ],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "a user csv lost to the record:\n{stderr}\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("flat_base12"),
+        "the recorded recipe ran over the user's own --target-csv:\n{stdout}"
+    );
+    std::fs::rename(
+        dir.join("kbmodel_audit_data.csv"),
+        dir.join("audit_csv.csv"),
+    )
+    .expect("keep the csv audit");
+    let (code, _, stderr) = run_db(
+        &dir,
+        &db,
+        &[
+            "-H",
+            "kbmodel",
+            "--target-csv",
+            "flat5.csv",
+            "--no-target-preset",
+            "--export-csv",
+            "--no-plot",
+        ],
+    );
+    assert_eq!(code, Some(0), "--no-target-preset with a csv:\n{stderr}");
+    std::fs::rename(
+        dir.join("kbmodel_audit_data.csv"),
+        dir.join("audit_both.csv"),
+    )
+    .expect("keep the second audit");
+    let col = |f: &str| -> Vec<String> {
+        std::fs::read_to_string(dir.join(f))
+            .expect("audit readable")
+            .lines()
+            .skip(1)
+            .map(|l| l.to_string())
+            .collect()
+    };
+    let a = col("audit_csv.csv");
+    let b = col("audit_both.csv");
+    assert!(!a.is_empty() && a.len() == b.len(), "audit rows diverged");
+    assert!(
+        a.iter().zip(&b).all(|(x, y)| x == y),
+        "--target-csv and --target-csv --no-target-preset ran different targets; the record \
+         is still reaching the first path"
+    );
+
+    // The named opt-out falls all the way back to the database's built-in curve, and the shipped
+    // conflict record is what makes that pairing admissible.
+    let (code, stdout, stderr) = run_db(
+        &dir,
+        &db,
+        &["-H", "kbmodel", "--no-target-preset", "--no-plot"],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "the recorded built-in fallback refused:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("Preset"),
+        "the opt-out run still reported a recipe:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("[Note]"),
+        "the built-in fallback is the recorded pairing; it must not print a note:\n{stdout}"
+    );
+}
+
+#[test]
+fn a_models_own_default_recipe_on_the_wrong_fixture_is_refused_at_the_guard() {
+    // A `target_preset` is a pairing claim, so it goes through the same fixture guard a CLI
+    // recipe does - including the rule that the model's `fixture_conflict_ok` excuses only the
+    // built-in curve, never a recipe.
+    let dir = scratch("default-misrig");
+    let db = write_fixture_db_extra(
+        &dir,
+        "misrig.json",
+        &[(
+            "misrig",
+            "Mis Rig [GRAS 43AG]",
+            "gras_43ag",
+            "harman_2018",
+            r#""target_preset":"pkb.json","#,
+        )],
+    );
+    std::fs::write(dir.join("base0.csv"), "20,0.0\n1000,0.0\n20000,0.0\n").expect("base0");
+    std::fs::write(
+        dir.join("pkb.json"),
+        r#"{"name":"kb_curve","fixture":"gras_kb5000","family":"harman","baseline_csv":"base0.csv","params":{"bass":0.0,"mid":0.0,"tilt":0.0},"source":"guard wiring test"}"#,
+    )
+    .expect("recipe");
+    let (code, stdout, stderr) = run_db(&dir, &db, &["-H", "misrig", "--no-plot"]);
+    assert_eq!(
+        code,
+        Some(2),
+        "a model whose own recorded recipe disagrees with its declared fixture ran anyway:\n{stdout}"
+    );
+    for want in ["target_preset", "GRAS KB5000", "gras_43ag"] {
+        assert!(
+            stderr.contains(want),
+            "the refusal did not say {want}: {stderr}"
+        );
+    }
+    let (code, stdout, _) = run_db(&dir, &db, &["-H", "misrig", "--no-plot", "--force"]);
+    assert_eq!(code, Some(0), "--force must carry a recorded disagreement:");
+    assert!(
+        stdout.contains("[Note]"),
+        "the override must be reported, not silent:\n{stdout}"
     );
 }
 
@@ -1546,7 +1950,8 @@ fn phase_difference(a: &[f64], b: &[f64], lo: f64, hi: f64) -> f64 {
 #[test]
 fn a_default_run_says_nothing_about_a_stage_it_did_not_run() {
     let dir = scratch("phase-default");
-    let (code, stdout, stderr) = run_in(&dir, &["-H", "dt770_80", "--no-plot"]);
+    let (code, stdout, stderr) =
+        run_in(&dir, &["-H", "dt770_80", "--no-target-preset", "--no-plot"]);
     assert_eq!(code, Some(0), "{stderr}");
     assert!(
         !stdout.contains("Experimental Phase"),
@@ -1558,7 +1963,14 @@ fn a_default_run_says_nothing_about_a_stage_it_did_not_run() {
     let again = scratch("phase-default-again");
     let (code2, _, stderr2) = run_in(
         &again,
-        &["-H", "dt770_80", "--no-plot", "--experimental-phase", "200"],
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--no-plot",
+            "--experimental-phase",
+            "200",
+        ],
     );
     assert_eq!(code2, Some(0), "{stderr2}");
     let shaped = read_bytes(&again.join("dt770_80ohm_f64_48k.wav"));
@@ -1576,7 +1988,14 @@ fn the_stage_moves_the_phase_and_leaves_the_curve_alone() {
     let dir = scratch("phase-accept");
     let (code, stdout, stderr) = run_in(
         &dir,
-        &["-H", "dt770_80", "--no-plot", "--experimental-phase", "200"],
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--no-plot",
+            "--experimental-phase",
+            "200",
+        ],
     );
     assert_eq!(code, Some(0), "{stderr}");
     assert!(stdout.contains("Experimental Phase"), "{stdout}");
@@ -1585,7 +2004,11 @@ fn the_stage_moves_the_phase_and_leaves_the_curve_alone() {
         hypreq::wav::read_wav(&dir.join("dt770_80ohm_f64_48k.wav")).expect("shaped filter");
     let plain = scratch("phase-plain");
     assert_eq!(
-        run_in(&plain, &["-H", "dt770_80", "--no-plot"]).0,
+        run_in(
+            &plain,
+            &["-H", "dt770_80", "--no-target-preset", "--no-plot"]
+        )
+        .0,
         Some(0),
         "the reference run works"
     );
@@ -1703,6 +2126,7 @@ fn an_impossible_crossover_is_refused_before_a_single_file_is_written() {
         &[
             "-H",
             "dt770_80",
+            "--no-target-preset",
             "--no-plot",
             "--experimental-phase",
             "30000",
@@ -1727,7 +2151,14 @@ fn an_impossible_crossover_is_refused_before_a_single_file_is_written() {
     // A nonsense number is a bad command line, not a failed run.
     let (code2, _, stderr2) = run_in(
         &dir,
-        &["-H", "dt770_80", "--no-plot", "--experimental-phase", "0"],
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--no-plot",
+            "--experimental-phase",
+            "0",
+        ],
     );
     assert_eq!(code2, Some(2), "zero Hz was accepted as a crossover");
     assert!(stderr2.contains("--experimental-phase"), "{stderr2}");
@@ -1741,6 +2172,7 @@ fn model_run_applies_true_peak_limiter_to_written_ir_when_enabled() {
         &[
             "-H",
             "jbl770nc",
+            "--no-target-preset",
             "--taps",
             "4096",
             "--headroom-db",

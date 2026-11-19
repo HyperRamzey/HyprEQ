@@ -373,6 +373,13 @@ struct Args {
     /// Rig-target recipe JSON (baseline CSV path + published shelf constants)
     #[arg(long, value_name = "JSON", help_heading = "Groundwork (opt-in)")]
     target_preset: Option<PathBuf>,
+    /// Ignore the target recipe the model record ships with; equalise to the database's built-in curve
+    #[arg(
+        long,
+        help_heading = "Groundwork (opt-in)",
+        conflicts_with = "target_preset"
+    )]
+    no_target_preset: bool,
     /// Empirical rig translation JSON (delta mean and sigma, from derive_rig_calibration.py)
     #[arg(long, value_name = "JSON", help_heading = "Groundwork (opt-in)")]
     rig_calibration: Option<PathBuf>,
@@ -642,12 +649,14 @@ fn run(args: Args) -> Result<(), Error> {
     // there was nothing to compare. Checked before any file is written, for exactly the models this
     // invocation is about to put a filter on.
     // A recipe brings its own baseline, so it brings its own rig: the fixture has to be read off the
-    // recipe, because the database entry describes the target the recipe *replaced*. Same argument
-    // for an empirical translation parsed from `--rig-calibration` — it is one file for every model
-    // in this run, so it is read once here. Both reads are the lenient ones: a file that does not
-    // parse is reported by the authoritative loader where it has always been reported, and a guard
-    // that cannot run simply does not run.
-    let preset_fixture = args
+    // recipe, because the database entry describes the target the recipe *replaced* — and the same
+    // argument holds for a `target_preset` recorded on the model, which *is* that model's target on
+    // an ordinary run. The recipe is therefore resolved per model below; the CLI's own recipe, when
+    // there is one, outranks every record. Same argument for an empirical translation parsed from
+    // `--rig-calibration` — it is one file for every model in this run, so it is read once here.
+    // Both reads are the lenient ones: a file that does not parse is reported by the authoritative
+    // loader where it has always been reported, and a guard that cannot run simply does not run.
+    let cli_preset_fixture = args
         .target_preset
         .as_ref()
         .and_then(|p| preset_fixture_only(p));
@@ -656,11 +665,19 @@ fn run(args: Args) -> Result<(), Error> {
         .as_ref()
         .and_then(|p| hypreq::fixture::RigCalibration::from_json_file(p).ok());
     for m in used_models(&models, &selected, args.input.is_some(), args.bypass_eq) {
+        let recipe_fixture = cli_preset_fixture
+            .or_else(|| effective_target_preset(m, &args).and_then(preset_fixture_only));
         let target_fixture =
-            preset_fixture.or_else(|| models.target_fixtures.get(&m.target_name).copied());
+            recipe_fixture.or_else(|| models.target_fixtures.get(&m.target_name).copied());
         // The recipe alone is the override here; a database that records its target rigs is the
         // ordinary case, not a replacement, and `fixture_conflict_ok` speaks about that case.
-        fixture_guard(&models, m, preset_fixture, args.force)?;
+        fixture_guard(
+            &models,
+            m,
+            recipe_fixture,
+            args.target_preset.is_some(),
+            args.force,
+        )?;
         if let Some(cal) = cli_calibration.as_ref().or(m.rig_calibration.as_ref()) {
             rig_calibration_guard(m, target_fixture, cal, args.force)?;
         }
@@ -767,20 +784,24 @@ fn preset_fixture_only(path: &Path) -> Option<hypreq::fixture::Fixture> {
 /// specific pairing through with a line saying so, because a user who re-measured on another rig may
 /// well want it, and it is their call once it is spelled out to them.
 ///
-/// `recipe_fixture` is the rig a `--target-preset` says its own baseline was defined on, and it is
-/// `None` unless a recipe was actually passed. It replaces the database's entry rather than merging
-/// with it: for this run the recipe *is* the target, so a guard that kept consulting
-/// `target_fixtures` would certify a pairing it had never looked at — the whole point of the recipe
-/// is that it brings its own curve.
+/// `recipe_fixture` is the rig the effective target recipe says its own baseline was defined on —
+/// either a `--target-preset` passed on the command line or the `target_preset` recorded on the
+/// model — and it is `None` unless such a recipe actually runs. It replaces the database's entry
+/// rather than merging with it: for this run the recipe *is* the target, so a guard that kept
+/// consulting `target_fixtures` would certify a pairing it had never looked at — the whole point of
+/// the recipe is that it brings its own curve. `recipe_from_cli` records where the recipe came
+/// from, so a refusal about the database's own record cannot tell the user to "pick a preset"
+/// they never picked.
 ///
 /// The two cases must not be collapsed into one `Option`, because the second use below reads
 /// "was the target replaced" and a database that *does* record its target fixtures would then look
 /// like a replacement on every ordinary run — which would silence the `fixture_conflict_ok`
-/// exemption for exactly the shipped models that carry it, and refuse the program's default path.
+/// exemption for exactly the models that carry it, and refuse the program's built-in path.
 fn fixture_guard(
     models: &Database,
     model: &Model,
     recipe_fixture: Option<hypreq::fixture::Fixture>,
+    recipe_from_cli: bool,
     force: bool,
 ) -> Result<(), Error> {
     use hypreq::fixture::{pair, Pairing};
@@ -802,23 +823,33 @@ fn fixture_guard(
     }
     let measured = model.fixture.expect("a Different pairing has both sides");
     let defined = target.expect("a Different pairing has both sides");
-    let named = if recipe_fixture.is_some() {
-        format!(
+    let named = match (recipe_fixture.is_some(), recipe_from_cli) {
+        (true, true) => format!(
             "the --target-preset baseline (target '{}')",
             model.target_name
-        )
-    } else {
-        format!("the target '{}'", model.target_name)
+        ),
+        (true, false) => format!(
+            "the 'target_preset' recorded on this model (which replaced its target '{}')",
+            model.target_name
+        ),
+        (false, _) => format!("the target '{}'", model.target_name),
     };
-    // The suggestion list has to match what the guard actually honours. A `--target-preset`
-    // mismatch is never unlocked by `fixture_conflict_ok` (see the exemption above), so
-    // recommending that route from a preset refusal would send the user down a path the code has
-    // just refused to walk.
-    let routes = if recipe_fixture.is_some() {
+    // The suggestion list has to match what the guard actually honours. A recipe mismatch — from
+    // the command line or from the database's own record — is never unlocked by
+    // `fixture_conflict_ok` (see the exemption above), so recommending that route from a recipe
+    // refusal would send the user down a path the code has just refused to walk.
+    let routes = if recipe_fixture.is_some() && recipe_from_cli {
         String::from(
             "Pick a preset whose 'fixture' matches the capture, correct the model's recorded \
              fixture, or pass --force to equalise anyway. 'fixture_conflict_ok' vouches for the \
              model's shipped target, never for a recipe chosen at the command line.",
+        )
+    } else if recipe_fixture.is_some() {
+        String::from(
+            "The database paired this model with its own default recipe, and they disagree about \
+             the rig. Correct the model's 'target_preset' or its declared fixture, or pass \
+             --force to equalise anyway. 'fixture_conflict_ok' vouches for the built-in target, \
+             never for the recorded recipe.",
         )
     } else {
         format!(
@@ -1121,7 +1152,7 @@ fn run_model(
     // run print target and error columns describing a different curve than the filter the same
     // run wrote. Without a replacement this stays `None` and both consumers keep taking
     // `model.target_pts` -- the unchanged run stays byte-identical to the reference.
-    let run_target_ctx = if target_extension_active(args) {
+    let run_target_ctx = if target_extension_active_for(model, args) {
         Some(target_context(model, args)?)
     } else {
         None
@@ -1129,7 +1160,7 @@ fn run_model(
     let run_target: Option<Vec<(f64, f64)>> = match run_target_ctx.as_ref() {
         Some(ctx) => {
             let f_raw: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
-            Some(run_target_curve(args, ctx, &f_raw)?)
+            Some(run_target_curve(model, args, ctx, &f_raw)?)
         }
         None => None,
     };
@@ -2104,8 +2135,26 @@ fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
             )));
         }
     }
-    if let Some(path) = args.target_preset.as_ref() {
-        let preset = load_target_preset(path)?;
+    if let Some(path) = effective_target_preset(model, args) {
+        // A recipe the *database* recorded can fail on files the user has every right not to have
+        // yet (its baseline CSV is user data, out of version control by design). That failure has
+        // to name itself as the model's default and offer the opt-out, not masquerade as a bad
+        // `--target-preset` the user never typed.
+        let from_cli = args.target_preset.as_deref() == Some(path);
+        let preset = load_target_preset(path).map_err(|e| {
+            if from_cli {
+                e
+            } else {
+                Error::msg(format!(
+                    "model '{}' ships with target preset '{}' and it cannot be read: {e} — the \
+                     recipe's baseline CSV is user-supplied (targets/README.md; \
+                     scripts/import_kb5000_7.py). Pass --no-target-preset to equalise to the \
+                     database's built-in curve instead.",
+                    model.key,
+                    path.display()
+                ))
+            }
+        })?;
         // Same rule for a recipe's `baseline_csv`: it is a file on disk like any other.
         baseline = hypreq::model::sort_and_dedup_pairs(&preset.baseline);
         if args.target_family == "harman" {
@@ -2158,6 +2207,31 @@ fn groundwork_target_params(args: &Args) -> hypreq::target::TargetParams {
     }
 }
 
+/// The target recipe this run should use for `model`.
+///
+/// The order is consent-first, not newest-wins: a recipe named on the command line replaces the
+/// model's record outright; a `--target-csv` is a baseline the user brought themselves, and the
+/// database's default steps aside for that too (the CLI already refuses `--target-csv` together
+/// with `--target-preset`, so the only ambiguity left is between a user's curve and a record);
+/// `--no-target-preset` steps it aside by name. With none of the three, the recorded default is
+/// what the model ships with — which is the entire point of recording it.
+fn effective_target_preset<'a>(model: &'a Model, args: &'a Args) -> Option<&'a Path> {
+    if let Some(path) = args.target_preset.as_deref() {
+        return Some(path);
+    }
+    if args.no_target_preset || args.target_csv.is_some() {
+        return None;
+    }
+    model.target_preset.as_deref()
+}
+
+/// [`target_extension_active`] for one concrete model: the CLI's own switches, plus whatever
+/// target recipe that model resolves to. Keeping the two questions apart is what lets the
+/// CLI-only test below keep testing the CLI.
+fn target_extension_active_for(model: &Model, args: &Args) -> bool {
+    target_extension_active(args) || effective_target_preset(model, args).is_some()
+}
+
 /// Did the user ask for the parameterized target rather than the database's own?
 ///
 /// Naming one of the three trims counts even when the number is `0.0` — typing the flag is the
@@ -2193,7 +2267,7 @@ fn derive_with_target(
     };
     let f_raw: Vec<f64> = raw.iter().map(|p| p[0]).collect();
     // One derivation shared with the report path: see run_target_curve.
-    let target = run_target_curve(args, ctx, &f_raw)?;
+    let target = run_target_curve(model, args, ctx, &f_raw)?;
 
     // `--regularize` acts on the curve this run actually derives, so it cannot be overwritten by the
     // derivation. The unregularized pass is kept as the baseline for the report, which is the only
@@ -2242,6 +2316,7 @@ fn derive_with_target(
 /// `harm_offset` is deliberately NOT applied here: the fit's derivation and both report paths add
 /// it at their own call sites, so this returns the identical object to what each of them had.
 fn run_target_curve(
+    model: &Model,
     args: &Args,
     ctx: &TargetContext,
     raw_axis: &[f64],
@@ -2259,7 +2334,7 @@ fn run_target_curve(
     // passes through its own nodes -- and every point added is one the inversion was going to
     // interpolate onto anyway.
     let grid = target_query_grid(&f_t, raw_axis);
-    let mut target: Vec<(f64, f64)> = if target_extension_active(args) {
+    let mut target: Vec<(f64, f64)> = if target_extension_active_for(model, args) {
         let vals = hypreq::target::evaluate_target(&ctx.baseline, &grid, ctx.family, ctx.params);
         grid.iter().copied().zip(vals).collect()
     } else {
@@ -2675,7 +2750,7 @@ fn corrected_curve_stages(model: &Model, args: &Args) -> Result<FilterStages, Er
         let mut lines = e.lines.clone();
         lines.extend(regularized);
         (curve, lines)
-    } else if target_extension_active(args) {
+    } else if target_extension_active_for(model, args) {
         let (curve, regularized) = derive_with_target(model, args, None, &ctx)?;
         let mut lines = vec![
             "=== Parameterized Target ===".to_string(),
@@ -3558,6 +3633,7 @@ mod tests {
             rig_calibration: None,
             fixture: None,
             fixture_conflict_ok: None,
+            target_preset: None,
             key: "capfixture".to_string(),
             name: "Cap Fixture".to_string(),
             short_title: "Cap".to_string(),
@@ -3789,6 +3865,73 @@ mod tests {
         assert!(
             target_extension_active(&typed),
             "naming a trim is the request for the parameterized target, even at 0 dB"
+        );
+    }
+
+    #[test]
+    fn the_recorded_target_recipe_yields_in_consent_order() {
+        let mut model = notch_cap_fixture();
+        model.target_preset = Some(std::path::PathBuf::from("/db/kb.json"));
+
+        let plain = argv(&["-H", "x"]);
+        assert_eq!(
+            effective_target_preset(&model, &plain),
+            Some(Path::new("/db/kb.json")),
+            "the recorded default is the whole point of recording it"
+        );
+        assert!(
+            target_extension_active_for(&model, &plain),
+            "a model with a recorded recipe runs its recipe on a plain invocation"
+        );
+        assert!(
+            !target_extension_active(&plain),
+            "the CLI-only question must stay CLI-only, or this file tests nothing"
+        );
+
+        let cli = argv(&["-H", "x", "--target-preset", "cli.json"]);
+        assert_eq!(
+            effective_target_preset(&model, &cli),
+            Some(Path::new("cli.json")),
+            "a recipe named on the command line outranks the record"
+        );
+
+        let csv = argv(&["-H", "x", "--target-csv", "mine.csv"]);
+        assert_eq!(
+            effective_target_preset(&model, &csv),
+            None,
+            "a baseline the user brought is not silently replaced by the database's default"
+        );
+        assert!(
+            target_extension_active_for(&model, &csv),
+            "the csv itself still activates the parameterized path"
+        );
+
+        let off = argv(&["-H", "x", "--no-target-preset"]);
+        assert_eq!(
+            effective_target_preset(&model, &off),
+            None,
+            "the named opt-out is honoured"
+        );
+        assert!(
+            !target_extension_active_for(&model, &off),
+            "--no-target-preset must fall back to the plain database path, not just to another recipe"
+        );
+
+        let bare = notch_cap_fixture();
+        assert_eq!(effective_target_preset(&bare, &plain), None);
+        assert!(!target_extension_active_for(&bare, &plain));
+
+        assert!(
+            Args::try_parse_from([
+                "hypreq",
+                "-H",
+                "x",
+                "--target-preset",
+                "a.json",
+                "--no-target-preset"
+            ])
+            .is_err(),
+            "demanding a recipe and refusing recipes at once is a usage error, not a tie"
         );
     }
 

@@ -242,6 +242,31 @@ and had a silent-failure mode. Measured on the tree, not inferred:
       `run_target_curve` + `PlotInputs.target_override`/`target_label_override`; full story,
       measurements and sabotage results in BUGFIX.md ("A preset run reported another target").
       Two new discriminating tests; suite 415 -> 417 executed, gate green (fmt/clippy/doc/tests).
+- [x] C6. KB5000_7 is the default target of all three shipped models (2026-11-19, user ask
+      "make it default then ... for all 3"). Route 1 of targets/README.md is now executed rather
+      than merely offered: the models declare `fixture: "gras_kb5000"` (name marker
+      `[GRAS KB5000]`; the 43AG/clone bodies stay in `rig_info` prose) and record
+      `"target_preset": "targets/harman_kb5000_7.json"`, so a plain run fits the published curve
+      and the guard pairs it `Same` with no `--force`. New DB field `target_preset` (path resolved
+      against the database file; the recipe is read at run time, so a fresh clone still parses
+      without the gitignored CSV and stops with a message naming the import script and the
+      opt-out). New `--no-target-preset` flag (clap-conflicts with `--target-preset`); a
+      `--target-csv` of the user's own also suppresses the record. Resolution: CLI recipe >
+      record, with csv/opt-out yielding the record. The fixture guard resolves the effective
+      recipe per model: a recorded recipe that disagrees with its own model's fixture is refused
+      (rc 2) and `--force` prints the override. `fixture_conflict_ok` on all three models now
+      records exactly the opted-out built-in-curve pairing; `jbl770nc`'s KB006x clone-pinna
+      caveat is on file in the DB and targets/README.md (declaration = nearest published
+      acoustic object, not identity). Suite 417 -> 421 executed / 0 failed / 2 ignored: one
+      model-parse test, one consent-order unit test, four CLI tests (audit follows the record,
+      explicit recipe outranks it, csv/opt-out suppress it, wrong-fixture record refused), and a
+      real-database check that skips visibly when the user CSV is absent. All four resolution
+      and guard paths failed their tests under sabotage and passed on restore (md5-checked);
+      27 existing real-model invocations were pinned with `--no-target-preset` so their old
+      assertions keep their old meaning. fmt/clippy(-D warnings)/doc -D warnings clean.
+      Known gap: `backup/irs/` and the README's main graphs predate the switch and describe
+      their own (labelled) harman_2018-target runs; re-baking the default IR set is a separate
+      decision.
 - [ ] C5. Loop closure pending: `--verify-with` needs a real capture taken after convolution on
       the target's own fixture - none of the three repo models is a KB5000 or 5128 capture, so
       all six IRs remain cross-fixture estimates until the user measures on one.

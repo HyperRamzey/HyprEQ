@@ -185,6 +185,16 @@ pub struct Model {
     /// through" into "someone decided this, and here is why", and an empty string buys nothing, so it
     /// is refused.
     pub fixture_conflict_ok: Option<String>,
+    /// The target recipe this model ships with: a path to a `--target-preset` recipe JSON,
+    /// resolved against the database file's directory.
+    ///
+    /// `target` stays what it always was — the built-in curve this database carries — and is what
+    /// a run falls back to when the preset is opted out of (`--no-target-preset`) or superseded by
+    /// a `--target-csv` of the user's own. The recipe's baseline CSV is user-supplied and, like
+    /// every curve in `targets/`, out of version control (targets/README.md), so this field stores
+    /// a path only: the recipe is read at run time, and a missing baseline is reported there —
+    /// naming the opt-out — rather than turning a fresh clone's database into a parse error.
+    pub target_preset: Option<PathBuf>,
     pub target_name: String,
     pub target_pts: Vec<(f64, f64)>,
     pub harm_offset: f64,
@@ -1055,6 +1065,20 @@ pub fn normalize_model_entry(
         }
     }
     let fixture_conflict_ok = str_opt(cfg, "fixture_conflict_ok").filter(|s| !s.trim().is_empty());
+    // A recorded recipe is a claim about where the default target lives, so a wrong type is a
+    // database error rather than an absent default — same rule as the fixture key above. The file
+    // itself is deliberately *not* read here: its baseline CSV is user data a fresh clone will not
+    // have, and `--list-models` must keep working without it.
+    let target_preset = match cfg.get("target_preset") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) if !text.trim().is_empty() => Some(base_dir.join(text.trim())),
+        Some(other) => {
+            return err(format!(
+                "Model '{key}': 'target_preset' must be a non-empty path to a recipe JSON, \
+                 got {other}"
+            ))
+        }
+    };
     let short_title = str_opt(cfg, "short_title")
         .or_else(|| {
             defaults
@@ -1114,6 +1138,7 @@ pub fn normalize_model_entry(
             .unwrap_or_else(|| "IEC 60318-4 (711) Coupler".to_string()),
         fixture,
         fixture_conflict_ok,
+        target_preset,
         target_name,
         target_pts,
         harm_offset,
@@ -1738,6 +1763,52 @@ mod tests {
     }
 
     #[test]
+    fn a_recorded_target_preset_is_a_path_held_against_the_database() {
+        let targets = targets(flat_target());
+        let with = normalize_model_entry(
+            "t",
+            &cfg(json!({ "raw_pts": offset_raw(), "target_preset": "recipes/kb.json" })),
+            &targets,
+            Path::new("/db/dir"),
+        )
+        .unwrap();
+        assert_eq!(
+            with.target_preset.as_deref(),
+            Some(Path::new("/db/dir/recipes/kb.json")),
+            "the recipe path resolves against the database file, like every other relative path"
+        );
+
+        // The file is deliberately not opened at load: its baseline CSV is user data a fresh
+        // clone does not have, and the database must still parse without it.
+        assert!(with.target_preset.is_some(), "a path is a path");
+
+        let plain = normalize_model_entry(
+            "t",
+            &cfg(json!({ "raw_pts": offset_raw() })),
+            &targets,
+            Path::new("."),
+        )
+        .unwrap();
+        assert!(
+            plain.target_preset.is_none(),
+            "an absent key means no default, not a wrong one"
+        );
+
+        for bad in [json!(7), json!(["a"]), json!("  ")] {
+            assert!(
+                normalize_model_entry(
+                    "t",
+                    &cfg(json!({ "raw_pts": offset_raw(), "target_preset": bad })),
+                    &targets,
+                    Path::new("."),
+                )
+                .is_err(),
+                "a wrong-typed or blank recipe path is a database error, not silence: {bad}"
+            );
+        }
+    }
+
+    #[test]
     fn optional_groundwork_keys_parse_and_default_to_absent() {
         let targets = targets(flat_target());
         let plain = normalize_model_entry(
@@ -1971,6 +2042,7 @@ mod tests {
                 rig_calibration: None,
                 fixture: None,
                 fixture_conflict_ok: None,
+                target_preset: None,
                 key: k.to_string(),
                 name: k.to_string(),
                 short_title: k.to_string(),
@@ -2036,6 +2108,7 @@ mod tests {
             rig_calibration: None,
             fixture: None,
             fixture_conflict_ok: None,
+            target_preset: None,
             key: "fixture".to_string(),
             name: "Fixture".to_string(),
             short_title: "Fixture".to_string(),

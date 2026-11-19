@@ -82,11 +82,22 @@ source defines *on that fixture*, not a curve people compare to from that fixtur
 | Fixture key | Published target defined there | Defined on | Repo support |
 | --- | --- | --- | --- |
 | `gras_45ca` | Harman around-/on-ear target family | GRAS 45CA + RA045/RA0045-S1 ("711") + the custom Welti pinna | built-in `harman` family constants; no shipped curve data |
-| `gras_kb5000` | **KB5000_7** (Harman equivalent translated to the KB5000 pinna) | GRAS 45CA-10 + KB5000 pinna | `harman_kb5000_7.json`; your CSV |
+| `gras_kb5000` | **KB5000_7** (Harman equivalent translated to the KB5000 pinna) | GRAS 45CA-10 + KB5000 pinna | `harman_kb5000_7.json` - default recipe of the three shipped models; your CSV |
 | `bk5128` | **Harman Beta 2024** (shelf constants over a 5128 diffuse-field baseline); Olive & Clark's 5128 side | B&K 5128 (Type 4.3 ear) | `harman_beta_2024_5128.json`; treat 5128 targets as provisional, below |
 | `gras_43ag` | **none** | — | see the three honest routes, below |
 | `gras_43ag_clone` | **none** | — | same as `gras_43ag` |
 | `iec60318_4` | **none** — a bare 711 coupler has no pinna; comparing it to a Harman curve is the misuse the 2025 paper names | — | no recipe can fix that pairing; re-measure with the pinna your target assumes |
+
+**The shipped models take route 1 (2026-11-19).** `jbl770nc`, `dt770_80` and `ft1pro` declare
+`fixture: "gras_kb5000"` — their KB5000-family pinna on a 711-style ear is the acoustic object;
+the 43AG or clone body stays in the `rig_info` prose — and they record
+`"target_preset": "targets/harman_kb5000_7.json"`, so an ordinary run fits their capture to the
+published curve and the pairing is `Same`, no override. Two honest edges. The recipe's baseline
+CSV is still user data: without `kb5000_7.csv` a plain run stops with a message naming the path,
+and `--no-target-preset` — or a `--target-csv` of your own — falls back to the legacy built-in
+curve, which is the pairing the models' `fixture_conflict_ok` now records. And `jbl770nc`'s pinna
+is a KB006x *clone*, not a genuine GRAS KB5000: the declaration names the nearest published
+acoustic object, not an identity — the paper's scatter figures do not cover clone hardware.
 
 **Why 5128 recipes are provisional.** In the authors' own listening tests (WebMUSHRA, 13
 listeners) the 5128-derived targets scattered: their figures show the 7-headphone 5128 target with

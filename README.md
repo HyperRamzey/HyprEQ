@@ -554,13 +554,16 @@ anyway. ...
   mentions `GRAS 43AG`, or mentions two fixtures, is refused at load: two places to write one fact is
   where drift lives, and a name that mentions both rigs says which one the measurement was made on
   is a coin flip.
-* **The shipped models record their rigs, and one inherited decision.** All three are AutoEq-derived
-  GRAS 43AG captures — `jbl770nc` a clone, the other two genuine — and their `name` now says so, since
-  the name is what `--list-models`, the report banner and the figure's title block all print:
-  `Beyerdynamic DT 770 Pro (80 Ω) [GRAS 43AG]`. The Harman target they are equalised to was defined on
-  a different fixture, and there is no published 43AG equivalent of it to switch to. So each model
-  carries that pairing as a reason on file rather than as an accident nobody noticed. It is the same
-  decision the reference program has always made; it is now one you can read, and disagree with.
+* **The shipped models record their ears, and their default targets.** All three are AutoEq-derived
+  captures made on 43AG-family fixtures — `jbl770nc` a clone, the other two genuine — but what they
+  *declare* is the acoustic ear: a KB5000-family pinna on a 711-style ear, so their `name` says
+  `[GRAS KB5000]` and the `rig_info` prose keeps the body details (route 1 of `targets/README.md`).
+  Each also records `"target_preset": "targets/harman_kb5000_7.json"`, so an ordinary run fits the
+  capture to the published Olive & Clark curve and the fixture guard pairs them `Same` — no
+  `--force`, no note. The database's built-in `harman_2018` curve stays as the fallback the
+  reference program always used; it was defined on a different fixture, so the models keep a
+  `fixture_conflict_ok` reason covering exactly the opted-out paths (`--no-target-preset`, or your
+  own `--target-csv`). Both decisions are on file, and both are yours to disagree with.
 
 ### Experimental: Moving the Phase, Leaving the Curve (`--experimental-phase`)
 

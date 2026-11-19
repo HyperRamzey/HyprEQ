@@ -1,6 +1,6 @@
 # HyprEQ
 
-Rig-compensated minimum-phase FIR impulse response generator (`pcm_f64le` for `mpv` / `FFmpeg` and `pcm_f32le` for PipeWire / DAW convolvers) targeting the **Harman Over-Ear 2018** curve.
+Rig-compensated minimum-phase FIR impulse response generator (`pcm_f64le` for `mpv` / `FFmpeg` and `pcm_f32le` for PipeWire / DAW convolvers) targeting the **Harman target curve translated for the GRAS KB5000 anthropometric pinna (KB5000_7, Olive & Clark AES 2025)** by default, with built-in support for the original **Harman Over-Ear 2018** curve (`--no-target-preset`), **Harman Beta 2024 for B&K 5128**, and flat reference curves.
 
 All target curves and headphone measurement datasets are decoupled from the DSP into an external `measurements.json` database (with automatic discovery of standalone `.json` and `.csv` model files in `models/`), allowing users to add new headphone models without touching the code.
 
@@ -29,62 +29,39 @@ cargo build --release
 
 1. **JBL Live 770NC (Passive / Wired Mode)** — `--headphone jbl770nc`
    - **Measurement Source:** **Filk** (Clone GRAS 43AG fixture with `KB006x` KEMAR pinna + clone IEC 60318-4 `711` occluded-ear simulator), via the [AutoEq](https://github.com/jaakkopasanen/AutoEq) database.
-   - **Target:** Harman Over-Ear 2018.
+   - **Target:** **Harman KB5000_7** (Olive & Clark, AES 159th Convention, 2025; `targets/harman_kb5000_7.json` default). Legacy Harman Over-Ear 2018 accessible via `--no-target-preset`.
 
    **Baseline Verification (Unregularized / Shipped Default):**
    <img width="1950" height="1725" alt="jbl770nc_final_verification" src="docs/plots/jbl770nc_final_verification.png" />
 
-   **PR 1 Adaptive Regularized Verification (`--regularize auto`):**
+   **Adaptive Regularized Verification (`--regularize auto`):**
    <img width="1950" height="1725" alt="jbl770nc_regularized_verification" src="docs/plots/jbl770nc_regularized_verification.png" />
 
-   > **What PR 1 Regularization Gives:** Evaluates local spectral deviation against a half-octave smoothed envelope with an adaptive knee at $4.29\text{ dB}$. Moves 20 of 128 knots, softening the aggressive $-3.16\text{ dB}$ cut at $8.48\text{ kHz}$ to $-2.37\text{ dB}$ (a $+0.79\text{ dB}$ shift toward bypass) where the narrow dip is partly an artificial pinna coupling artifact, while completely preserving the fundamental acoustic driver corrections: the $-7.04\text{ dB}$ at $160\text{ Hz}$ cup mode, the $+2.60\text{ dB}$ at $455\text{ Hz}$ boost, and the $-2.45\text{ dB}$ nasal cut at $1.05\text{ kHz}$.
+   > **What Adaptive Regularization Gives:** Evaluates local spectral deviation against a half-octave smoothed envelope with an adaptive knee at $4.29\text{ dB}$. Moves 28 of 94 knots, softening the aggressive cut at $8.48\text{ kHz}$ from $-2.05\text{ dB}$ to $-1.56\text{ dB}$ (a $+0.49\text{ dB}$ shift toward bypass) where the narrow dip is partly an artificial pinna coupling artifact, while completely preserving fundamental acoustic driver corrections: the $-7.04\text{ dB}$ cup mode at $160\text{ Hz}$, the $+2.60\text{ dB}$ boost at $455\text{ Hz}$, and the $-2.45\text{ dB}$ nasal cut at $1.05\text{ kHz}$. Total preamp moves from $-13.19\text{ dB}$ to $-12.88\text{ dB}$.
 
 2. **Beyerdynamic DT 770 Pro (80 Ω)** — `--headphone dt770_80`
    - **Measurement Source:** **Crinacle** (Genuine `GRAS 43AG-7` fixture: `RA0402` high-frequency 711 coupler + `KB500X` anthropometric pinna), via AutoEq.
-   - **Target:** Harman Over-Ear 2018.
+   - **Target:** **Harman KB5000_7** (Olive & Clark, AES 159th Convention, 2025; `targets/harman_kb5000_7.json` default). Legacy Harman Over-Ear 2018 accessible via `--no-target-preset`.
 
    **Baseline Verification (Unregularized / Shipped Default):**
    <img width="1950" height="1725" alt="dt770_80ohm_final_verification" src="docs/plots/dt770_80ohm_final_verification.png" />
 
-   **PR 1 Adaptive Regularized Verification (`--regularize auto`):**
+   **Adaptive Regularized Verification (`--regularize auto`):**
    <img width="1950" height="1725" alt="dt770_80ohm_regularized_verification" src="docs/plots/dt770_80ohm_regularized_verification.png" />
 
-   > **What PR 1 Regularization Gives:** Identifies that the narrow $3.76\text{ kHz}$ concha reflection null is a non-minimum-phase fixture artifact, with an adaptive knee at $4.27\text{ dB}$ moving 33 of 128 knots. It walks the narrow $+4.26\text{ dB}$ boost back to $+0.10\text{ dB}$ (a $-4.16\text{ dB}$ adjustment, effectively bypassing the null and eliminating harsh treble glare), while keeping genuine driver resonances intact: the $-4.05\text{ dB}$ cup suckout at $59\text{ Hz}$, the $+4.10\text{ dB}$ boost at $205\text{ Hz}$, and surgical cuts on the three Beyer breakup spikes ($5.3\text{ kHz}$, $6.6\text{ kHz}$, and $8.16\text{ kHz}$). Total preamp moves from $-5.60\text{ dB}$ to $-5.56\text{ dB}$.
+   > **What Adaptive Regularization Gives:** Identifies that the narrow $3.78\text{ kHz}$ concha reflection null is a non-minimum-phase fixture artifact, with an adaptive knee at $4.27\text{ dB}$ moving 38 of 129 knots. It walks the narrow boost from $+15.91\text{ dB}$ all the way back to $+0.57\text{ dB}$ (a $-15.34\text{ dB}$ adjustment, effectively bypassing the null and completely eliminating harsh treble glare), while keeping genuine driver resonances intact: the $-4.05\text{ dB}$ cup suckout at $59\text{ Hz}$, the $+4.10\text{ dB}$ boost at $205\text{ Hz}$, and surgical cuts on the three Beyer breakup spikes ($5.3\text{ kHz}$, $6.6\text{ kHz}$, and $8.16\text{ kHz}$). Total preamp moves from $-6.04\text{ dB}$ to $-6.00\text{ dB}$.
 
 3. **FiiO FT1 Pro (Open-Back Planar Magnetic)** — `--headphone ft1pro`
    - **Measurement Source:** **oratory1990 / Kuulokenurkka** (Genuine `GRAS 43AG` fixture with `KB50xx` anthropometric pinna + IEC 60318-4 `711` occluded-ear simulator), via AutoEq.
-   - **Target:** Harman Over-Ear 2018.
+   - **Target:** **Harman KB5000_7** (Olive & Clark, AES 159th Convention, 2025; `targets/harman_kb5000_7.json` default). Legacy Harman Over-Ear 2018 accessible via `--no-target-preset`.
 
    **Baseline Verification (Unregularized / Shipped Default):**
    <img width="1950" height="1725" alt="ft1pro_final_verification" src="docs/plots/ft1pro_final_verification.png" />
 
-   **PR 1 Adaptive Regularized Verification (`--regularize auto`):**
+   **Adaptive Regularized Verification (`--regularize auto`):**
    <img width="1950" height="1725" alt="ft1pro_regularized_verification" src="docs/plots/ft1pro_regularized_verification.png" />
 
-   > **What PR 1 Regularization Gives:** Operates with a baseline knee floor at $3.00\text{ dB}$, moving 62 of 127 knots to smoothly contract narrow high-frequency ripples near the coupler boundary (moderating the $+1.63\text{ dB}$ boost at $9.18\text{ kHz}$ to $+1.22\text{ dB}$). Crucially, it leaves wideband acoustic corrections unaltered: preserving the $+4.07\text{ dB}$ ear-gain restoration at $1.82\text{ kHz}$, the $-2.64\text{ dB}$ glare cut at $2.82\text{ kHz}$, and planar diaphragm excursion protection in the sub-bass ($+2.70\text{ dB}$ at $55\text{ Hz}$, $+2.37\text{ dB}$ at $20\text{ Hz}$). Total preamp moves from $-5.57\text{ dB}$ to $-5.53\text{ dB}$.
-
-### Current-Tree Re-Verification Figures (2026-11-19)
-
-Regenerated with the tree at this commit (full 458-test gate green) so the figures match
-the shipped binary rather than the PR 1 build. First figure: shipped default. Second
-figure: the same model with `--regularize auto`.
-
-**Baseline Verification (Unregularized / Shipped Default):**
-<img width="1950" height="1725" alt="jbl770nc_final_verification_20261119" src="docs/plots/jbl770nc_final_verification_20261119.png" />
-
-**Adaptive Regularized Verification (`--regularize auto`):**
-<img width="1950" height="1725" alt="jbl770nc_regularized_auto_20261119" src="docs/plots/jbl770nc_regularized_auto_20261119.png" />
-
-> The current binary reproduces the PR 1 regularization numbers exactly: adaptive knee at
-> $4.29\text{ dB}$ of deviation, 20 of 128 knots moved, largest shift $+0.79\text{ dB}$ at
-> $8481\text{ Hz}$, where the $-3.16\text{ dB}$ cut softens to $-2.37\text{ dB}$ — the
-> `--export-csv` tables confirm it on the written filter ($-3.16$ baseline versus $-2.37$
-> regularized at $8480.6\text{ Hz}$), and total preamp stays $-6.50\text{ dB}$ either way.
-> Note for readers of the second figure: panel 2's green callout text ("$-2.31$ dB &
-> $-3.16$ dB Surgical Cuts") is static model metadata describing the unregularized design
-> knots; with `--regularize auto` the plotted curve itself passes through $-2.37\text{ dB}$
-> at $8.48\text{ kHz}$, and the run summary prints the moved value. The annotation values
-> are not re-templated per run — this caption is the record that they are not.
+   > **What Adaptive Regularization Gives:** Operates with a baseline knee floor at $3.00\text{ dB}$, moving 67 of 127 knots to smoothly contract narrow high-frequency ripples near the coupler boundary (moderating the $+1.93\text{ dB}$ boost at $9.18\text{ kHz}$ to $+1.45\text{ dB}$). Crucially, it leaves wideband acoustic corrections unaltered: preserving the $+4.07\text{ dB}$ ear-gain restoration at $1.82\text{ kHz}$, the $-2.64\text{ dB}$ glare cut at $2.82\text{ kHz}$, and planar diaphragm excursion protection in the sub-bass ($+2.70\text{ dB}$ at $55\text{ Hz}$, $+2.37\text{ dB}$ at $20\text{ Hz}$). Total preamp moves from $-5.47\text{ dB}$ to $-5.45\text{ dB}$.
 
 ### Reference Model Profiles & Convolver Metrics
 

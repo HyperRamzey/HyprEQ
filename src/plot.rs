@@ -1205,10 +1205,7 @@ macro_rules! annotations {
                     .draw_series(vec![Text::new(
                         line.to_string(),
                         (a.xytext.0, ty),
-                        (
-                            $crate::plot::FONT_FAMILY,
-                            $crate::plot::ANNOT_FONT,
-                        )
+                        ($crate::plot::FONT_FAMILY, $crate::plot::ANNOT_FONT)
                             .into_font()
                             .color(&color.color()),
                     )])

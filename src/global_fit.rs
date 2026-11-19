@@ -305,17 +305,31 @@ fn box_bounds(q_min_db: &[f64], q_max_db: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let mut lo = Vec::with_capacity(n);
     let mut hi = Vec::with_capacity(n);
     for i in 0..n {
-        let a = if q_min_db[i].is_finite() {
-            q_min_db[i]
-        } else {
+        let is_q_min_inf = q_min_db[i] == f64::INFINITY;
+        let is_q_max_neg_inf = q_max_db[i] == f64::NEG_INFINITY;
+
+        let a = if q_min_db[i].is_nan() || q_min_db[i] == f64::NEG_INFINITY {
             f64::MIN
-        };
-        let b = if q_max_db[i].is_finite() {
-            q_max_db[i]
         } else {
-            f64::MAX
+            q_min_db[i]
         };
-        let (l, h) = if a <= b { (a, b) } else { (b, a) };
+        let b = if q_max_db[i].is_nan() || q_max_db[i] == f64::INFINITY {
+            f64::MAX
+        } else {
+            q_max_db[i]
+        };
+
+        let (l, h) = if is_q_min_inf && b.is_finite() {
+            (b, b)
+        } else if is_q_max_neg_inf && a.is_finite() {
+            (a, a)
+        } else if a <= b {
+            (a, b)
+        } else if a.is_finite() && b.is_finite() {
+            (b, a)
+        } else {
+            (0.0, 0.0)
+        };
         lo.push(l);
         hi.push(h);
     }
@@ -405,6 +419,21 @@ mod tests {
             got.q_db, want.q_db,
             "a non-finite or reversed bound did not behave as the absence of a bound"
         );
+    }
+
+    #[test]
+    fn infinite_bounds_do_not_invert_into_unbounded() {
+        let (lo, hi) = box_bounds(&[f64::INFINITY], &[6.0]);
+        assert_eq!(lo[0], 6.0);
+        assert_eq!(hi[0], 6.0);
+
+        let (lo2, hi2) = box_bounds(&[-6.0], &[f64::NEG_INFINITY]);
+        assert_eq!(lo2[0], -6.0);
+        assert_eq!(hi2[0], -6.0);
+
+        let (lo3, hi3) = box_bounds(&[f64::NEG_INFINITY], &[f64::INFINITY]);
+        assert_eq!(lo3[0], f64::MIN);
+        assert_eq!(hi3[0], f64::MAX);
     }
 
     #[test]

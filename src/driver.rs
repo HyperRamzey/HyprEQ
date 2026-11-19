@@ -138,6 +138,14 @@ impl ExcursionModel {
     /// no opinion is not a safe answer, and a caller with no model has `Option::None`, not this.
     #[must_use]
     pub fn margin_db(&self, f_hz: f64, eq_boost_db: f64, band_spl_db: f64) -> f64 {
+        if !f_hz.is_finite()
+            || !self.fs_hz.is_finite()
+            || !self.ref_xmax_spl_db.is_finite()
+            || !eq_boost_db.is_finite()
+            || !band_spl_db.is_finite()
+        {
+            return f64::NAN;
+        }
         if f_hz <= 0.0 || self.fs_hz <= 0.0 {
             return 0.0;
         }
@@ -404,5 +412,16 @@ mod tests {
             "no sweeps must mean unconstrained, on every bin"
         );
         assert_eq!(prof.q_max_bounds(&f, &h, 85.0, 3.0, 12.0), vec![12.0, 12.0]);
+    }
+
+    #[test]
+    fn margin_db_returns_nan_on_nan_inputs() {
+        let em = ExcursionModel {
+            fs_hz: 60.0,
+            ref_xmax_spl_db: 100.0,
+        };
+        assert!(em.margin_db(f64::NAN, 0.0, 80.0).is_nan());
+        assert!(em.margin_db(40.0, f64::NAN, 80.0).is_nan());
+        assert!(em.margin_db(40.0, 0.0, f64::NAN).is_nan());
     }
 }

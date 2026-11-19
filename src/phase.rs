@@ -409,7 +409,6 @@ fn smallest_shift_stereo(
 struct Reshaped {
     mag: Vec<f64>,
     freq: Vec<f64>,
-    new_phase: Vec<f64>,
     gd_now: Vec<f64>,
     full: Vec<f64>,
     f_taper: f64,
@@ -568,7 +567,6 @@ fn reshape_filter(
     Some(Reshaped {
         mag,
         freq,
-        new_phase,
         gd_now,
         full,
         f_taper,
@@ -609,7 +607,8 @@ fn build_adjustment(
     }
 
     let gd_before = &r.gd_now;
-    let gd_after = group_delay_ms(&r.new_phase, &r.freq);
+    let phase_after = unwrap(&after.iter().map(|c| c.arg()).collect::<Vec<_>>());
+    let gd_after = group_delay_ms(&phase_after, &r.freq);
     let mut max_change = 0.0f64;
     let mut at_hz = 0.0f64;
     for (i, &f) in r.freq.iter().enumerate() {

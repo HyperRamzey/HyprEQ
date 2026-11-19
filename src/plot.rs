@@ -242,6 +242,9 @@ pub struct PlotInputs<'a> {
     pub unwin_rt: f64,
     /// Control knots after the notch policy was applied.
     pub active_ctrl: &'a [(f64, f64)],
+    /// Raw measurement curve to plot, overriding `model.raw_pts` when ensemble or rig calibration
+    /// is active. `None` keeps `model.raw_pts`.
+    pub raw_override: Option<&'a [(f64, f64)]>,
     /// The target curve the run actually equalised to, when the run replaced the database's
     /// (a `--target-preset`/`--target-csv` run). `None` keeps the shipped `model.target_pts`
     /// trace, so an unchanged run renders the byte-identical reference figure.
@@ -1168,16 +1171,26 @@ impl PlotData {
             .map(|v| v + model.harm_offset)
             .collect();
 
-        let f_raw: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
-        // The averaged trace has to be the ear mean the fit uses. `p.last()` on a [freq, L, R] table
-        // plots the right ear and labels it the average.
-        let g_raw: Vec<f64> = model
-            .raw_pts
-            .iter()
-            .map(|p| crate::model::point_gain(p))
-            .collect();
+        let (f_raw, g_raw): (Vec<f64>, Vec<f64>) = if let Some(raw) = in_.raw_override {
+            (
+                raw.iter().map(|p| p.0).collect(),
+                raw.iter().map(|p| p.1).collect(),
+            )
+        } else {
+            (
+                model.raw_pts.iter().map(|p| p[0]).collect(),
+                model
+                    .raw_pts
+                    .iter()
+                    .map(|p| crate::model::point_gain(p))
+                    .collect(),
+            )
+        };
         let raw_avg = pchip::pchip_log_interp(&f_raw, &g_raw, &f_plot);
-        let (raw_l, raw_r) = if model.raw_pts.first().is_some_and(|p| p.len() >= 3) {
+        let (raw_l, raw_r) = if in_.raw_override.is_none()
+            && !model.raw_pts.is_empty()
+            && model.raw_pts.iter().all(|p| p.len() >= 3)
+        {
             let gl: Vec<f64> = model.raw_pts.iter().map(|p| p[1]).collect();
             let gr: Vec<f64> = model.raw_pts.iter().map(|p| p[2]).collect();
             (
@@ -2370,6 +2383,7 @@ mod tests {
             pre_rt: -1.5,
             unwin_rt: -120.0,
             active_ctrl: &[(20.0, 2.0), (1000.0, 0.0), (20000.0, 4.0)],
+            raw_override: None,
             target_override: None,
             target_label_override: None,
             notch_mode: "safe",
@@ -2699,6 +2713,7 @@ mod tests {
             pre_rt: -6.5,
             unwin_rt: -152.6,
             active_ctrl: &[(20.0, 2.0), (1000.0, 0.0), (20000.0, 4.0)],
+            raw_override: None,
             target_override: None,
             target_label_override: None,
             notch_mode: "safe",
@@ -2748,6 +2763,34 @@ mod tests {
         let d_named = PlotData::build(&model(), &named);
         assert_eq!(d_named.target_label, "Target Curve (test_preset)");
         assert_eq!(d_off.target_label, "Harman Over-Ear 2018 Target");
+    }
+
+    #[test]
+    fn the_raw_trace_follows_the_override_when_present() {
+        let (ir, mag) = full_inputs();
+        let flat_raw = [(20.0, 5.0), (1000.0, 5.0), (20000.0, 5.0)];
+        let on = PlotInputs {
+            raw_override: Some(&flat_raw),
+            ..full_inputs_ref(&ir, &mag)
+        };
+        let d_on = PlotData::build(&model(), &on);
+        let mid = d_on
+            .f_plot
+            .iter()
+            .position(|&f| f > 900.0 && f < 1100.0)
+            .expect("plot grid crosses 1 kHz");
+        assert!(
+            (d_on.raw_avg[mid] - 5.0).abs() < 0.05,
+            "raw override drew {:.2} dB at 1 kHz, not 5.0",
+            d_on.raw_avg[mid]
+        );
+        let d_off = PlotData::build(&model(), &full_inputs_ref(&ir, &mag));
+        assert!(
+            (d_off.raw_avg[mid] - d_on.raw_avg[mid]).abs() > 2.0,
+            "override did not change raw: shipped {:.2} vs override {:.2}",
+            d_off.raw_avg[mid],
+            d_on.raw_avg[mid]
+        );
     }
 
     #[test]

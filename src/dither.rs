@@ -133,6 +133,7 @@ impl Pcg64 {
 /// first array's `frames * channels` draws. Shared across channels only by
 /// position, not by frame index — writing it any other way shifts the whole
 /// dither by one sample and changes every PCM byte.
+#[cfg(test)]
 pub fn tpdf_matrix(frames: usize, channels: usize) -> Vec<f64> {
     let n = frames * channels;
     let mut rng = Pcg64::hypreq_dither();

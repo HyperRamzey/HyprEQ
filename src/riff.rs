@@ -113,7 +113,13 @@ pub fn header(
     } else {
         tag
     };
-    let fmt_len = if extensible { 40u32 } else { 16u32 };
+    let fmt_len = if extensible {
+        40u32
+    } else if float {
+        18u32
+    } else {
+        16u32
+    };
     // RIFF header: size is patched by the writer, so zero it here.
     h.extend_from_slice(b"RIFF");
     h.extend_from_slice(&0u32.to_le_bytes());
@@ -133,6 +139,9 @@ pub fn header(
         h.extend_from_slice(&(bits as u16).to_le_bytes()); // wValidBitsPerSample
         h.extend_from_slice(&(mask.unwrap_or_else(|| guess_mask(channels))).to_le_bytes());
         h.extend_from_slice(if float { &SUBTYPE_FLOAT } else { &SUBTYPE_PCM });
+    } else if float {
+        // Microsoft WAVEFORMATEX: cbSize = 0 for non-PCM formats like IEEE float
+        h.extend_from_slice(&0u16.to_le_bytes());
     }
     if float || extensible {
         // Microsoft RIFF/WAVE: fact chunk (dwSampleLength: samples per channel) is
@@ -342,13 +351,26 @@ pub fn read_info_file(f: &mut std::fs::File) -> Result<(WavInfo, u64)> {
             info.rate = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
             info.bits = u16::from_le_bytes([b[14], b[15]]) as u32;
             info.float = tag == WAVE_FORMAT_IEEE_FLOAT;
-            if tag == WAVE_FORMAT_EXTENSIBLE && b.len() >= 40 {
-                let cb_size = u16::from_le_bytes([b[16], b[17]]);
-                let valid_guid = cb_size >= 22 && b[26..40] == SUBTYPE_PCM[2..16];
-                if valid_guid {
-                    info.mask = Some(u32::from_le_bytes([b[20], b[21], b[22], b[23]]));
-                    info.float = u16::from_le_bytes([b[24], b[25]]) == WAVE_FORMAT_IEEE_FLOAT;
+            if tag == WAVE_FORMAT_EXTENSIBLE {
+                if b.len() < 40 {
+                    return Err(Error::msg(
+                        "WAVE_FORMAT_EXTENSIBLE fmt chunk is shorter than 40 bytes",
+                    ));
                 }
+                let cb_size = u16::from_le_bytes([b[16], b[17]]);
+                if cb_size < 22 || b[26..40] != SUBTYPE_PCM[2..16] {
+                    return Err(Error::msg(
+                        "invalid or unsupported WAVE_FORMAT_EXTENSIBLE subformat GUID",
+                    ));
+                }
+                let sub_tag = u16::from_le_bytes([b[24], b[25]]);
+                if sub_tag != WAVE_FORMAT_PCM && sub_tag != WAVE_FORMAT_IEEE_FLOAT {
+                    return Err(Error::msg(format!(
+                        "unsupported WAV extensible subformat tag {sub_tag:#06x}"
+                    )));
+                }
+                info.mask = Some(u32::from_le_bytes([b[20], b[21], b[22], b[23]]));
+                info.float = sub_tag == WAVE_FORMAT_IEEE_FLOAT;
             } else if info.channels > 2 {
                 info.mask = Some(guess_mask(info.channels));
             }
@@ -590,14 +612,15 @@ mod tests {
         assert!(info.float, "0x0003 is IEEE float");
 
         // 0x0103: the low byte is 3, so a one-byte read calls it float. The tag is both
-        // bytes, and both bytes are not 3.
+        // bytes, and both bytes are not 3. Since 0x0103 is neither PCM nor IEEE float,
+        // read_info must reject it rather than misclassifying it.
         let p = write("sub-neither.wav", extensible(0x0103, 32));
-        let (info, _) = read_info(&p).unwrap();
+        let err = read_info(&p).unwrap_err();
         assert!(
-            !info.float,
-            "a SubFormat of 0x0103 is not IEEE float; one byte was read as 0x03"
+            err.to_string()
+                .contains("unsupported WAV extensible subformat tag 0x0103"),
+            "got error: {err}"
         );
-        assert_eq!(info.tag, 0xFFFE, "the container tag is still extensible");
     }
 
     #[test]
@@ -620,7 +643,7 @@ mod tests {
     fn the_measured_header_is_the_header_written() {
         for (ch, bits, float, want) in [
             (1u16, 16, false, 44usize),
-            (2, 32, true, 56),
+            (2, 32, true, 58),
             (2, 24, false, 44),
             (3, 16, false, 80),
             (8, 32, true, 80),
@@ -786,12 +809,12 @@ mod tests {
     #[test]
     fn hypreq_classic_header_matches_python_layout() {
         let h = header(48000, 2, 32, true, None).unwrap();
-        assert_eq!(h.len(), 56);
+        assert_eq!(h.len(), 58);
         assert_eq!(&h[0..4], b"RIFF");
         assert_eq!(u32::from_le_bytes([h[4], h[5], h[6], h[7]]), 0);
         assert_eq!(&h[8..12], b"WAVE");
         assert_eq!(&h[12..16], b"fmt ");
-        assert_eq!(u32::from_le_bytes([h[16], h[17], h[18], h[19]]), 16);
+        assert_eq!(u32::from_le_bytes([h[16], h[17], h[18], h[19]]), 18);
         assert_eq!(u16::from_le_bytes([h[20], h[21]]), WAVE_FORMAT_IEEE_FLOAT);
         assert_eq!(u16::from_le_bytes([h[22], h[23]]), 2);
         assert_eq!(u32::from_le_bytes([h[24], h[25], h[26], h[27]]), 48000);
@@ -799,10 +822,12 @@ mod tests {
         assert_eq!(u32::from_le_bytes([h[28], h[29], h[30], h[31]]), 384_000);
         assert_eq!(u16::from_le_bytes([h[32], h[33]]), 8);
         assert_eq!(u16::from_le_bytes([h[34], h[35]]), 32);
-        assert_eq!(&h[36..40], b"fact");
-        assert_eq!(u32::from_le_bytes([h[40], h[41], h[42], h[43]]), 4);
-        assert_eq!(u32::from_le_bytes([h[44], h[45], h[46], h[47]]), 0);
-        assert_eq!(&h[48..52], b"data");
-        assert_eq!(u32::from_le_bytes([h[52], h[53], h[54], h[55]]), 0);
+        // cbSize = 0 for IEEE float WAVEFORMATEX
+        assert_eq!(u16::from_le_bytes([h[36], h[37]]), 0);
+        assert_eq!(&h[38..42], b"fact");
+        assert_eq!(u32::from_le_bytes([h[42], h[43], h[44], h[45]]), 4);
+        assert_eq!(u32::from_le_bytes([h[46], h[47], h[48], h[49]]), 0);
+        assert_eq!(&h[50..54], b"data");
+        assert_eq!(u32::from_le_bytes([h[54], h[55], h[56], h[57]]), 0);
     }
 }

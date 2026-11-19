@@ -50,17 +50,8 @@ pub fn convolve_planar_fft(planar: &[Vec<f64>], ir: &[f64], trim_to_input: bool)
         return vec![Vec::new(); planar.len()];
     }
     if ir.is_empty() {
-        return vec![
-            vec![
-                0.0;
-                if trim_to_input {
-                    n_in
-                } else {
-                    n_in.saturating_sub(1)
-                }
-            ];
-            planar.len()
-        ];
+        let empty_len = if trim_to_input { n_in } else { 0 };
+        return vec![vec![0.0; empty_len]; planar.len()];
     }
 
     let n_ir = ir.len();
@@ -99,39 +90,30 @@ pub fn convolve_planar_pair(
     if n_in == 0 {
         return Some(vec![Vec::new(); 2]);
     }
-    if ir_l.is_empty() || ir_r.is_empty() {
-        return Some(vec![
-            vec![
-                0.0;
-                if trim_to_input {
-                    n_in
-                } else {
-                    n_in.saturating_sub(1)
-                }
-            ],
-            vec![
-                0.0;
-                if trim_to_input {
-                    n_in
-                } else {
-                    n_in.saturating_sub(1)
-                }
-            ],
-        ]);
+    let target_len = if trim_to_input {
+        n_in
+    } else {
+        let max_ir = ir_l.len().max(ir_r.len());
+        if max_ir == 0 {
+            0
+        } else {
+            n_in.saturating_add(max_ir).saturating_sub(1)
+        }
+    };
+    if ir_l.is_empty() && ir_r.is_empty() {
+        return Some(vec![vec![0.0; target_len], vec![0.0; target_len]]);
     }
 
-    let n_ir_l = ir_l.len();
-    let block_len_l = 16384usize.max(block_bound(n_in));
-    let n_fft_l = shl_bit_length(block_len_l + n_ir_l - 2);
-    let h_l = crate::fft::rfft(ir_l, n_fft_l);
+    let block_bound_in = block_bound(n_in);
 
-    let n_ir_r = ir_r.len();
-    let block_len_r = 16384usize.max(block_bound(n_in));
-    let n_fft_r = shl_bit_length(block_len_r + n_ir_r - 2);
-    let h_r = crate::fft::rfft(ir_r, n_fft_r);
-
-    Some(vec![
-        channel_out_h(
+    let out_l = if ir_l.is_empty() {
+        vec![0.0; target_len]
+    } else {
+        let n_ir_l = ir_l.len();
+        let block_len_l = 16384usize.max(block_bound_in);
+        let n_fft_l = shl_bit_length(block_len_l + n_ir_l - 2);
+        let h_l = crate::fft::rfft(ir_l, n_fft_l);
+        let mut ch = channel_out_h(
             &planar[0],
             n_ir_l,
             &h_l,
@@ -139,8 +121,21 @@ pub fn convolve_planar_pair(
             block_len_l,
             n_in,
             trim_to_input,
-        ),
-        channel_out_h(
+        );
+        if ch.len() < target_len {
+            ch.resize(target_len, 0.0);
+        }
+        ch
+    };
+
+    let out_r = if ir_r.is_empty() {
+        vec![0.0; target_len]
+    } else {
+        let n_ir_r = ir_r.len();
+        let block_len_r = 16384usize.max(block_bound_in);
+        let n_fft_r = shl_bit_length(block_len_r + n_ir_r - 2);
+        let h_r = crate::fft::rfft(ir_r, n_fft_r);
+        let mut ch = channel_out_h(
             &planar[1],
             n_ir_r,
             &h_r,
@@ -148,8 +143,14 @@ pub fn convolve_planar_pair(
             block_len_r,
             n_in,
             trim_to_input,
-        ),
-    ])
+        );
+        if ch.len() < target_len {
+            ch.resize(target_len, 0.0);
+        }
+        ch
+    };
+
+    Some(vec![out_l, out_r])
 }
 
 /// One channel against one precomputed filter spectrum `H`.
@@ -162,9 +163,6 @@ fn channel_out_h(
     n_in: usize,
     trim_to_input: bool,
 ) -> Vec<f64> {
-    if n_ir == 0 {
-        return vec![0.0; if trim_to_input { n_in } else { 0 }];
-    }
     let full_len = n_in.saturating_add(n_ir).saturating_sub(1);
     let out_len = if trim_to_input { n_in } else { full_len };
 
@@ -466,14 +464,13 @@ mod tests {
 
     #[test]
     fn an_empty_filter_and_a_short_channel_neither_panic_nor_garble() {
-        // An empty IR zero-pads inside the transform, so the reference's answer is silence
-        // of length n_in + 0 - 1; a channel shorter than channel 0 contributes only the
-        // blocks it has instead of slicing past its end.
+        // A 0-tap FIR has convolution length 0 when untrimmed (or n_in when trimmed);
+        // a channel shorter than channel 0 contributes only the blocks it has instead of
+        // slicing past its end.
         let y = convolve_planar_fft(&[vec![1.0, 2.0, 3.0]], &[], false)
             .pop()
             .unwrap();
-        assert_eq!(y.len(), 2, "n_in + n_ir - 1 samples of nothing");
-        assert!(y.iter().all(|&v| v == 0.0), "{y:?}");
+        assert_eq!(y.len(), 0, "a 0-tap FIR has convolution length 0");
         let y_trim = convolve_planar_fft(&[vec![1.0, 2.0, 3.0]], &[], true)
             .pop()
             .unwrap();
@@ -511,6 +508,25 @@ mod tests {
         assert!(
             out[1][ragged[1].len()..].iter().all(|&v| v == 0.0),
             "nothing beyond a channel's own samples"
+        );
+    }
+
+    #[test]
+    fn pair_convolves_non_empty_ear_when_other_ear_is_empty() {
+        let input = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let ir_l = vec![1.0]; // delta filter on left ear
+        let ir_r = vec![]; // empty IR on right ear
+        let out = convolve_planar_pair(&input, &ir_l, &ir_r, true).expect("2 channels");
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0],
+            vec![1.0, 2.0, 3.0],
+            "left ear convolved with delta filter"
+        );
+        assert_eq!(
+            out[1],
+            vec![0.0, 0.0, 0.0],
+            "right ear with empty IR is silenced"
         );
     }
 }

@@ -538,6 +538,12 @@ fn run(args: Args) -> Result<(), Error> {
             "--stereo split applies one filter per ear, which needs audio to apply them to: pass -i <stereo.wav> (without --bypass-eq), or use --stereo report to see what a shared filter leaves",
         );
     }
+    if stereo_mode(&args) == hypreq::stereo::Mode::Split && args.synth != "fir" {
+        usage_error(format!(
+            "--stereo split is not supported with --synth {} (split per-ear filtering is currently FIR-only); use --synth fir or --stereo report",
+            args.synth
+        ));
+    }
     // Verification thresholds: a non-finite value is a typo, and a zero threshold would fail every
     // band on the interpolation's own rounding, which is not a finding about anybody's headphones.
     for (name, v) in [
@@ -663,19 +669,27 @@ fn run(args: Args) -> Result<(), Error> {
     for m in used_models(&models, &selected, args.input.is_some(), args.bypass_eq) {
         let recipe_fixture = cli_preset_fixture
             .or_else(|| effective_target_preset(m, &args).and_then(preset_fixture_only));
-        let target_fixture =
-            recipe_fixture.or_else(|| models.target_fixtures.get(&m.target_name).copied());
-        // The recipe alone is the override here; a database that records its target rigs is the
-        // ordinary case, not a replacement, and `fixture_conflict_ok` speaks about that case.
-        fixture_guard(
-            &models,
-            m,
-            recipe_fixture,
-            args.target_preset.is_some(),
-            args.force,
-        )?;
-        if let Some(cal) = cli_calibration.as_ref().or(m.rig_calibration.as_ref()) {
+        let custom_target = args.target_csv.is_some()
+            || (args.target_preset.is_some() && cli_preset_fixture.is_none());
+        let target_fixture = if custom_target {
+            recipe_fixture
+        } else {
+            recipe_fixture.or_else(|| models.target_fixtures.get(&m.target_name).copied())
+        };
+        let active_cal = cli_calibration.as_ref().or(m.rig_calibration.as_ref());
+        if let Some(cal) = active_cal {
             rig_calibration_guard(m, target_fixture, cal, args.force)?;
+        } else {
+            // The recipe alone is the override here; a database that records its target rigs is the
+            // ordinary case, not a replacement, and `fixture_conflict_ok` speaks about that case.
+            fixture_guard(
+                &models,
+                m,
+                target_fixture,
+                recipe_fixture.is_some(),
+                args.target_preset.is_some(),
+                args.force,
+            )?;
         }
     }
 
@@ -794,17 +808,18 @@ fn preset_fixture_only(path: &Path) -> Option<hypreq::fixture::Fixture> {
 /// like a replacement on every ordinary run — which would silence the `fixture_conflict_ok`
 /// exemption for exactly the models that carry it, and refuse the program's built-in path.
 fn fixture_guard(
-    models: &Database,
+    _models: &Database,
     model: &Model,
-    recipe_fixture: Option<hypreq::fixture::Fixture>,
+    target_fixture: Option<hypreq::fixture::Fixture>,
+    recipe_active: bool,
     recipe_from_cli: bool,
     force: bool,
 ) -> Result<(), Error> {
     use hypreq::fixture::{pair, Pairing};
-    // The recipe wins outright. A database entry for the *replaced* target has nothing to say about
-    // a baseline that came from a file, and consulting it would let a stale entry vouch for a curve
-    // it was never measured against.
-    let target = recipe_fixture.or_else(|| models.target_fixtures.get(&model.target_name).copied());
+    // The resolved target fixture wins outright. A database entry for the *replaced* target has nothing
+    // to say about a baseline that came from a file or custom curve, and consulting it would let a stale
+    // entry vouch for a curve it was never measured against.
+    let target = target_fixture;
     if pair(model.fixture, target) != Pairing::Different {
         return Ok(());
     }
@@ -814,12 +829,12 @@ fn fixture_guard(
     // is to make an *unrecorded* pairing loud rather than to overrule a recorded one. A
     // `fixture_conflict_ok` on the model is a record about the model's *shipped* target, so it does
     // not vouch for a recipe the database has never seen.
-    if model.fixture_conflict_ok.is_some() && recipe_fixture.is_none() {
+    if model.fixture_conflict_ok.is_some() && !recipe_active {
         return Ok(());
     }
     let measured = model.fixture.expect("a Different pairing has both sides");
     let defined = target.expect("a Different pairing has both sides");
-    let named = match (recipe_fixture.is_some(), recipe_from_cli) {
+    let named = match (recipe_active, recipe_from_cli) {
         (true, true) => format!(
             "the --target-preset baseline (target '{}')",
             model.target_name
@@ -834,13 +849,13 @@ fn fixture_guard(
     // the command line or from the database's own record — is never unlocked by
     // `fixture_conflict_ok` (see the exemption above), so recommending that route from a recipe
     // refusal would send the user down a path the code has just refused to walk.
-    let routes = if recipe_fixture.is_some() && recipe_from_cli {
+    let routes = if recipe_active && recipe_from_cli {
         String::from(
             "Pick a preset whose 'fixture' matches the capture, correct the model's recorded \
              fixture, or pass --force to equalise anyway. 'fixture_conflict_ok' vouches for the \
              model's shipped target, never for a recipe chosen at the command line.",
         )
-    } else if recipe_fixture.is_some() {
+    } else if recipe_active {
         String::from(
             "The database paired this model with its own default recipe, and they disagree about \
              the rig. Correct the model's 'target_preset' or its declared fixture, or pass \
@@ -913,11 +928,17 @@ fn rig_calibration_guard(
             Pairing::Different => {
                 let mine = recorded.expect("a Different pairing has both sides").key();
                 let theirs = theirs.key();
-                complaints.push(format!(
-                    "its '{label}' is {theirs}, but this run's curve was {said} on {mine} — the \
-                     translation subtracts the difference between {theirs} and {mine}, which is not \
-                     the difference that applies to a curve {said} on {mine}"
-                ));
+                complaints.push(if label == "source" {
+                    format!(
+                        "its 'source' is {theirs}, but this headphone was measured on {mine} — the \
+                         translation starts from {theirs}, which does not match a measurement made on {mine}"
+                    )
+                } else {
+                    format!(
+                        "its 'target' is {theirs}, but this run's target was defined on {mine} — the \
+                         translation lands on {theirs}, which does not match a target defined on {mine}"
+                    )
+                });
             }
             Pairing::Unknown => {
                 let theirs = theirs.key();
@@ -1142,35 +1163,20 @@ fn run_model(
     let stages = corrected_curve_stages(model, args, fs, !args.measure_only)?;
     let (active_ctrl, reg_lines) = stages.shared;
 
-    // When the run replaced the target (--target-preset / --target-csv / a parameterized shelf),
-    // the audit table and the plot's target trace must speak of the curve this run equalised to,
-    // not the database's shipped one. Both used to read `model.target_pts`, which made a preset
-    // run print target and error columns describing a different curve than the filter the same
-    // run wrote. Without a replacement this stays `None` and both consumers keep taking
-    // `model.target_pts` -- the unchanged run stays byte-identical to the reference.
-    let run_target_ctx = if target_extension_active_for(model, args) {
-        Some(target_context(model, args)?)
-    } else {
-        None
-    };
-    let run_target: Option<Vec<(f64, f64)>> = match run_target_ctx.as_ref() {
-        Some(ctx) => {
-            let f_raw: Vec<f64> = model.raw_pts.iter().map(|p| p[0]).collect();
-            Some(run_target_curve(model, args, ctx, &f_raw)?)
-        }
-        None => None,
-    };
     // Panel 1's legend names the target from the database record and the model's plot_meta,
     // both written when the shipped pairing was the only one. A run that replaced the target
     // must caption its own curve: the preset's name, the csv baseline, or the parameterized
     // shape of the shipped one -- the same honesty the audit table now gets.
-    let target_label: Option<String> = run_target_ctx.as_ref().map(|ctx| {
-        match (ctx.preset_name.as_ref(), args.target_csv.as_ref()) {
+    let target_label: Option<String> = if target_extension_active_for(model, args) {
+        let ctx = target_context(model, args)?;
+        Some(match (ctx.preset_name.as_ref(), args.target_csv.as_ref()) {
             (Some(name), _) => format!("Target Curve ({name})"),
             (None, Some(_)) => "Target Curve (csv baseline)".to_string(),
             (None, None) => format!("Target Curve ({} + params)", model.target_name),
-        }
-    });
+        })
+    } else {
+        None
+    };
 
     let f64_wav = format!("{prefix}_f64_{rate_tag}.wav");
     let mono_rt = format!("{prefix}_mastering_mono_{rate_tag}.wav");
@@ -1367,10 +1373,14 @@ fn run_model(
     print_phase_block(&phase_done, true);
 
     if args.export_csv {
+        let raw_pts: Vec<Vec<f64>> = match stages.raw_active.as_ref() {
+            Some(active) => active.iter().map(|&(f, g)| vec![f, g]).collect(),
+            None => model.raw_pts.clone(),
+        };
         let csv_path = export_audit_csv(
             &model.key,
-            &model.raw_pts,
-            run_target.as_deref().unwrap_or(&model.target_pts),
+            &raw_pts,
+            stages.target.as_deref().unwrap_or(&model.target_pts),
             model.harm_offset,
             &active_ctrl,
         )?;
@@ -1387,7 +1397,8 @@ fn run_model(
             pre_rt: rt.preamp_db,
             unwin_rt: rt.unwindowed_floor_dbfs,
             active_ctrl: &active_ctrl,
-            target_override: run_target.as_deref(),
+            raw_override: stages.raw_active.as_deref(),
+            target_override: stages.target.as_deref(),
             target_label_override: target_label.as_deref(),
             notch_mode: notch_mode.as_str(),
             // The ears trace is opt-in like the rest of the flag: an unchanged run writes the
@@ -2192,14 +2203,7 @@ fn target_context(model: &Model, args: &Args) -> Result<TargetContext, Error> {
                 ))
             }
         })?;
-        // Same rule for a recipe's `baseline_csv`: it is a file on disk like any other.
-        baseline = hypreq::model::sort_and_dedup_pairs(&preset.baseline);
-        if baseline.len() < 2 {
-            return Err(Error::msg(format!(
-                "--target-preset '{}': baseline collapses to fewer than two distinct frequencies",
-                path.display()
-            )));
-        }
+        baseline = preset.baseline;
         // The recipe carries the family it was defined with, but only where the user named
         // none. Comparing the *value* against "harman" (as this did while the flag defaulted
         // to "harman" inside clap) made it impossible to take a diffuse/spatial preset back to
@@ -2805,16 +2809,25 @@ fn synth_stage(
             let pred = hypreq::synth_alt::cascade_mag_db(&bands, &cf, f64::from(fs));
             // APO applies the same filter the convolver would, so it has to keep the same
             // staging: `headroom_db - max boost`, the rule `ir.rs` bakes into every FIR tap.
-            // A hardcoded 0.0 exported a +9 dB filter with 0 dB of preamp — the APO user
-            // clips on any input hotter than the filter's own boost, exactly what the
-            // convolver path refuses to do. `pred`, not `want`: the reservation is against
-            // the magnitude the exported bands actually realize.
-            let max_boost = pred.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let preamp_db = if max_boost.is_finite() {
-                headroom_db - max_boost
-            } else {
-                0.0
-            };
+            // Evaluated on a dense grid spanning the full band (DC to Nyquist) to catch
+            // inter-knot peaks and resonance. All-cut filters cap max_boost at 0.0 dB so
+            // the preamp never becomes positive.
+            let nyq = 0.5 * f64::from(fs);
+            let mut eval_grid = hypreq::fft::geomspace(20.0, nyq.min(20_000.0), 512);
+            eval_grid.push(0.0);
+            eval_grid.push(nyq);
+            eval_grid.extend(cf.iter().copied());
+            for b in &bands {
+                eval_grid.push(b.f0_hz);
+            }
+            eval_grid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            eval_grid.dedup();
+            let dense_mag = hypreq::synth_alt::cascade_mag_db(&bands, &eval_grid, f64::from(fs));
+            let max_boost = dense_mag
+                .into_iter()
+                .filter(|v| v.is_finite())
+                .fold(0.0_f64, f64::max);
+            let preamp_db = headroom_db - max_boost;
             let summary = bands
                 .iter()
                 .map(|b| {
@@ -2899,43 +2912,19 @@ fn corrected_curve_stages(
 ) -> Result<FilterStages, Error> {
     let ctx = target_context(model, args)?;
     let ensemble = ensemble_stage(args, &model.raw_ensemble)?;
-    // Which ever way the curve arrived, the lines that describe it travel with it. The target paths
-    // put their own block first and the regularization block after it, because the sentence "knots
-    // moved 12 of 480" only means anything once the reader knows which target the knots came from.
-    let (mut base_ctrl, mut reg_lines) = if let Some(e) = ensemble.as_ref() {
-        let (curve, regularized) = derive_with_target(model, args, Some(&e.raw), &ctx)?;
-        let mut lines = e.lines.clone();
-        lines.extend(regularized);
-        (curve, lines)
-    } else if target_extension_active_for(model, args) {
-        let (curve, regularized) = derive_with_target(model, args, None, &ctx)?;
-        let mut lines = vec![
-            "=== Parameterized Target ===".to_string(),
-            format!(
-                "  Family          : {} (bass {:+.2}, mid {:+.2}, tilt {:+.2} dB/oct)",
-                ctx.family_label,
-                ctx.params.theta_bass,
-                ctx.params.theta_mid,
-                ctx.params.theta_tilt
-            ),
-        ];
-        if let Some(info) = ctx.preset_info.as_ref() {
-            lines.push(format!("  Preset          : {info}"));
-        }
-        if args.target_csv.is_some() {
-            lines.push("  Baseline        : replaced by --target-csv".to_string());
-        }
-        lines.extend(regularized);
-        (curve, lines)
-    } else {
-        regularized_ctrl(model, args)
+    let calibration = match args.rig_calibration.as_ref() {
+        Some(path) => Some(
+            hypreq::fixture::RigCalibration::from_json_file(path)
+                .map_err(|e| Error::msg(format!("--rig-calibration: {e}")))?,
+        ),
+        None => model.rig_calibration.clone(),
     };
 
     // The raw curve this run designs against, in target-rig coordinates: the collapsed ensemble
     // when one exists (it *is* the raw curve the fit gets), the database record otherwise, and
-    // moved by `+delta_mean` under an active calibration. The distortion ceiling and the
-    // excursion screen read R(f) in absolute SPL, so they need exactly this curve — not the
-    // shipped `raw_pts` — or a calibrated run has its ceiling computed on the rig it left.
+    // moved by `+delta_mean` under an active calibration. Both target subtraction, the HF bypass
+    // flat-wire taper, regularization, the distortion ceiling, and the excursion screen operate
+    // in target-rig coordinates.
     let mut raw_active: Vec<(f64, f64)> = match ensemble.as_ref() {
         Some(e) => e.raw.clone(),
         None => model
@@ -2944,46 +2933,61 @@ fn corrected_curve_stages(
             .map(|p| (p[0], hypreq::model::point_gain(p)))
             .collect(),
     };
-    let calibration = match args.rig_calibration.as_ref() {
-        Some(path) => Some(
-            hypreq::fixture::RigCalibration::from_json_file(path)
-                .map_err(|e| Error::msg(format!("--rig-calibration: {e}")))?,
-        ),
-        None => model.rig_calibration.clone(),
-    };
-    // Some(...) whenever the run's design object differs from what the database record says —
-    // which is exactly when `--verify-with` and the report paths must stop reading
-    // `model.raw_pts` / `model.target_pts` and read these instead. A plain run keeps `None` and
-    // its byte-identical reference behaviour.
-    let mut diverged = target_extension_active_for(model, args) || ensemble.is_some();
-    let mut rig_sigma: Option<Vec<(f64, f64)>> = None;
+    let mut cal_lines = Vec::new();
     if let Some(cal) = calibration.as_ref() {
-        let f: Vec<f64> = base_ctrl.iter().map(|p| p.0).collect();
-        let (mean, sigma) = cal.on_grid(&f);
-        // delta_mean is target-rig minus source-rig for the same headphone: the raw curve moves
-        // by +delta, so the correction built from it moves by -delta.
-        base_ctrl = base_ctrl
-            .iter()
-            .zip(&mean)
-            .map(|((f, g), d)| (*f, g - d))
-            .collect();
-        rig_sigma = Some(f.into_iter().zip(sigma).collect());
-        // And the raw curve itself crosses rigs the other way: +delta is the R(f) the SPL
-        // ceiling has to score. The correction and R(f) are the same translation seen from the
-        // two sides; translating only one leaves half of a rig move in the design.
         let fr: Vec<f64> = raw_active.iter().map(|p| p.0).collect();
         let (mean_raw, _) = cal.on_grid(&fr);
         for ((_, g), d) in raw_active.iter_mut().zip(&mean_raw) {
             *g += d;
         }
-        diverged = true;
-        reg_lines.push("=== Empirical Rig Translation ===".to_string());
-        reg_lines.push(format!(
-            "  {} -> {}      : delta_mean subtracted from the correction, delta_sigma feeds the QP",
+        cal_lines.push("=== Empirical Rig Translation ===".to_string());
+        cal_lines.push(format!(
+            "  {} -> {}      : raw translated to target rig (+delta_mean), delta_sigma feeds the QP",
             cal.source.key(),
             cal.target.key()
         ));
     }
+
+    let diverged =
+        target_extension_active_for(model, args) || ensemble.is_some() || calibration.is_some();
+
+    // Which ever way the curve arrived, the lines that describe it travel with it. The target paths
+    // put their own block first and the regularization block after it, because the sentence "knots
+    // moved 12 of 480" only means anything once the reader knows which target the knots came from.
+    let (mut base_ctrl, mut reg_lines) = if diverged {
+        let (curve, regularized) = derive_with_target(model, args, Some(&raw_active), &ctx)?;
+        let mut lines = Vec::new();
+        if let Some(e) = ensemble.as_ref() {
+            lines.extend(e.lines.clone());
+        }
+        lines.extend(cal_lines);
+        if target_extension_active_for(model, args) {
+            lines.push("=== Parameterized Target ===".to_string());
+            lines.push(format!(
+                "  Family          : {} (bass {:+.2}, mid {:+.2}, tilt {:+.2} dB/oct)",
+                ctx.family_label,
+                ctx.params.theta_bass,
+                ctx.params.theta_mid,
+                ctx.params.theta_tilt
+            ));
+            if let Some(info) = ctx.preset_info.as_ref() {
+                lines.push(format!("  Preset          : {info}"));
+            }
+            if args.target_csv.is_some() {
+                lines.push("  Baseline        : replaced by --target-csv".to_string());
+            }
+        }
+        lines.extend(regularized);
+        (curve, lines)
+    } else {
+        regularized_ctrl(model, args)
+    };
+
+    let rig_sigma: Option<Vec<(f64, f64)>> = calibration.as_ref().map(|cal| {
+        let f: Vec<f64> = base_ctrl.iter().map(|p| p.0).collect();
+        let (_, sigma) = cal.on_grid(&f);
+        f.into_iter().zip(sigma).collect()
+    });
     let design_target: Option<Vec<(f64, f64)>> = diverged
         .then(|| {
             let f_raw: Vec<f64> = raw_active.iter().map(|p| p.0).collect();
@@ -4472,6 +4476,98 @@ mod tests {
         assert!(!plain.is_empty());
     }
 
+    #[test]
+    fn rig_calibration_preserves_hf_bypass_flat_wire_guarantee() {
+        let mut model = notch_cap_fixture();
+        // Set up an explicit derivation where HF bypass is at 10 kHz (taper starts at 8 kHz).
+        model.derivation = Some(hypreq::model::Derivation {
+            hf_taper_start_hz: 8000.0,
+            hf_bypass_hz: 10000.0,
+            subbass_leak_discount_db: 0.0,
+        });
+        model.notch_range_hz = None;
+        model.safe_cap_db = 12.0;
+
+        let dir = std::env::temp_dir().join(format!("hypreq-bypass-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cal = dir.join("cal.json");
+        std::fs::write(
+            &cal,
+            serde_json::json!({
+                "source": "gras_43ag", "target": "bk5128", "acoustic_class": "closed_back",
+                "f_hz": [20.0, 8000.0, 10000.0, 20000.0],
+                "delta_mean_db": [1.0, 2.0, 5.0, 8.0],
+                "delta_sigma_db": [0.5, 0.5, 0.5, 0.5]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let args = argv(&["-H", "hd6xx", "--rig-calibration", cal.to_str().unwrap()]);
+        let (curve, _) = corrected_curve(&model, &args).expect("calibrated curve");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // Above bypass_hz (10 kHz), the derived correction curve MUST be 0.0 dB (flat wire).
+        // Under the old bug, delta_mean (+5 to +8 dB) was subtracted *after* derivation, injecting
+        // -5 to -8 dB into the HF bypass zone.
+        for &(hz, gain) in &curve {
+            if hz >= 10000.0 {
+                assert!(
+                    gain.abs() < 1e-6,
+                    "at {hz} Hz (>= bypass 10 kHz), gain was {gain} dB instead of 0.0 dB flat-wire"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_guard_allows_cross_rig_when_rig_calibration_is_active() {
+        let mut model = notch_cap_fixture();
+        model.fixture = Some(hypreq::fixture::Fixture::GrasKb5000);
+
+        let cal = hypreq::fixture::RigCalibration {
+            source: hypreq::fixture::Fixture::GrasKb5000,
+            target: hypreq::fixture::Fixture::Bk5128,
+            acoustic_class: hypreq::fixture::AcousticClass::Unknown,
+            f_hz: vec![20.0, 20000.0],
+            delta_mean_db: vec![0.0, 0.0],
+            delta_sigma_db: vec![0.5, 0.5],
+        };
+
+        // When rig calibration bridges GrasKb5000 -> Bk5128, target_fixture is Bk5128.
+        // fixture_guard is bypassed, and rig_calibration_guard validates the pairing!
+        let target_fixture = Some(hypreq::fixture::Fixture::Bk5128);
+        let res = rig_calibration_guard(&model, target_fixture, &cal, false);
+        assert!(
+            res.is_ok(),
+            "rig_calibration_guard must pass matching cross-rig bridge: {res:?}"
+        );
+    }
+
+    #[test]
+    fn fixture_guard_does_not_reject_target_csv_with_built_in_target_fixture() {
+        let mut model = notch_cap_fixture();
+        model.fixture = Some(hypreq::fixture::Fixture::GrasKb5000);
+        model.target_name = "harman_5128".to_string();
+        let mut target_fixtures = std::collections::BTreeMap::new();
+        target_fixtures.insert("harman_5128".to_string(), hypreq::fixture::Fixture::Bk5128);
+        let models = Database {
+            targets: std::collections::BTreeMap::new(),
+            target_fixtures,
+            order: vec![model.key.clone()],
+            models: vec![model.clone()],
+        };
+
+        // When a custom target is used (args.target_csv), target_fixture is None,
+        // so fixture_guard must not inherit models.target_fixtures("harman_5128") and fail!
+        let target_fixture = None;
+        let res = fixture_guard(&models, &model, target_fixture, false, false, false);
+        assert!(
+            res.is_ok(),
+            "custom target with unknown fixture must not be rejected: {res:?}"
+        );
+    }
+
     /// `q_max = L_max - listen_spl - R(f)`. Feeding zeros for `R` was not neutral: it widened the
     /// ceiling by exactly the amount the driver is already sensitive, so a bin where the headphone
     /// is +12 dB above its own 1 kHz reference was allowed the full 6 dB of boost even though it
@@ -5321,15 +5417,15 @@ mod tests {
         let max_boost = curve.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
         let quoted: f64 = t
             .lines()
-            .next()
+            .find(|l| l.starts_with("Preamp: "))
             .unwrap()
             .trim_start_matches("Preamp: ")
             .trim_end_matches(" dB")
             .parse()
             .expect("preamp line");
         assert!(
-            (quoted - (headroom - max_boost)).abs() < 0.005,
-            "Preamp {quoted} != headroom {headroom} - max boost {max_boost}"
+            quoted <= headroom - max_boost + 0.005,
+            "Preamp {quoted} must reserve at least headroom {headroom} - knot max boost {max_boost}"
         );
         assert!(
             quoted < 0.0,

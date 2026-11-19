@@ -662,9 +662,6 @@ impl Detector {
         self.has_samples_since_reset = false;
     }
 
-    /// Clear the reading but keep the filter state. Meters that report per group
-    /// must not drop state between blocks, or the first block of each group loses
-    /// the filter's memory.
     /// Forget the accumulated reading but keep the stream's memory: the filter state
     /// **and** the two refine grid points stay. This is what makes a reset a new
     /// *reporting window over a continuous stream* — the reading after the reset equals

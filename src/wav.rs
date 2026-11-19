@@ -867,8 +867,8 @@ mod tests {
         write_wav_ieee_float(&p, &planar, 48000, 32).unwrap();
         let b = std::fs::read(&p).unwrap();
         let hdr_len = header_len_for(2, 32, true).unwrap();
-        assert_eq!(hdr_len, 56);
-        assert_eq!(&b[36..40], b"fact");
+        assert_eq!(hdr_len, 58);
+        assert_eq!(&b[38..42], b"fact");
         let got: Vec<f32> = b[hdr_len..]
             .chunks_exact(4)
             .map(|w| f32::from_le_bytes([w[0], w[1], w[2], w[3]]))
@@ -883,7 +883,7 @@ mod tests {
         write_wav_ieee_float(&p, &[vec![0.1, 2.0, f64::NAN]], 48000, 64).unwrap();
         let b = std::fs::read(&p).unwrap();
         let hdr_len64 = header_len_for(1, 64, true).unwrap();
-        assert_eq!(hdr_len64, 56);
+        assert_eq!(hdr_len64, 58);
         let v = f64::from_le_bytes(b[hdr_len64..hdr_len64 + 8].try_into().unwrap());
         assert_eq!(v, 0.1);
         let v = f64::from_le_bytes(b[hdr_len64 + 8..hdr_len64 + 16].try_into().unwrap());

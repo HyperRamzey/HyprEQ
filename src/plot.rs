@@ -1055,7 +1055,6 @@ pub fn callout_tail_point(
     xytext: (f64, f64),
     xy_target: (f64, f64),
     centres: &[f64],
-    _dy: f64,
     w: Window,
     rect: (i32, i32, i32, i32),
 ) -> (f64, f64) {
@@ -1121,14 +1120,20 @@ pub fn callout_tail_point(
         let t = (ty_bot - cy) / dy_ray;
         let x = cx + t * dx;
         if x >= tx0 - 1e-6 && x <= tx1 + 1e-6 && t > 0.0 && t < best_t {
+            best_t = t;
             exit_px = (x, ty_bot);
         }
     } else if dy_ray < -1e-9 {
         let t = (ty_top - cy) / dy_ray;
         let x = cx + t * dx;
         if x >= tx0 - 1e-6 && x <= tx1 + 1e-6 && t > 0.0 && t < best_t {
+            best_t = t;
             exit_px = (x, ty_top);
         }
+    }
+
+    if best_t > 1.0 {
+        return xy_target;
     }
 
     (
@@ -1149,6 +1154,7 @@ macro_rules! annotations {
         let w = $win;
         let (y_lo, y_hi) = w.yr;
         let dy = (y_hi - y_lo) * 0.045;
+        let mut last_non_empty_box: Option<(Vec<&str>, (f64, f64), Vec<f64>)> = None;
         for a in &$self.annotations {
             // A log axis cannot place a non-positive frequency at all.
             if a.xy_x <= 0.0 || a.xytext.0 <= 0.0 || !a.xy_y.is_finite() {
@@ -1161,29 +1167,32 @@ macro_rules! annotations {
                 a.text.split('\n').collect()
             };
             let (centres, _) = $crate::plot::callout_layout(lines.len(), a.xytext.1, a.xy_y, dy);
+            if !lines.is_empty() {
+                last_non_empty_box = Some((lines.clone(), a.xytext, centres.clone()));
+            }
             let win = $crate::plot::Window {
                 xr: ($crate::plot::F_MIN, $crate::plot::F_MAX),
                 yr: (y_lo, y_hi),
                 log_x: true,
             };
             let clamped_y = a.xy_y.clamp(y_lo, y_hi);
-            let tip_x_px = $crate::plot::x_pix_f(a.xy_x, win.xr.0, win.xr.1, win.log_x, $rect);
-            let mut tip_y_px = $crate::plot::y_pix_f(clamped_y, win.yr.0, win.yr.1, $rect);
+            let target_pt = (a.xy_x, clamped_y);
 
-            // Avoid piercing into the lower-left legend box
-            let leg_x1 = ($rect.0 + 8 + 620).min($rect.2 - 8) as f64;
-            let leg_y0 = ($rect.3 - 8 - 80) as f64;
-            if tip_x_px <= leg_x1 && tip_y_px >= leg_y0 {
-                tip_y_px = leg_y0 - 4.0;
-            }
-            let target_pt = (
-                $crate::plot::x_from_pix(tip_x_px, win.xr.0, win.xr.1, win.log_x, $rect),
-                $crate::plot::y_from_pix(tip_y_px, win.yr.0, win.yr.1, $rect),
-            );
-
-            let tail_pt = $crate::plot::callout_tail_point(
-                &lines, a.xytext, target_pt, &centres, dy, win, $rect,
-            );
+            let tail_pt = if !lines.is_empty() {
+                $crate::plot::callout_tail_point(&lines, a.xytext, target_pt, &centres, win, $rect)
+            } else if let Some((ref prev_lines, prev_xytext, ref prev_centres)) = last_non_empty_box
+            {
+                $crate::plot::callout_tail_point(
+                    prev_lines,
+                    prev_xytext,
+                    target_pt,
+                    prev_centres,
+                    win,
+                    $rect,
+                )
+            } else {
+                $crate::plot::callout_tail_point(&lines, a.xytext, target_pt, &centres, win, $rect)
+            };
             $chart
                 .draw_series(vec![PathElement::new(
                     vec![tail_pt, target_pt],
@@ -3593,14 +3602,13 @@ mod tests {
         let xytext = (1000.0, 5.0);
         let tip_right = (5000.0, 5.0);
         let centres = vec![5.0];
-        let dy = 0.8;
         let win = Window {
             xr: (20.0, 20000.0),
             yr: (-15.0, 15.0),
             log_x: true,
         };
         let rect = (50, 50, 1000, 500);
-        let exit = callout_tail_point(&lines, xytext, tip_right, &centres, dy, win, rect);
+        let exit = callout_tail_point(&lines, xytext, tip_right, &centres, win, rect);
         assert!(
             exit.0 > xytext.0 * 1.5,
             "for a target to the right, exit x must be significantly right of the text start: {} vs {}",

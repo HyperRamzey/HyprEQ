@@ -314,8 +314,8 @@ fn decode(payload: &[u8], fmt: &Format, name: &str) -> Result<(Vec<f64>, &'stati
 /// Two bounds, because a WAV carries two sizes. The first is the reference's own: it
 /// measures `36 + data_size` against `u32::MAX`, and that wording and that threshold are
 /// kept so a file this size fails the way the reference says it fails. The second is the
-/// file's: the RIFF field holds `hdr_len - 8 + data_size`, so under a 68-byte
-/// `WAVE_FORMAT_EXTENSIBLE` header the payload that still fits is 24 bytes smaller than
+/// file's: the RIFF field holds `hdr_len - 8 + data_size`, so under an 80-byte
+/// `WAVE_FORMAT_EXTENSIBLE` header the payload that still fits is 36 bytes smaller than
 /// the first bound allows. Without it a multichannel write slips past the check, `as u32`
 /// wraps the RIFF size down to a few dozen bytes, and the result is a file that plays and
 /// is silently truncated at the wrap. The reference shares that arithmetic, so this is

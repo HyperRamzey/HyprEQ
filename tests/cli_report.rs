@@ -438,18 +438,15 @@ fn report_leaves_the_audio_alone_and_split_changes_it() {
         !out_split.contains("EQ FIR (dt770_80ohm)"),
         "split printed a shared filter it did not apply:\n{out_split}"
     );
-    // Re-pinned from the shipped capture after the ceiling stopped being applied twice. It used to
-    // say "6 left / 9 right" and "moved in 15 knot(s)": the per-ear trim ran off an already-capped
-    // shared curve, so fewer left knots reached the ceiling, and the centre's count was the two
-    // sides' holds added together. Trimmed from the pre-cap curve and capped once per ear, eight
-    // left knots and nine right knots are held, eight of them at knots the right ear is held too —
-    // so the middle of the image moved in nine knots, not seventeen.
+    // Re-pinned with the continuous 0.20-octave raised-cosine blend skirt: with smooth edge
+    // transitions replacing the discontinuous brickwall cutoff, 8 left knots and 11 right knots
+    // are held/blended in the notch zone, moving the centre in 11 knots.
     assert!(
-        out_split.contains("Centre            : moved in 9 knot(s)"),
+        out_split.contains("Centre            : moved in 11 knot(s)"),
         "split did not account for the ceiling biting:\n{out_split}"
     );
     assert!(
-        out_split.contains("Notch cap         : held 8 left / 9 right knot(s)"),
+        out_split.contains("Notch cap         : held 8 left / 11 right knot(s)"),
         "the ceiling's accounting is missing:\n{out_split}"
     );
 

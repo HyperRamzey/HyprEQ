@@ -73,7 +73,7 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
           "bypass_label": "Uncorrected >9.1 kHz Coupler Cylinder Null Zone (Clamped to 0.0 dB)",
           "raw_label": "Raw JBL Live 770NC (Passive on Filk KB006x + IEC 711 Coupler)",
           "autoeq_ax1_label": "Standard AutoEq (+1.5dB accidental boost on 6.88k/8.48kHz spikes & +2.7dB 20Hz boost)",
-          "wav_ax1_label": "Final WAV Convolver (128-Node PCHIP + Breakup Pole Cuts)",
+          "wav_ax1_label": "Final WAV Convolver (Notch Mode: {notch_mode} | Unwindowed Floor: {unwin_rt:.1f} dBFS @ 16k)",
           "raw_err_ax2_label": "Raw Unsmoothed Error (+8.75dB non-min-phase concha dip @ 5.37kHz)",
           "autoeq_ax2_label": "Standard AutoEq Curve (2.0 oct treble blur boosts 6.88k/8.48kHz peaks)",
           "ax1_ylim": [-15.0, 9.0],
@@ -84,11 +84,11 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
             {"text": "1. KB006x Stiff-Pinna Leak Fix\n({curve_db:+.2}dB @ 20Hz vs AutoEq +2.7dB)", "xy": [20.5, "curve"], "xytext": [22.0, 5.8], "color": "cyan"},
             {"text": "2. Coupled Passive ANC Cup Dipole\n({curve_db:+.2}dB @ 160Hz, +2.60dB @ 455Hz)", "xy": [156.9, "curve"], "xytext": [95.0, 5.2], "color": "cyan"},
             {"text": "", "xy": [454.9, "curve"], "xytext": [275.0, 5.2], "color": "cyan"},
-            {"text": "3. 1.05kHz Nasal Cut & Ear-Gain\n(-2.45dB @ 1.05kHz; +5.00dB @ 4.06kHz)", "xy": [1049.4, "curve"], "xytext": [480.0, 3.2], "color": "cyan"},
-            {"text": "4. 5.37kHz Concha Notch Shelf Bridge\n(+3.70dB flat bridge across 4.8-5.8kHz;\nignores narrow +8.75dB null spike)", "xy": [5365.9, "curve"], "xytext": [1450.0, 7.3], "color": "green"},
-            {"text": "5. 6.88kHz & 8.48kHz Breakup Poles\n(-2.31dB & -3.16dB Surgical Cuts)", "xy": [6881.4, "curve"], "xytext": [3200.0, -8.5], "color": "green"},
+            {"text": "3. 1.05kHz Nasal Cut & Ear-Gain\n({curve_db:+.2}dB @ 1.05kHz; ear gain up to 4.06kHz)", "xy": [1049.4, "curve"], "xytext": [480.0, 3.2], "color": "cyan"},
+            {"text": "4. 5.37kHz Concha Notch Shelf Bridge\n({notch_db:+.2}dB flat bridge across 4.3-6.3kHz;\navoids non-min-phase concha glare)", "xy": [5365.9, "notch_db"], "xytext": [1450.0, 7.3], "color": "green"},
+            {"text": "5. 6.88kHz & 8.48kHz Breakup Poles\n({curve_db:+.2}dB & -2.02dB Surgical Cuts)", "xy": [6881.4, "curve"], "xytext": [3200.0, -8.5], "color": "green"},
             {"text": "", "xy": [8480.6, "curve"], "xytext": [6200.0, -6.8], "color": "green"},
-            {"text": "6. >9.1kHz Uncorrected Coupler Null Zone\n(0.0dB wire: ignores 9.75k & 11.2kHz nulls)", "xy": [10347.9, 0.0], "xytext": [5900.0, 4.8], "color": "cyan"}
+            {"text": "6. >9.1kHz Uncorrected Coupler Null Zone\n(0.0dB wire: ignores 9.75k & 11.2kHz nulls)", "xy": [10347.9, "curve"], "xytext": [5900.0, 4.8], "color": "cyan"}
           ]
         }
       },
@@ -111,16 +111,16 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
           "ax2_ylim": [-10.8, 10.5],
           "ax2_yticks": [-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0],
           "annotations": [
-            {"text": "1. EDT 770 V Velour Pad-Leak Fix\n(+0.20dB @ 20Hz vs AutoEq +1.5dB)", "xy": [20.5, 0.12], "xytext": [21.5, 7.5], "color": "cyan"},
-            {"text": "2. Coupled Port & Cup Suckout\n(-4.05dB @ 59Hz, +4.10dB @ 205Hz)", "xy": [59.0, -4.05], "xytext": [82.0, 5.2], "color": "cyan"},
-            {"text": "", "xy": [204.9, 4.10], "xytext": [168.0, 5.5], "color": "cyan"},
-            {"text": "3. 940Hz Cup & 2.35kHz Trim\n(-1.38dB @ 940Hz & -1.43dB @ 2.35kHz)", "xy": [940.0, -1.38], "xytext": [420.0, 5.8], "color": "cyan"},
-            {"text": "", "xy": [2347.0, -1.43], "xytext": [1120.0, 5.4], "color": "cyan"},
+            {"text": "1. EDT 770 V Velour Pad-Leak Fix\n({curve_db:+.2}dB @ 20Hz vs AutoEq +1.5dB)", "xy": [20.5, "curve"], "xytext": [21.5, 7.5], "color": "cyan"},
+            {"text": "2. Coupled Port & Cup Suckout\n({curve_db:+.2}dB @ 59Hz, +4.50dB @ 205Hz)", "xy": [59.0, "curve"], "xytext": [82.0, 5.2], "color": "cyan"},
+            {"text": "", "xy": [204.9, "curve"], "xytext": [168.0, 5.5], "color": "cyan"},
+            {"text": "3. 940Hz Cup & 2.35kHz Trim\n({curve_db:+.2}dB @ 940Hz & -2.11dB @ 2.35kHz)", "xy": [940.0, "curve"], "xytext": [420.0, 5.8], "color": "cyan"},
+            {"text": "", "xy": [2347.0, "curve"], "xytext": [1120.0, 5.4], "color": "cyan"},
             {"text": "4. 3.76kHz Non-Min-Phase Concha Zero\n({notch_db:+.2f}dB in '{notch_mode}' mode;\navoids L/R & head-to-head glare)", "xy": [3703.0, "notch_db"], "xytext": [1500.0, 7.3], "color": "green"},
-            {"text": "5. 5.3k, 6.6k & 8.16kHz Beyer Breakup Poles\n(-3.59dB, -4.45dB & -5.04dB Surgical Cuts)", "xy": [8155.0, -5.04], "xytext": [2250.0, -9.2], "color": "green"},
-            {"text": "", "xy": [6644.0, -4.45], "xytext": [4500.0, -7.2], "color": "green"},
-            {"text": "", "xy": [5337.0, -3.59], "xytext": [3900.0, -7.2], "color": "green"},
-            {"text": "6. >8.8kHz Uncorrected Null & HF Wire\n(Bypasses 9.2kHz null; 0.0dB >15.8kHz\nleave coupler response unmodified)", "xy": [11490.0, -1.55], "xytext": [5300.0, 4.0], "color": "cyan"}
+            {"text": "5. 5.3k, 6.6k & 8.16kHz Beyer Breakup Poles\n({curve_db:+.2}dB, -2.84dB & -3.12dB Surgical Cuts)", "xy": [8155.0, "curve"], "xytext": [2250.0, -9.2], "color": "green"},
+            {"text": "", "xy": [6644.0, "curve"], "xytext": [4500.0, -7.2], "color": "green"},
+            {"text": "", "xy": [5337.0, "curve"], "xytext": [3900.0, -7.2], "color": "green"},
+            {"text": "6. >8.8kHz Uncorrected Null & HF Wire\n(Bypasses 9.2kHz null; 0.0dB >15.8kHz\nleave coupler response unmodified)", "xy": [11490.0, "curve"], "xytext": [5300.0, 4.0], "color": "cyan"}
           ]
         }
       },
@@ -143,15 +143,15 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
           "ax2_ylim": [-10.8, 10.5],
           "ax2_yticks": [-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0],
           "annotations": [
-            {"text": "1. 1μm Planar Excursion & 35Hz fs Fix\n(+2.37dB @ 20Hz, +1.77dB @ 35Hz vs AutoEq +3.7dB)", "xy": [35.0, 1.77], "xytext": [21.5, 7.3], "color": "cyan"},
-            {"text": "", "xy": [20.5, 2.37], "xytext": [24.5, 7.1], "color": "cyan"},
-            {"text": "2. Planar Bass-to-Mid Transition\n(+2.70dB @ 55Hz shelf; -1.31dB @ 292Hz trim)", "xy": [55.2, 2.70], "xytext": [75.0, 4.6], "color": "cyan"},
-            {"text": "", "xy": [292.0, -1.31], "xytext": [175.0, 4.4], "color": "cyan"},
-            {"text": "3. 1.82kHz Ear-Gain & 2.82kHz Glare\n(+4.07dB @ 1.82kHz; -2.64dB @ 2.82kHz)", "xy": [1818.0, 4.07], "xytext": [410.0, 6.0], "color": "cyan"},
-            {"text": "", "xy": [2815.0, -2.64], "xytext": [1080.0, 5.6], "color": "cyan"},
+            {"text": "1. 1μm Planar Excursion & 35Hz fs Fix\n({curve_db:+.2}dB @ 20Hz, +3.12dB @ 35Hz vs AutoEq +3.7dB)", "xy": [35.0, "curve"], "xytext": [21.5, 7.3], "color": "cyan"},
+            {"text": "", "xy": [20.5, "curve"], "xytext": [24.5, 7.1], "color": "cyan"},
+            {"text": "2. Planar Bass-to-Mid Transition\n({curve_db:+.2}dB @ 55Hz shelf; -1.11dB @ 292Hz trim)", "xy": [55.2, "curve"], "xytext": [75.0, 4.6], "color": "cyan"},
+            {"text": "", "xy": [292.0, "curve"], "xytext": [175.0, 4.4], "color": "cyan"},
+            {"text": "3. 1.82kHz Ear-Gain & 2.82kHz Glare\n({curve_db:+.2}dB @ 1.82kHz; -2.79dB @ 2.82kHz)", "xy": [1818.0, "curve"], "xytext": [410.0, 6.0], "color": "cyan"},
+            {"text": "", "xy": [2815.0, "curve"], "xytext": [1080.0, 5.6], "color": "cyan"},
             {"text": "4. 3.84kHz L/R-Asymmetric Concha Notch\n({notch_db:+.2f}dB in '{notch_mode}' mode;\navoids 4.05dB L/R split glare)", "xy": [3839.0, "notch_db"], "xytext": [1650.0, 7.3], "color": "green"},
-            {"text": "5. 5.75kHz Planar Treble Mode Cut\n(-2.25dB Surgical Cut)", "xy": [5750.0, -2.25], "xytext": [2800.0, -8.5], "color": "green"},
-            {"text": "6. >9.75kHz Uncorrected Coupler Null Zone\n(0.0dB wire: ignores 9.75k & 12.8kHz nulls)", "xy": [11300.0, 0.0], "xytext": [5500.0, 4.4], "color": "cyan"}
+            {"text": "5. 5.75kHz Planar Treble Mode Cut\n({curve_db:+.2}dB Surgical Cut)", "xy": [5750.0, "curve"], "xytext": [2800.0, -8.5], "color": "green"},
+            {"text": "6. >9.75kHz Uncorrected Coupler Null Zone\n(0.0dB wire: ignores 9.75k & 12.8kHz nulls)", "xy": [11300.0, "curve"], "xytext": [5500.0, 4.4], "color": "cyan"}
           ]
         }
       }

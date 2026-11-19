@@ -211,6 +211,12 @@ pub struct Report {
     pub pass_db: f64,
     /// Noise gate in force, dB below the capture's median band.
     pub snr_db: f64,
+    /// Dense frequency grid for psychoacoustic calculations (1/48-octave).
+    pub dense_f: Vec<f64>,
+    /// Dense capture levels evaluated on `dense_f`.
+    pub dense_levels: Vec<f64>,
+    /// Dense error (capture - offset - target) evaluated on `dense_f`.
+    pub dense_err: Vec<f64>,
 }
 
 impl Report {
@@ -354,6 +360,35 @@ pub fn verify(
     let (mut rows, resid) = measure_bands(&grid, &post, &predicted, target.as_ref());
     let tally = score(&mut rows, &resid, cfg);
 
+    let (dense_f, dense_levels, dense_err) = {
+        let f_min = post.lo();
+        let f_max = post.hi().min(predicted.hi());
+        if f_max > f_min && f_min > 0.0 {
+            let grid_48 = crate::global_fit::uniform_log_grid(f_min, f_max, 48);
+            let p_post = crate::pchip::Pchip::new(&post.f, &post.g);
+            let d_levels = p_post.eval_grid(&grid_48);
+            let d_err = if let Some(ref tgt) = target {
+                let p_tgt = crate::pchip::Pchip::new(&tgt.f, &tgt.g);
+                let d_tgt = p_tgt.eval_grid(&grid_48);
+                let offset = if tally.offset_db.is_finite() {
+                    tally.offset_db
+                } else {
+                    0.0
+                };
+                d_levels
+                    .iter()
+                    .zip(&d_tgt)
+                    .map(|(&p, &t)| p - offset - t)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (grid_48, d_levels, d_err)
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        }
+    };
+
     Some(Report {
         scored: tally.pass + tally.fail,
         bands: rows,
@@ -372,6 +407,9 @@ pub fn verify(
         f_hi: post.hi(),
         pass_db: cfg.pass_db,
         snr_db: cfg.snr_db,
+        dense_f,
+        dense_levels,
+        dense_err,
     })
 }
 
@@ -616,7 +654,13 @@ pub fn psycho_summary(rep: &Report, mode: crate::psycho::PprMode) -> Option<Psyc
         Vec::new()
     };
     let centres = [100.0_f64, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
-    let (eval_f, eval_levels, eval_err) = if f.len() >= 2 && f[0] > 0.0 && f[f.len() - 1] > f[0] {
+    let (eval_f, eval_levels, eval_err) = if !rep.dense_f.is_empty() {
+        (
+            rep.dense_f.clone(),
+            rep.dense_levels.clone(),
+            rep.dense_err.clone(),
+        )
+    } else if f.len() >= 2 && f[0] > 0.0 && f[f.len() - 1] > f[0] {
         let grid = crate::global_fit::uniform_log_grid(f[0], f[f.len() - 1], 48);
         let p_levels = crate::pchip::Pchip::new(&f, &levels);
         let dense_levels = p_levels.eval_grid(&grid);

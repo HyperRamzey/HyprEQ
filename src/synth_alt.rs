@@ -138,16 +138,23 @@ pub fn fit_peq_cascade(
         cur = cascade_mag_db(&bands, f_grid, fs);
     }
 
+    let weights: Vec<f64> = f_grid
+        .iter()
+        .map(|&f| crate::psycho::erb_log_density(f))
+        .collect();
+    let total_w = weights.iter().sum::<f64>().max(1e-12);
+
     let loss = |bs: &[PeqBand]| -> f64 {
         let pred = cascade_mag_db(bs, f_grid, fs);
-        let mse = pred
+        let w_mse = pred
             .iter()
             .zip(target)
-            .map(|(&p, &t)| (p - t) * (p - t))
+            .zip(&weights)
+            .map(|((&p, &t), &w)| w * (p - t) * (p - t))
             .sum::<f64>()
-            / (k as f64);
+            / total_w;
         let qp: f64 = bs.iter().map(|b| (b.q / 10.0).powi(2)).sum();
-        mse + q_penalty * qp
+        w_mse + q_penalty * qp
     };
 
     let mut step = [0.15, 0.25, 1.5];
@@ -274,7 +281,9 @@ impl BankParallelIir {
         if ctrl_pts.len() < 2 || n_sections == 0 || fs <= 0.0 {
             return None;
         }
-        let n_fft = 16384usize;
+        let n_fft = ((16384usize * (fs as usize)) / 48000)
+            .next_power_of_two()
+            .max(16384);
         let ir = crate::ir::synthesize_minimum_phase_ir(
             ctrl_pts, fs as u32, n_fft, n_fft, 0, 0.0, false, 16.0,
         )

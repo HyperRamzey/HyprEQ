@@ -24,7 +24,7 @@ Those are different claims, and the difference is the whole content of this sect
 | **True-peak** limiting, not sample-peak: interpolating detector, two-stage slow/transient gain, lookahead and release accounting, per-channel and group meters | Post-EQ clipping is the most common way "correcting" a headphone makes it worse, and sample-peak meters do not see inter-sample overs |
 | Every run writes an **audit CSV** (raw, target, raw error, applied EQ per control knot) and a 4-panel verification figure, and both are checked against a reference implementation | The curve can be audited after the fact, which is the difference between a tool and a preset |
 | Reproducible numerical contract: NumPy-compatible FFT/PCHIP/dither semantics, TPDF dither with a fixed stream, ties-to-even rounding, and a parity harness that diffs artefacts against the reference | The port is testable rather than plausible |
-| The engine is small and legible: `model → pchip → ir → convolve → limiter → plot`, with 342 library tests, 41 binary tests and 32 CLI integration tests (415 tests total) | A base you can read is a base you can extend |
+| The engine is small and legible: `model → pchip → ir → convolve → limiter → plot`, with 369 library tests, 55 binary tests and 37 CLI integration tests (461 tests total) | A base you can read is a base you can extend |
 
 ### What caps it — the honest list
 

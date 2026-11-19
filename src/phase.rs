@@ -340,9 +340,15 @@ fn window_passes(
     let take = w.min(100);
     let mut peak = 0.0f64;
     for i in 0..take {
-        let v = full[(s + w - 1 - i) % n].abs();
-        if v > peak {
-            peak = v;
+        let v_tail = full[(s + w - 1 - i) % n].abs();
+        if v_tail > peak {
+            peak = v_tail;
+        }
+        if s > 0 {
+            let v_lead = full[(s + i) % n].abs();
+            if v_lead > peak {
+                peak = v_lead;
+            }
         }
     }
     let floor_dbfs = 20.0 * (peak + 1e-25).log10();
@@ -619,7 +625,17 @@ fn build_adjustment(
             at_hz = f;
         }
     }
-    let floor = crate::ir::db_floor(&out, 100);
+    let floor = {
+        let tail = crate::ir::db_floor(&out, 100);
+        if start > 0 {
+            let k = 100.min(out.len());
+            let lead_peak = out[..k].iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+            let lead = 20.0 * (lead_peak + 1e-25).log10();
+            tail.max(lead)
+        } else {
+            tail
+        }
+    };
     let gd_span = r.requested;
     let budget_held = reached_floor && max_change <= budget_ms + 1e-4;
     let kept = r.prefix[start + taps_after] - r.prefix[start];

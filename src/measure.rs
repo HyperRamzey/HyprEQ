@@ -111,16 +111,16 @@ pub fn measure_signal_block(
     let mut sp_ch = Vec::with_capacity(nch);
     let mut rms_ch_lin = Vec::with_capacity(nch);
     for (c, ch) in planar.iter().enumerate() {
-        sp_ch.push(ch.iter().fold(0.0f64, |a, &v| a.max(v.abs())));
+        let ch_slice = &ch[..frames];
+        sp_ch.push(ch_slice.iter().fold(0.0f64, |a, &v| a.max(v.abs())));
         // Compensated sum of squares. A 24-bit/48 kHz minute of audio is 2.88e6 terms per
         // channel (not the 2.9e9 this comment once claimed — three orders of magnitude of
         // a rate nobody counted), and while a running sum still lands inside the range
         // where f64 is exact for the magnitudes, exactness is not the point: the naive
         // fold loses low-order bits term by term, and `accum::sum_of_squares` is what the
         // rest of the crate already reaches for.
-        let mean_sq = crate::accum::sum_of_squares(ch) / ch.len() as f64;
+        let mean_sq = crate::accum::sum_of_squares(ch_slice) / frames.max(1) as f64;
         rms_ch_lin.push(mean_sq.sqrt());
-        let ch_slice = &ch[..frames];
         tp_main.push_ch(c, ch_slice);
         if let Some(tp) = &mut tp_itu {
             tp.push_ch(c, ch_slice);

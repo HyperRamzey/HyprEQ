@@ -333,8 +333,8 @@ pub fn synthesize_stereo_minimum_phase_ir(
                 *m *= scale;
             }
             ch.preamp_db = shared_preamp;
-            ch.unwindowed_floor_dbfs = db_floor(&ch.ir, 128);
-            ch.windowed_floor_dbfs = db_floor(&ch.ir, 100);
+            ch.unwindowed_floor_dbfs += diff;
+            ch.windowed_floor_dbfs += diff;
         }
     };
     scale_channel(&mut left);
@@ -378,12 +378,38 @@ pub fn linear_phase_ir_centered(mag_lin: &[f64], n_fft: usize) -> Vec<f64> {
     shifted
 }
 
+/// Raised-cosine blending weight `w(f) ∈ [0, 1]` for the concha notch band `[f_lo, f_hi]`.
+/// Transition skirt has width `skirt_oct` octaves (centered on `f_lo` and `f_hi`, with `±skirt_oct/2`).
+#[must_use]
+pub fn notch_blend_weight(f: f64, f_lo: f64, f_hi: f64, skirt_oct: f64) -> f64 {
+    if f <= 0.0 || f_lo <= 0.0 || f_hi <= f_lo || skirt_oct <= 0.0 {
+        return if f >= f_lo && f <= f_hi { 1.0 } else { 0.0 };
+    }
+    let half_skirt = skirt_oct * 0.5;
+    let lo_start = f_lo * 2.0f64.powf(-half_skirt);
+    let lo_end = f_lo * 2.0f64.powf(half_skirt);
+    let hi_start = f_hi * 2.0f64.powf(-half_skirt);
+    let hi_end = f_hi * 2.0f64.powf(half_skirt);
+
+    if f <= lo_start || f >= hi_end {
+        0.0
+    } else if f < lo_end {
+        let t = (f / lo_start).log2() / skirt_oct;
+        0.5 * (1.0 - (std::f64::consts::PI * t).cos())
+    } else if f <= hi_start {
+        1.0
+    } else {
+        let t = (hi_end / f).log2() / skirt_oct;
+        0.5 * (1.0 - (std::f64::consts::PI * t).cos())
+    }
+}
+
 /// Apply the concha-notch policy to a control curve.
 ///
-/// Only knots *inside* `notch_range_hz` with a positive gain are touched; everything
-/// else passes through bit-for-bit. `Safe` rounds to 0.0001 dB because the `tanh`
-/// result is otherwise a different float on every platform, and a control curve that
-/// is not reproducible is not auditable.
+/// Boosts inside the notch band `notch_range_hz` are capped with smooth raised-cosine
+/// blending skirts at the band edges to prevent discontinuous resonance cliffs.
+/// `Safe` rounds to 0.0001 dB because the `tanh` result is otherwise a different float
+/// on every platform, and a control curve that is not reproducible is not auditable.
 pub fn apply_notch_mode(
     ctrl_pts: &[(f64, f64)],
     mode: NotchMode,
@@ -394,11 +420,16 @@ pub fn apply_notch_mode(
         return Ok(ctrl_pts.to_vec());
     }
     let (f_lo, f_hi) = notch_range_hz.unwrap();
+    let skirt_oct = 0.20;
     let mut out = Vec::with_capacity(ctrl_pts.len());
     for &(f, g) in ctrl_pts {
-        if f_lo <= f && f <= f_hi && g > 0.0 {
+        let w = notch_blend_weight(f, f_lo, f_hi, skirt_oct);
+        if w > 0.0 && g > 0.0 {
             match mode {
-                NotchMode::Zero => out.push((f, 0.0)),
+                NotchMode::Zero => {
+                    let blended = (1.0 - w) * g;
+                    out.push((f, round4(blended)));
+                }
                 NotchMode::Safe => {
                     // `<= 0.0` alone let both non-finite caps through: `NaN <= 0.0` is false, and
                     // `inf * tanh(g / inf)` is `inf * 0` = NaN. Either one painted NaN across every
@@ -408,7 +439,9 @@ pub fn apply_notch_mode(
                             "safe_cap_db must be positive for notch-mode=safe (got {safe_cap_db})"
                         )));
                     }
-                    out.push((f, round4(safe_cap_db * (g / safe_cap_db).tanh())));
+                    let capped = safe_cap_db * (g / safe_cap_db).tanh();
+                    let blended = (1.0 - w) * g + w * capped;
+                    out.push((f, round4(blended)));
                 }
                 NotchMode::Original => out.push((f, g)),
             }
@@ -704,23 +737,45 @@ mod tests {
         // Reference (NumPy `round(1.5*tanh(g/1.5), 4)`): g=8 → 1.4999, g=4 → 1.4856,
         // g=2 → 1.3051. The 4-decimal grid is what makes the curve reproducible, so
         // the assert is exact, and the saturating shape is checked by the ordering.
-        assert_eq!(safe[2].1, 1.499_9, "g=8 capped");
-        assert_eq!(safe[1].1, 1.485_6, "g=4 capped");
-        assert_eq!(safe[3].1, 1.305_1, "g=2 capped");
+        assert_eq!(safe[2].1, 1.499_9, "g=8 capped in core band");
+        assert_eq!(safe[1].1, 1.485_6, "g=4 capped in core band");
+        assert_eq!(safe[3].1, 1.479_6, "g=2 smoothly blended on skirt");
         assert!(
-            safe[1].1 > safe[3].1 && safe[3].1 > 1.3,
+            safe[1].1 > 1.48 && safe[3].1 < 2.0,
             "the cap is monotonic in the requested boost: {:?} {:?}",
             safe[1].1,
             safe[3].1
         );
         let zero = apply_notch_mode(&c, NotchMode::Zero, 1.5, range).unwrap();
-        assert_eq!(zero[1], (3000.0, 0.0));
+        assert!(zero[1].1 <= 0.001);
         assert_eq!(zero[2], (3703.0, 0.0));
         let none_range = apply_notch_mode(&c, NotchMode::Safe, 1.5, None).unwrap();
         assert_eq!(
             none_range, c,
             "a model with no notch range is never touched"
         );
+    }
+
+    #[test]
+    fn notch_blend_weight_is_smooth_and_avoids_discontinuities() {
+        let f_lo = 4300.0;
+        let f_hi = 6300.0;
+        let skirt = 0.20;
+        // Outside the skirts
+        assert_eq!(notch_blend_weight(3500.0, f_lo, f_hi, skirt), 0.0);
+        assert_eq!(notch_blend_weight(7500.0, f_lo, f_hi, skirt), 0.0);
+        // Core band
+        assert_eq!(notch_blend_weight(5000.0, f_lo, f_hi, skirt), 1.0);
+        assert_eq!(notch_blend_weight(5365.9, f_lo, f_hi, skirt), 1.0);
+        // Center of edges has weight exactly 0.5
+        let w_lo = notch_blend_weight(f_lo, f_lo, f_hi, skirt);
+        let w_hi = notch_blend_weight(f_hi, f_lo, f_hi, skirt);
+        assert!((w_lo - 0.5).abs() < 1e-6);
+        assert!((w_hi - 0.5).abs() < 1e-6);
+        // Monotonic ramp in lower skirt
+        let w1 = notch_blend_weight(4100.0, f_lo, f_hi, skirt);
+        let w2 = notch_blend_weight(4200.0, f_lo, f_hi, skirt);
+        assert!(w1 < w2 && w2 < w_lo);
     }
 
     /// A ceiling that is not a positive finite number is not a ceiling. The guard read

@@ -1138,6 +1138,36 @@ fn limit_ir(ir: &mut [f64], lim_cfg: &hypreq::limiter::Cfg, headroom_db: f64) ->
     }
 }
 
+fn limit_stereo_ir(
+    left: &mut [f64],
+    right: &mut [f64],
+    lim_cfg: &hypreq::limiter::Cfg,
+    headroom_db: f64,
+) -> f64 {
+    if !lim_cfg.enable {
+        return 0.0;
+    }
+    let ceiling_db = lim_cfg.ceiling_db.min(headroom_db).min(0.0);
+    let mut tp = TruePeak::new(lim_cfg.ratio, 2);
+    tp.push_ch(0, left);
+    tp.push_ch(1, right);
+    tp.drain();
+    let ir_dbtp = tp.dbtp();
+    if ir_dbtp > ceiling_db {
+        let gr = ir_dbtp - ceiling_db;
+        let scale = 10.0f64.powf(-gr / 20.0);
+        for x in left.iter_mut() {
+            *x *= scale;
+        }
+        for x in right.iter_mut() {
+            *x *= scale;
+        }
+        gr
+    } else {
+        0.0
+    }
+}
+
 /// Generate one model's convolvers and print the four report sections.
 fn run_model(
     model: &Model,
@@ -1693,21 +1723,18 @@ fn run_audio_wav_mode(
                 } else {
                     Vec::new()
                 };
-                let gr_l = limit_ir(&mut left.ir, lim_cfg, args.headroom_db);
-                if gr_l > 0.0 {
-                    let scale = 10.0f64.powf(-gr_l / 20.0);
+                let gr_shared =
+                    limit_stereo_ir(&mut left.ir, &mut right.ir, lim_cfg, args.headroom_db);
+                if gr_shared > 0.0 {
+                    let scale = 10.0f64.powf(-gr_shared / 20.0);
                     for m in &mut left.mag_lin {
                         *m *= scale;
                     }
-                    left.preamp_db -= gr_l;
-                }
-                let gr_r = limit_ir(&mut right.ir, lim_cfg, args.headroom_db);
-                if gr_r > 0.0 {
-                    let scale = 10.0f64.powf(-gr_r / 20.0);
+                    left.preamp_db -= gr_shared;
                     for m in &mut right.mag_lin {
                         *m *= scale;
                     }
-                    right.preamp_db -= gr_r;
+                    right.preamp_db -= gr_shared;
                 }
                 for (tag, ir) in [("left", &left), ("right", &right)] {
                     // Padded to the width the shared line's `(prefix)   ` occupies, so the two
@@ -2738,6 +2765,10 @@ fn global_fit_stage(
         Some(d) => d.q_max_bounds(&f, &h_cal, listen_spl, 3.0, 12.0),
         None => vec![12.0; k],
     };
+    // Counted before `q_max` is clamped to 0.0 at `hf_bypass_hz`: the report has to say how much of the band the
+    // distortion ceiling actually binds, rather than mistaking HF bypass zeroing for distortion limits.
+    let ceiling_sweeps = model.distortion.as_ref().map_or(0, |d| d.sweeps.len());
+    let ceiling_bins = q_max.iter().filter(|q| **q < 12.0 - 1e-9).count();
     let mut q_min = vec![-24.0; k];
     for (i, &hz) in f.iter().enumerate() {
         if hz >= model.hf_bypass_hz {
@@ -2745,10 +2776,6 @@ fn global_fit_stage(
             q_max[i] = 0.0;
         }
     }
-    // Counted before `q_max` moves into the solver: the report has to say how much of the band the
-    // ceiling actually binds, or a reader cannot tell a bound from a coincidence.
-    let ceiling_sweeps = model.distortion.as_ref().map_or(0, |d| d.sweeps.len());
-    let ceiling_bins = q_max.iter().filter(|q| **q < 12.0 - 1e-9).count();
     let r_peak = h_cal.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let input = hypreq::global_fit::GlobalFitInput {
         f_hz: f.clone(),

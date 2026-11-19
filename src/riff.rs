@@ -11,7 +11,7 @@
 //!   files end up with their surrounds in the front slots.
 //! * The RIFF and `data` sizes are patched from the header length that was *actually
 //!   written*, and the `data` size lives in the last four bytes of that header. A
-//!   hard-coded 36 writes a RIFF size 24 bytes short onto every 68-byte extensible
+//!   hard-coded 36 writes a RIFF size 24 bytes short onto every 80-byte extensible
 //!   file, and a strict parser then drops the last 24 bytes of audio: the file plays
 //!   and is quietly truncated.
 //!
@@ -158,7 +158,7 @@ pub fn header(
 /// The length of the header [`header`] would produce for these settings.
 ///
 /// Both RIFF size fields are measured from this number, so it is not allowed to be a guess: a
-/// 68-byte `WAVE_FORMAT_EXTENSIBLE` header measured as 44 writes a RIFF size 24 bytes short, and
+/// 80-byte `WAVE_FORMAT_EXTENSIBLE` header measured as 44 writes a RIFF size 36 bytes short, and
 /// near 4 GiB the same confusion is what lets a payload slip past the size check and wrap.
 ///
 /// It is measured from the builder itself — [`header`], run once with a placeholder rate — rather
@@ -177,8 +177,10 @@ pub fn header_len(channels: u16, bits: u32, float: bool) -> Result<usize> {
 /// wrap. The reference shares that arithmetic, so this is one place where being correct
 /// means disagreeing with it (documented in `docs/SETUP.md`).
 pub fn riff_sizes(payload: u64, hdr_len: u64) -> Result<(u32, u32)> {
+    let pad = payload & 1;
     let riff = payload
-        .checked_add(hdr_len)
+        .checked_add(pad)
+        .and_then(|t| t.checked_add(hdr_len))
         .and_then(|t| t.checked_sub(8))
         .ok_or_else(|| Error::msg("WAV payload length overflows the RIFF size field"))?;
     let data = u32::try_from(payload)
@@ -691,9 +693,15 @@ mod tests {
             "so this must be an error, not a 9-byte header"
         );
         // The largest payload that genuinely fits a classic header, at the boundary.
+        // Because odd payloads require a 1-byte RIFF pad, max - 36 (odd) requires
+        // a pad byte and overflows the RIFF field, so max - 37 (even) is the true limit.
         assert!(
-            riff_sizes(max - 36, 44).is_ok(),
-            "max - 36 is the true limit"
+            riff_sizes(max - 37, 44).is_ok(),
+            "max - 37 (even) is the true limit"
+        );
+        assert!(
+            riff_sizes(max - 36, 44).is_err(),
+            "max - 36 (odd) adds pad byte and overflows"
         );
         assert!(riff_sizes(max - 35, 44).is_err(), "one byte past it");
         // And a payload that does not fit its own field at all.
@@ -774,7 +782,7 @@ mod tests {
         assert_eq!(info.mask, Some(0x63f));
     }
 
-    /// The mono/stereo path HyprEQ writes is the plain 44-byte header for PCM, or 56-byte
+    /// The mono/stereo path HyprEQ writes is the plain 44-byte header for PCM, or 58-byte
     /// with fact chunk for float.
     /// One frame's width is carried in 16 bits. Clamping a value that does not fit wrote a header
     /// whose stride disagreed with the payload — the file opened, played, and was wrong — so the
@@ -849,7 +857,7 @@ mod tests {
         // Total file length must be even (header + 3 bytes + 1 pad byte)
         assert_eq!(bytes.len() % 2, 0);
         let riff_len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
-        assert_eq!(riff_len, bytes.len() - 9);
+        assert_eq!(riff_len, bytes.len() - 8);
         assert_eq!(*bytes.last().unwrap(), 0u8);
     }
 }

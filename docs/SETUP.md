@@ -25,8 +25,8 @@ usage errors. A change that alters any of those has to say so in the test it upd
 | What | Needed for | Notes |
 | --- | --- | --- |
 | Rust ≥ 1.87 (`rustc`, `cargo`) | everything | `rust-version` in `Cargo.toml` is 1.87, edition 2021 |
-| `pkg-config`, `fontconfig`, `freetype` (C dev files) | the verification PNG | the `ttf` feature of `plotters` goes through `font-kit`, which links against the system fontconfig/freetype and resolves `"sans-serif"` **at runtime** |
-| a usable `sans-serif` font | the verification PNG | any family fontconfig can resolve; DejaVu is enough |
+| `pkg-config`, `fontconfig`, `freetype` (C dev files) | the verification PNG | the `ttf` feature of `plotters` goes through `font-kit`, which links against the system fontconfig/freetype and resolves font families **at runtime** |
+| a usable sans-serif font (`ttf-liberation` / `Liberation Sans`) | the verification PNG | `Liberation Sans` is required to avoid uppercase 'J' glyph bounding-box clipping present in `DejaVu Sans`; `ttf-dejavu` remains a functional fallback |
 | Python ≥ 3.10, `numpy`, `soundfile` | `scripts/derive_rig_calibration.py` | `soundfile` wraps libsndfile for payload decoding |
 | Python `sofar` | `scripts/sofa_to_ensemble.py` | reads SOFA capture sets; only that helper needs it |
 
@@ -38,7 +38,7 @@ fontconfig but no resolvable `sans-serif` panics inside `plotters` while drawing
 On Arch:
 
 ```bash
-sudo pacman -S --needed rust fontconfig freetype2 ttf-dejavu python-numpy python-soundfile python-matplotlib
+sudo pacman -S --needed rust fontconfig freetype2 ttf-liberation ttf-dejavu python-numpy python-soundfile python-matplotlib
 ```
 
 ## 2. Build
@@ -502,7 +502,7 @@ reaches either one, so the harness stays green while they differ.
 
 * **The 4 GiB write ceiling is two ceilings, not one.** The oracle refuses a payload when
   `36 + data_size` exceeds `u32::MAX`. That measures a classic 44-byte header, so under a
-  68-byte `WAVE_FORMAT_EXTENSIBLE` header (every file above two channels) a payload 24
+  80-byte `WAVE_FORMAT_EXTENSIBLE` header (every file above two channels) a payload 36
   bytes too large passes, and the size field the writer then stores wraps to a few dozen
   bytes. The file plays and is silently truncated at the wrap. `src/wav.rs` keeps the
   reference's threshold and its exact sentence for the classic header, and adds

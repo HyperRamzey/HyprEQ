@@ -534,9 +534,10 @@ pub struct Limiter {
     g_rel: Vec<f64>,
     /// Slow gain for the group, before linking.
     g_rel_group: f64,
-    /// Slow stage level detector: the peak-hold, and frames left in its window.
+    /// Slow stage level detector: the peak-hold ring buffer and index.
     hold: Vec<f64>,
-    hold_left: usize,
+    hold_ring: Vec<Vec<f64>>,
+    hold_idx: usize,
     /// What the level detector demands of the slow stage, before attack and release.
     g_target: Vec<f64>,
     g_target_group: f64,
@@ -615,7 +616,8 @@ impl Limiter {
             g_rel: Vec::new(),
             g_rel_group: 1.0,
             hold: Vec::new(),
-            hold_left: 0,
+            hold_ring: Vec::new(),
+            hold_idx: 0,
             g_target: Vec::new(),
             g_target_group: 1.0,
             gr_now: Vec::new(),
@@ -667,7 +669,8 @@ impl Limiter {
             g_rel: vec![1.0; channels.max(1)],
             g_rel_group: 1.0,
             hold: vec![0.0; channels.max(1)],
-            hold_left: cfg.release_window(rate).max(1),
+            hold_ring: vec![vec![0.0; cfg.release_window(rate).max(1)]; channels.max(1)],
+            hold_idx: 0,
             g_target: vec![1.0; channels.max(1)],
             g_target_group: 1.0,
             gr_now: vec![1.0; channels.max(1)],
@@ -892,33 +895,36 @@ impl Limiter {
         // here, before either counter.
         let live = self.fed > latency as u64;
 
-        // --- slow stage: a peak-hold window, then attack and release on the gain -------
-        // The window is what makes this a level detector rather than a second peak
-        // detector. The followers run every frame and not once per window, so the time
-        // constants on the panel are the time constants rather than those divided by the
-        // window length.
+        // --- slow stage: continuous sliding-window peak-hold, then attack and release on the gain -------
         for c in 0..nch {
-            if self.peaks[c] > self.hold[c] {
-                self.hold[c] = self.peaks[c];
-            }
-        }
-        self.hold_left = self.hold_left.saturating_sub(1);
-        if self.hold_left == 0 {
-            self.hold_left = self.release_window.max(1);
-            let aim_db = 20.0 * self.ceiling_lin.max(f64::MIN_POSITIVE).log10();
-            let mut group = f64::NEG_INFINITY;
-            for c in 0..nch {
-                let lvl = 20.0 * self.hold[c].max(f64::MIN_POSITIVE).log10();
-                if lvl > group {
-                    group = lvl;
+            let new_peak = self.peaks[c];
+            let old_peak = self.hold_ring[c][self.hold_idx];
+            self.hold_ring[c][self.hold_idx] = new_peak;
+            if new_peak >= self.hold[c] {
+                self.hold[c] = new_peak;
+            } else if old_peak >= self.hold[c] - 1e-12 {
+                let mut m = 0.0f64;
+                for &v in &self.hold_ring[c] {
+                    if v > m {
+                        m = v;
+                    }
                 }
-                // Reduction the level demands, never a boost: the ceiling is a limit, and
-                // a slow stage that could raise the level is an expander wearing its clothes.
-                self.g_target[c] = 10f64.powf((aim_db - lvl).min(0.0) / 20.0);
-                self.hold[c] = 0.0;
+                self.hold[c] = m;
             }
-            self.g_target_group = 10f64.powf((aim_db - group).min(0.0) / 20.0);
         }
+        self.hold_idx = (self.hold_idx + 1) % self.release_window;
+        let aim_db = 20.0 * self.ceiling_lin.max(f64::MIN_POSITIVE).log10();
+        let mut group = f64::NEG_INFINITY;
+        for c in 0..nch {
+            let lvl = 20.0 * self.hold[c].max(f64::MIN_POSITIVE).log10();
+            if lvl > group {
+                group = lvl;
+            }
+            // Reduction the level demands, never a boost: the ceiling is a limit, and
+            // a slow stage that could raise the level is an expander wearing its clothes.
+            self.g_target[c] = 10f64.powf((aim_db - lvl).min(0.0) / 20.0);
+        }
+        self.g_target_group = 10f64.powf((aim_db - group).min(0.0) / 20.0);
         let atk = 1.0 - self.atk_coef;
         let rel = 1.0 - self.slow_rel_coef;
         for c in 0..nch {

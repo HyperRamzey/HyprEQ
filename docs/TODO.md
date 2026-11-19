@@ -168,7 +168,7 @@ and had a silent-failure mode. Measured on the tree, not inferred:
       alive ONLY via stale out-tree .config (defconfig never set it, Kconfig default n —
       fresh out/ would have shipped a different kernel than every warm-tree build);
       new `exynos7885-common/sepolicy-testing/shell.te` (read-only shell rules: sysfs_zram,
-      proc_swaps, proc_pressure_mem, generic sysfs:file = uksm knobs) gated by
+      proc_swaps, proc_pressure_mem; uksm knobs deliberately NOT in it — see gate note) gated by
       `ifeq ($(TARGET_PRODUCT),lineage_a30s_testing)` in a30s/BoardConfig.mk (board-var
       gate — SYSTEM_EXT_PRIVATE_SEPOLICY_DIRS is read from BoardConfigs, not product mk).
       Proof: mm/uksm.o compiles rc=0 in warm KERNEL_OBJ (tree is CONFIG_LTO_CLANG => bitcode,
@@ -185,6 +185,13 @@ and had a silent-failure mode. Measured on the tree, not inferred:
       (no orphans, engine healthy) — re-run pending explicit ask, use
       `strata_build.sh module sepolicy_neverallows --repair on`. Device checks await phone
       (recovery UI, one button press).
+      **All pushed 2026-11-19 (user instruction "commit and push everything"):** kernel
+      `e5bce5c0` -> Eureka-Kernel-R24U rom-crdroid16; exynos7885-common `47efb87` ->
+      device_samsung_exynos7885-common crdroid-16; a30s `dcf37cf` -> device_samsung_a30s
+      crdroid-16 (OTA channel split + CarrierConfig/doze overlays rode along); Derp tooling
+      `9c7a9672` -> master (gates, build_variants, issue notes; evidence binaries rec.dump /
+      rec_ramdisk.* / twrp_rd/ gitignored, re-acquirable via verify_recovery_usb.sh;
+      kernel `KernelSU.old/` deliberately left untracked).
       task 7 (#14.6 Photos): **already fixed in tree** — verified 2026-11-19 that device
       commit 46a8eb9 (Nov 13) replaced the flattened-APK import with base+config splits +
       `derp-gphotos-install.sh` first-boot installer (gphotos/*.apk present; script header
@@ -206,4 +213,6 @@ and had a silent-failure mode. Measured on the tree, not inferred:
 - [ ] B5. Task 10: docs + self-review of all device-tree fixes.
 - [ ] B6. Task 14: switch to the MikroTik VLESS/nfqws DPI job
       (`docs/projects/ROUTER-DPI.md` + session `...2026-10-28T15-20-29...01a18319...jsonl`).
-- Never commit/push unasked; device trees hold uncommitted fixes (#11/#12/#13/#14.1) — do not revert.
+- Never commit/push unasked. (State 2026-11-19: all device-tree/kernel/Derp fixes committed
+  and pushed under the user's explicit instruction — hashes in B4; nothing uncommitted left
+  to revert.)

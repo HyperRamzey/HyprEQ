@@ -410,9 +410,8 @@ impl BankParallelIir {
         );
         if preamp_db != 0.0 {
             out.push_str(&format!(
-                "# Preamp: {preamp_db:+.2} dB (applied to d0 and section b0, b1 numerators)\n"
+                "# baked_preamp_db: {preamp_db:+.2} dB (applied to d0 and section b0, b1 numerators; do not apply twice)\n"
             ));
-            out.push_str(&format!("preamp_db: {preamp_db:+.2}\n"));
         }
         out.push_str(&format!("d0: {:.10}\n", self.d0));
         out.push_str(&format!("fs: {:.1}\n", self.fs));
@@ -622,7 +621,6 @@ mod tests {
             "scaling by -3 dB must lower magnitude response by exactly 3 dB"
         );
         let text = bank.to_text_with_preamp(-3.0);
-        assert!(text.contains("preamp_db: -3.00"));
-        assert!(text.contains("# Preamp: -3.00 dB"));
+        assert!(text.contains("# baked_preamp_db: -3.00 dB"));
     }
 }

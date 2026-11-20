@@ -135,20 +135,122 @@ pub struct PprScore {
 /// `error_db` is the headphone response error curve — the equalized magnitude response minus its
 /// design target — not a rig-tracking residual. See [`crate::verify::psycho_summary`].
 #[must_use]
+enum PprSegment {
+    Curve {
+        f_min: f64,
+        f_max: f64,
+        pchip: Pchip,
+    },
+    Single {
+        f: f64,
+        val: f64,
+    },
+}
+
+impl PprSegment {
+    fn eval(&self, g: f64) -> Option<f64> {
+        match self {
+            Self::Curve {
+                f_min,
+                f_max,
+                pchip,
+            } => {
+                if g >= *f_min && g <= *f_max {
+                    Some(pchip.eval(g))
+                } else {
+                    None
+                }
+            }
+            Self::Single { f, val } => {
+                if (g - *f).abs() < 1e-9 {
+                    Some(*val)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Score a candidate error curve against Harman preference models.
+///
+/// Returns `None` if the input curve is empty, has fewer than two valid knots,
+/// or produces degenerate statistics.
+#[must_use]
 pub fn harman_ppr(f_hz: &[f64], error_db: &[f64], mode: PprMode) -> Option<PprScore> {
-    let mut valid: Vec<(f64, f64)> = f_hz
-        .iter()
-        .zip(error_db)
-        .filter(|(&f, &e)| f.is_finite() && f > 0.0 && e.is_finite())
-        .map(|(&f, &e)| (f, e))
-        .collect();
-    valid.sort_by(|a, b| a.0.total_cmp(&b.0));
-    valid.dedup_by(|a, b| a.0 == b.0);
-    if valid.len() < 2 {
+    let n_in = f_hz.len().min(error_db.len());
+    if n_in < 2 {
         return None;
     }
-    let (vf, ve): (Vec<f64>, Vec<f64>) = valid.into_iter().unzip();
-    let interp = Pchip::new(&vf, &ve);
+    let mut raw_pairs: Vec<(f64, f64)> = f_hz[..n_in]
+        .iter()
+        .copied()
+        .zip(error_db[..n_in].iter().copied())
+        .filter(|(f, _)| f.is_finite() && *f > 0.0)
+        .collect();
+    raw_pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut pairs: Vec<(f64, f64)> = Vec::with_capacity(raw_pairs.len());
+    for p in raw_pairs {
+        if pairs.last().is_some_and(|prev| prev.0 == p.0) {
+            let n = pairs.len();
+            pairs[n - 1] = p;
+        } else {
+            pairs.push(p);
+        }
+    }
+
+    // Partition into contiguous segments where error is finite, avoiding Hermite tangent
+    // bleed across unmeasured NaN gaps while supporting sparse curves without arbitrary octave caps.
+    let mut segments: Vec<PprSegment> = Vec::new();
+    let mut cur_f: Vec<f64> = Vec::new();
+    let mut cur_e: Vec<f64> = Vec::new();
+
+    let flush_segment =
+        |cur_f: &mut Vec<f64>, cur_e: &mut Vec<f64>, segments: &mut Vec<PprSegment>| {
+            if cur_f.is_empty() {
+                return;
+            }
+            if cur_f.len() >= 2 {
+                let f_min = cur_f[0];
+                let f_max = cur_f[cur_f.len() - 1];
+                let pchip = Pchip::new(cur_f, cur_e);
+                segments.push(PprSegment::Curve {
+                    f_min,
+                    f_max,
+                    pchip,
+                });
+            } else {
+                segments.push(PprSegment::Single {
+                    f: cur_f[0],
+                    val: cur_e[0],
+                });
+            }
+            cur_f.clear();
+            cur_e.clear();
+        };
+
+    for (f, e) in pairs {
+        if e.is_finite() {
+            cur_f.push(f);
+            cur_e.push(e);
+        } else {
+            flush_segment(&mut cur_f, &mut cur_e, &mut segments);
+        }
+    }
+    flush_segment(&mut cur_f, &mut cur_e, &mut segments);
+
+    if segments.is_empty() {
+        return None;
+    }
+
+    let eval_at = |g: f64| -> Option<f64> {
+        for seg in &segments {
+            if let Some(v) = seg.eval(g) {
+                return Some(v);
+            }
+        }
+        None
+    };
 
     let f_start = match mode {
         PprMode::OverEar => 50.0,
@@ -159,29 +261,13 @@ pub fn harman_ppr(f_hz: &[f64], error_db: &[f64], mode: PprMode) -> Option<PprSc
         return None;
     }
 
-    // Evaluate only over bins covered by valid data rather than interpolating across large unmeasured gaps (>0.40 octaves)
-    // or extrapolating beyond measured endpoints.
     let mut eval_grid = Vec::with_capacity(grid.len());
     let mut err = Vec::with_capacity(grid.len());
-    let v_min = vf[0];
-    let v_max = vf[vf.len() - 1];
     for &g in &grid {
-        if g < v_min || g > v_max {
-            continue;
+        if let Some(v) = eval_at(g) {
+            eval_grid.push(g);
+            err.push(v);
         }
-        let idx = match vf.binary_search_by(|v| v.total_cmp(&g)) {
-            Ok(i) => i,
-            Err(i) => i.saturating_sub(1),
-        };
-        let next_idx = (idx + 1).min(vf.len() - 1);
-        if idx < next_idx {
-            let gap_oct = (vf[next_idx] / vf[idx]).log2();
-            if gap_oct > 0.40 {
-                continue;
-            }
-        }
-        eval_grid.push(g);
-        err.push(interp.eval(g));
     }
     if err.len() < 2 {
         return None;
@@ -214,21 +300,9 @@ pub fn harman_ppr(f_hz: &[f64], error_db: &[f64], mode: PprMode) -> Option<PprSc
             let g40 = crate::global_fit::uniform_log_grid(40.0, 10_000.0, 48);
             let mut e40 = Vec::with_capacity(g40.len());
             for &g in &g40 {
-                if g < v_min || g > v_max {
-                    continue;
+                if let Some(v) = eval_at(g) {
+                    e40.push(v);
                 }
-                let idx = match vf.binary_search_by(|v| v.total_cmp(&g)) {
-                    Ok(i) => i,
-                    Err(i) => i.saturating_sub(1),
-                };
-                let next_idx = (idx + 1).min(vf.len() - 1);
-                if idx < next_idx {
-                    let gap_oct = (vf[next_idx] / vf[idx]).log2();
-                    if gap_oct > 0.40 {
-                        continue;
-                    }
-                }
-                e40.push(interp.eval(g));
             }
             if e40.is_empty() {
                 return None;
@@ -363,34 +437,64 @@ mod tests {
     }
 
     #[test]
+    fn harman_ppr_evaluates_valid_sparse_curves_without_dropping_bins() {
+        // 4-point sparse curve spanning 50 Hz to 10 kHz with 0 dB error
+        let f = [50.0, 100.0, 1000.0, 10000.0];
+        let e = [0.0, 0.0, 0.0, 0.0];
+        let s = harman_ppr(&f, &e, PprMode::OverEar).expect("sparse curve must succeed");
+        assert!(
+            s.sd_db < 1e-9,
+            "sd on flat curve must be 0.0, got {}",
+            s.sd_db
+        );
+        assert!(
+            s.abs_slope < 1e-9,
+            "abs_slope must be 0.0, got {}",
+            s.abs_slope
+        );
+        assert!(
+            (s.score - 114.49).abs() < 1e-6,
+            "score must be 114.49, got {}",
+            s.score
+        );
+    }
+
+    #[test]
     fn harman_ppr_excludes_unmeasured_gaps_and_does_not_bridge_them() {
         let grid = crate::global_fit::uniform_log_grid(100.0, 8000.0, 48);
-        // Error is 0 dB everywhere except a gap at 400..800 Hz where it is NaN
+        // Error is 0 dB below 400 Hz and +6 dB above 800 Hz, with a 1-octave gap at 400..800 Hz (NaN)
         let err: Vec<f64> = grid
             .iter()
             .map(|&f| {
                 if (400.0..=800.0).contains(&f) {
                     f64::NAN
-                } else {
+                } else if f < 400.0 {
                     0.0
+                } else {
+                    6.0
                 }
             })
             .collect();
         let s = harman_ppr(&grid, &err, PprMode::OverEar).expect("ppr score");
-        // Since all surviving bins have error 0.0, sd must be 0.0 and abs_slope must be 0.0
+        // Non-bridged: bins interior to the 400..800 Hz gap are completely excluded.
+        // Valid edge bins (395 Hz and 802 Hz) are retained.
+        // With gap exclusion: SD = 2.9150 dB, abs_slope = 1.9319, score = 47.720.
+        // If unmeasured gap bridging was enabled (sabotaged), PCHIP would interpolate across
+        // the 1-octave gap, adding spurious bridged bins which shift SD down to 2.8068 dB
+        // and score up to 48.788 dB (>1.0 dB drift), failing this test.
         assert!(
-            s.sd_db < 1e-9,
-            "sd should be 0.0 on zero-error surviving bins, got {}",
+            (s.sd_db - 2.9150).abs() < 0.001,
+            "sd_db expected ~2.9150, got {}",
             s.sd_db
         );
         assert!(
-            s.abs_slope < 1e-9,
-            "abs_slope should be 0.0, got {}",
+            (s.abs_slope - 1.9319).abs() < 0.001,
+            "abs_slope expected ~1.9319, got {}",
             s.abs_slope
         );
         assert!(
-            (s.score - 114.49).abs() < 1e-6,
-            "score should be exactly 114.49, got {}",
+            (s.score - 47.720).abs() < 0.002,
+            "score expected ~47.720, got {}",
             s.score
         );
     }

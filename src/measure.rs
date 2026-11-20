@@ -45,8 +45,7 @@ pub struct SignalMeasurements {
     pub per_channel_dbtp: Vec<f64>,
     pub itu_ratio: Ratio,
     pub itu_dbtp: f64,
-    pub itu_x4_dbtp: f64,
-    pub itu_x4_per_channel_dbtp: Vec<f64>,
+    pub itu_per_channel_dbtp: Vec<f64>,
     pub rms_dbfs: f64,
     pub per_channel_rms_dbfs: Vec<f64>,
     pub crest_tp_db: f64,
@@ -68,10 +67,9 @@ impl SignalMeasurements {
             per_channel_sample_dbfs: Vec::new(),
             true_peak_dbtp: f64::NEG_INFINITY,
             per_channel_dbtp: Vec::new(),
-            itu_ratio: Ratio::itu_for_rate(fs),
+            itu_ratio: Ratio::X4,
             itu_dbtp: f64::NEG_INFINITY,
-            itu_x4_dbtp: f64::NEG_INFINITY,
-            itu_x4_per_channel_dbtp: Vec::new(),
+            itu_per_channel_dbtp: Vec::new(),
             rms_dbfs: f64::NEG_INFINITY,
             per_channel_rms_dbfs: Vec::new(),
             crest_tp_db: 0.0,
@@ -104,7 +102,7 @@ pub fn measure_signal_block(
         return SignalMeasurements::empty(nch, fs, ratio);
     }
 
-    let itu_ratio = Ratio::itu_for_rate(fs);
+    let itu_ratio = Ratio::X4;
     let mut tp_main = TruePeak::new(ratio, nch);
     let mut tp_itu = if ratio == itu_ratio {
         None
@@ -163,7 +161,7 @@ pub fn measure_signal_block(
     let sp_db = db_from_peak(sp_lin);
     let tp_db = tp_main.dbtp();
     let itu_db = tp_itu.as_ref().map_or(tp_db, |tp| tp.dbtp());
-    let itu_x4_per_channel_dbtp = tp_itu
+    let itu_per_channel_dbtp = tp_itu
         .as_ref()
         .map_or_else(|| tp_main.per_channel_dbtp(), |tp| tp.per_channel_dbtp());
     let rms_all = (rms_ch_lin.iter().map(|r| r * r).sum::<f64>() / nch as f64).sqrt();
@@ -188,8 +186,7 @@ pub fn measure_signal_block(
         per_channel_dbtp: tp_main.per_channel_dbtp(),
         itu_ratio,
         itu_dbtp: itu_db,
-        itu_x4_dbtp: itu_db,
-        itu_x4_per_channel_dbtp,
+        itu_per_channel_dbtp,
         rms_dbfs: rms_db,
         per_channel_rms_dbfs: rms_ch_lin.iter().map(|&v| db_from_peak(v)).collect(),
         crest_tp_db: if tp_db.is_finite() && rms_db.is_finite() {
@@ -227,7 +224,7 @@ pub fn sgn(v: f64, dp: usize) -> String {
 /// Print the four-instrument block the report shows for each buffer.
 pub fn print_signal_measurements(label: &str, m: &SignalMeasurements) {
     let ch_tp = join_signed(&m.per_channel_dbtp, 2);
-    let ch_itu = join_signed(&m.itu_x4_per_channel_dbtp, 2);
+    let ch_itu = join_signed(&m.itu_per_channel_dbtp, 2);
     println!("  {label}:");
     println!(
         "    True Peak ({})  : {} dBTP{} | ITU BS.1770-5 ({}): {} dBTP{}",
@@ -402,7 +399,7 @@ mod tests {
         let m = measure_signal(&[l, r], 48000, Ratio::X16);
         assert_eq!(m.channels, 2);
         assert_eq!(m.per_channel_dbtp.len(), 2);
-        assert_eq!(m.itu_x4_per_channel_dbtp.len(), 2);
+        assert_eq!(m.itu_per_channel_dbtp.len(), 2);
         assert_eq!(m.per_channel_sample_dbfs.len(), 2);
         assert_eq!(m.per_channel_rms_dbfs.len(), 2);
         // Left is 20 dB above right, so the linked peak is the left one.
@@ -423,16 +420,16 @@ mod tests {
     }
 
     #[test]
-    fn itu_x4_and_x16_agree_on_band_limited_content() {
+    fn itu_and_x16_agree_on_band_limited_content() {
         // 1 kHz stays deep inside both banks' pass-bands, so the two ratios must
         // read the same inter-sample peak to within a few hundredths of a dB.
         let s = sig(48000, 0.25, 1000.0, 0.5);
         let m = measure_signal(std::slice::from_ref(&s), 48000, Ratio::X16);
         assert!(
-            (m.true_peak_dbtp - m.itu_x4_dbtp).abs() < 0.05,
+            (m.true_peak_dbtp - m.itu_dbtp).abs() < 0.05,
             "x16 {} vs x4 {}",
             m.true_peak_dbtp,
-            m.itu_x4_dbtp
+            m.itu_dbtp
         );
         // And both sit at or above the sample peak: the whole point of TP metering.
         assert!(m.true_peak_dbtp >= m.sample_peak_dbfs - 1e-9);

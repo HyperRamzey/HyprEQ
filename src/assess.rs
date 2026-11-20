@@ -156,13 +156,7 @@ pub fn nominal(k: i32) -> f64 {
 /// demand, and no `Pchip` panic on a degenerate curve.
 #[must_use]
 pub fn curve_at(bands: &[Band], ctrl: &[(f64, f64)]) -> Vec<f64> {
-    let mut usable: Vec<(f64, f64)> = ctrl
-        .iter()
-        .filter(|(f, g)| f.is_finite() && *f > 0.0 && g.is_finite())
-        .copied()
-        .collect();
-    usable.sort_by(|a, b| a.0.total_cmp(&b.0));
-    usable.dedup_by(|a, b| a.0 == b.0);
+    let usable = crate::model::sort_and_dedup_pairs(ctrl);
     if usable.len() < 2 {
         return vec![0.0; bands.len()];
     }
@@ -553,12 +547,12 @@ pub fn report_lines(d: &Demand, budget_db: f64, run: &Staging) -> Vec<String> {
     }
     if d.at_ceiling.is_empty() {
         out.push(format!(
-            "  Ceiling       : no band reaches {ceiling_db:.2} dBTP after the filter"
+            "  Ceiling       : no band reaches {ceiling_db:.2} dBTP ceiling by RMS (note: peaks exceed RMS by crest factor)"
         ));
         return out;
     }
     out.push(format!(
-        "  Ceiling       : {} band(s) reach {ceiling_db:.2} dBTP after the filter; {}",
+        "  Ceiling       : {} band(s) reach {ceiling_db:.2} dBTP ceiling by RMS; {}",
         d.at_ceiling.len(),
         if run.limiter_on {
             "the limiter is doing this work"
@@ -568,7 +562,7 @@ pub fn report_lines(d: &Demand, budget_db: f64, run: &Staging) -> Vec<String> {
     ));
     for b in &d.at_ceiling {
         out.push(format!(
-            "    {:>9} : {:7.2} dBFS after the filter, {:.2} dB past the ceiling",
+            "    {:>9} : {:7.2} dBFS RMS after the filter, {:.2} dB past the ceiling",
             band_name(b.nominal_hz),
             b.after_db,
             b.after_db - ceiling_db

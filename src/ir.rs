@@ -428,6 +428,11 @@ pub fn apply_notch_mode(
     if mode == NotchMode::Original || notch_range_hz.is_none() {
         return Ok(ctrl_pts.to_vec());
     }
+    if mode == NotchMode::Safe && !(safe_cap_db.is_finite() && safe_cap_db > 0.0) {
+        return Err(IrError(format!(
+            "safe_cap_db must be positive for notch-mode=safe (got {safe_cap_db})"
+        )));
+    }
     let (f_lo, f_hi) = notch_range_hz.unwrap();
     let skirt_oct = 0.20;
     let mut out = Vec::with_capacity(ctrl_pts.len());
@@ -440,14 +445,6 @@ pub fn apply_notch_mode(
                     out.push((f, round4(blended)));
                 }
                 NotchMode::Safe => {
-                    // `<= 0.0` alone let both non-finite caps through: `NaN <= 0.0` is false, and
-                    // `inf * tanh(g / inf)` is `inf * 0` = NaN. Either one painted NaN across every
-                    // knot in the notch band, which then reached the filter as NaN coefficients.
-                    if !(safe_cap_db.is_finite() && safe_cap_db > 0.0) {
-                        return Err(IrError(format!(
-                            "safe_cap_db must be positive for notch-mode=safe (got {safe_cap_db})"
-                        )));
-                    }
                     let capped = safe_cap_db * (g / safe_cap_db).tanh();
                     let blended = (1.0 - w) * g + w * capped;
                     out.push((f, round4(blended)));
@@ -915,18 +912,22 @@ mod tests {
                 "the refusal did not name the field: {e}"
             );
         }
-        // Outside the notch band there is nothing to cap, so a broken ceiling cannot be reached —
-        // the guard belongs to the mode that uses it, not to every curve.
+        // When mode is Safe and a range is set, safe_cap_db must be validated before the loop
+        // even if knots inside the band have non-positive gain or sit outside the range:
+        let non_positive_knots = [(3703.0, -2.0), (4000.0, 0.0)];
+        assert!(apply_notch_mode(&non_positive_knots, NotchMode::Safe, -5.0, range).is_err());
+        assert!(apply_notch_mode(&non_positive_knots, NotchMode::Safe, f64::NAN, range).is_err());
         let outside = [(1000.0, 8.0)];
-        assert_eq!(
-            apply_notch_mode(&outside, NotchMode::Safe, f64::NAN, range).unwrap(),
-            outside,
-            "a knot outside the range must not be touched by a ceiling it never uses"
-        );
+        assert!(apply_notch_mode(&outside, NotchMode::Safe, f64::NAN, range).is_err());
         assert_eq!(
             apply_notch_mode(&c, NotchMode::Original, f64::NAN, range).unwrap(),
             c,
             "original mode never consults the ceiling"
+        );
+        assert_eq!(
+            apply_notch_mode(&c, NotchMode::Safe, f64::NAN, None).unwrap(),
+            c,
+            "no notch range never consults the ceiling"
         );
     }
 

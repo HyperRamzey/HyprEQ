@@ -502,7 +502,7 @@ fn reshape_filter(
     let band_bins: Vec<usize> = (0..freq.len())
         .filter(|&i| (f_lo_active..f_taper).contains(&freq[i]))
         .collect();
-    if band_bins.len() >= 2 {
+    let offset = if band_bins.len() >= 2 {
         let i_min = band_bins[0];
         let i_max = *band_bins.last().unwrap();
         let compute_integral = |offset: f64, corr: &mut [f64]| -> f64 {
@@ -544,8 +544,12 @@ fn reshape_filter(
                 hi = mid;
             }
         }
-        compute_integral(0.5 * (lo + hi), &mut correction);
-    }
+        let off = 0.5 * (lo + hi);
+        compute_integral(off, &mut correction);
+        off
+    } else {
+        0.0
+    };
     let df_to_rad = |a: f64, b: f64| (b - a) * std::f64::consts::TAU / 1000.0;
     let mut new_phase = phase_u.clone();
     let mut running = 0.0f64;
@@ -582,7 +586,7 @@ fn reshape_filter(
         gd_now,
         full,
         f_taper,
-        mean_gd,
+        mean_gd: mean_gd - offset,
         requested,
         energy,
         budget_energy,

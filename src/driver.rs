@@ -24,20 +24,18 @@ impl DistortionProfile {
         if self.sweeps.is_empty() || f_grid.is_empty() {
             return vec![f64::INFINITY; f_grid.len()];
         }
-        let mut sorted = self.sweeps.clone();
+        let mut sorted: Vec<DistortionSweep> = self
+            .sweeps
+            .iter()
+            .filter(|s| s.spl_db.is_finite())
+            .cloned()
+            .collect();
         sorted.sort_by(|a, b| a.spl_db.total_cmp(&b.spl_db));
 
         let eval_sweeps: Vec<(f64, Vec<f64>)> = sorted
             .iter()
             .filter_map(|s| {
-                let mut pts: Vec<(f64, f64)> = s
-                    .points
-                    .iter()
-                    .copied()
-                    .filter(|(f, d)| f.is_finite() && *f > 0.0 && d.is_finite())
-                    .collect();
-                pts.sort_by(|a, b| a.0.total_cmp(&b.0));
-                pts.dedup_by(|a, b| a.0 == b.0);
+                let pts = crate::model::sort_and_dedup_pairs(&s.points);
                 if pts.len() < 2 {
                     return None;
                 }

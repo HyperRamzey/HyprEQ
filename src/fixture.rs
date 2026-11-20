@@ -385,9 +385,11 @@ impl RigCalibration {
         {
             return (vec![0.0; f_grid.len()], vec![0.0; f_grid.len()]);
         }
+        let log_src: Vec<f64> = self.f_hz.iter().map(|&f| f.max(1e-9).log10()).collect();
+        let log_grid: Vec<f64> = f_grid.iter().map(|&f| f.max(1e-9).log10()).collect();
         (
-            crate::fft::interp_grid(f_grid, &self.f_hz, &self.delta_mean_db),
-            crate::fft::interp_grid(f_grid, &self.f_hz, &self.delta_sigma_db),
+            crate::fft::interp_grid(&log_grid, &log_src, &self.delta_mean_db),
+            crate::fft::interp_grid(&log_grid, &log_src, &self.delta_sigma_db),
         )
     }
 }
@@ -414,7 +416,11 @@ mod tests {
         assert_eq!(mean, vec![3.0, 1.0, -2.0]);
         assert_eq!(sigma, vec![0.5, 0.3, 0.6]);
         let (mid_mean, _) = cal.on_grid(&[500.0]);
-        assert!(mid_mean[0] > 1.0 && mid_mean[0] < 3.0, "{}", mid_mean[0]);
+        assert!(
+            (mid_mean[0] - 1.3544).abs() < 0.001,
+            "must interpolate linearly in log10(f), expected ~1.3544, got {}",
+            mid_mean[0]
+        );
 
         let bad = serde_json::json!({
             "source": "gras_43ag", "target": "bk5128",

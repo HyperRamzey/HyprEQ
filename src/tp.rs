@@ -349,20 +349,6 @@ impl Ratio {
         self != Ratio::X4
     }
 
-    /// Minimum oversampling ratio recommended by ITU-R BS.1770-5 Annex 2 §1 for sample
-    /// rate `fs` to maintain an effective oversampled rate >= 192 kHz:
-    /// - 4x for fs <= 48 kHz (effective rate >= 176.4 kHz / 192 kHz)
-    /// - 2x for 48 kHz < fs <= 96 kHz (effective rate >= 176.4 kHz / 192 kHz)
-    /// - 2x for fs > 96 kHz (Annex 2 specifies at least 1x for fs > 96 kHz)
-    #[must_use]
-    pub fn itu_for_rate(fs: u32) -> Self {
-        if fs <= 48_000 {
-            Ratio::X4
-        } else {
-            Ratio::X2
-        }
-    }
-
     /// Worst under-read of this ratio **for content at or below [`BAND_EDGE`]**
     /// (0.45 x the sample rate), in dB, measured against an exact band-limited
     /// reconstruction (`tp::tests::accuracy`), not against another filter.
@@ -603,7 +589,7 @@ fn vertex(a: f64, b: f64, c: f64) -> f64 {
     if is_max || is_min {
         let den = a - 2.0 * b + c;
         if (is_max && den < 0.0) || (is_min && den > 0.0) {
-            return (b - (c - a) * (c - a) / (8.0 * den)).abs();
+            return (b - (c - a) * (c - a) / (8.0 * den)).abs().max(b.abs());
         }
     }
     b.abs()
@@ -633,7 +619,6 @@ pub struct Detector {
     /// successor yet, so it cannot be refined and waits for the next output.
     older: f64,
     newest: f64,
-    has_samples_since_reset: bool,
     /// Index from the newest input back to the sample the filter output describes: the
     /// group delay, in whole samples. The sample-peak floor is read here rather than off
     /// `x`, so it describes the same instant as the interpolation it is the floor for.
@@ -653,25 +638,30 @@ impl Detector {
             floor_sample: ratio.floors_sample(),
             older: 0.0,
             newest: 0.0,
-            has_samples_since_reset: false,
         }
     }
 
-    /// Create an ITU-R BS.1770-5 Annex 2 compliant detector for sample rate `fs`.
+    /// Create a detector with sample-peak flooring strictly enabled, guaranteeing
+    /// brickwall ceiling protection even on unfloored compliance ratios (like Ratio::X4).
     #[must_use]
-    pub fn itu_for_rate(fs: u32) -> Self {
-        Self::new(Ratio::itu_for_rate(fs))
+    pub fn new_floored(ratio: Ratio) -> Self {
+        Self {
+            stage: Stage::new(ratio),
+            peak: 0.0,
+            #[cfg(test)]
+            ratio,
+            lag: ratio.group_delay().round() as usize,
+            refine: ratio.refines(),
+            floor_sample: true,
+            older: 0.0,
+            newest: 0.0,
+        }
     }
 
-    /// Highest absolute interpolated value so far, linear. Includes the newest output,
-    /// unrefined, so the last point of a stream is never dropped.
+    /// Highest absolute interpolated value so far, linear.
     #[must_use]
     pub fn peak(&self) -> f64 {
-        if self.has_samples_since_reset {
-            self.peak.max(self.newest.abs())
-        } else {
-            self.peak
-        }
+        self.peak
     }
 
     /// True peak in dBTP; `-inf` for silence.
@@ -688,18 +678,15 @@ impl Detector {
         self.peak = 0.0;
         self.older = 0.0;
         self.newest = 0.0;
-        self.has_samples_since_reset = false;
     }
 
     /// Forget the accumulated reading but keep the stream's memory: the filter state
     /// **and** the two refine grid points stay. This is what makes a reset a new
     /// *reporting window over a continuous stream* — the reading after the reset equals
-    /// the same window measured in one unbroken run (`a_per-group_window_equals_the_same_window_measured_unbroken`
-    /// pins it). `peak()` only includes the pending `newest` once new samples have been
-    /// fed into this window, preventing pre-reset values from leaking into a freshly reset window.
+    /// the same window measured in one unbroken run (`a_per_group_window_equals_the_same_window_measured_unbroken`
+    /// pins it).
     pub fn reset_peak(&mut self) {
         self.peak = 0.0;
-        self.has_samples_since_reset = false;
     }
 
     /// Feed one input sample and return the largest value it finalised.
@@ -709,14 +696,16 @@ impl Detector {
     /// until its successor exists, so the value returned lags the waveform by one grid
     /// step (`1/n` of an input sample), which [`Ratio::report_delay`] accounts for.
     ///
-    /// The reading is then floored at `|x|`, the sample itself. That floor is not a
-    /// courtesy: an interpolating lowpass has its passband edge at the Nyquist frequency,
-    /// so a component *at* Nyquist sits in its transition band and can be attenuated to
-    /// nothing. The Recommendation's own printed coefficients do exactly that — measured
-    /// below -200 dB at f_norm 0.5, where the truth is 0 dBFS. That is harmless for a
-    /// loudness readout and disqualifying for a ceiling. The floor costs one `max` per
-    /// sample and cannot inflate anything: the ideal reconstruction passes through every
-    /// sample exactly, so the true peak is always at least the sample peak.
+    /// When `floor_sample` is enabled (for limiter sidechains and derived Kaiser ratios),
+    /// the reading is floored at the sample peak at the filter centre. That floor is not a
+    /// courtesy: an interpolating lowpass has its passband edge near the Nyquist frequency,
+    /// so a component *at* Nyquist sits in its transition band and can be attenuated.
+    /// The Recommendation's own printed coefficients attenuate a full-scale
+    /// alternating sequence at Nyquist (f_norm 0.5) to 0.912964 (-0.7909 dBTP) instead of
+    /// 1.0 (0 dBFS). That is harmless for a compliance loudness readout (which leaves
+    /// `floor_sample` false) and disqualifying for a brickwall ceiling.
+    /// The floor costs one `max` per sample and cannot inflate anything: the ideal reconstruction
+    /// passes through every sample exactly, so the true peak is always at least the sample peak.
     ///
     /// **What it cannot do:** a component at *exactly* fs/2 with a phase that puts every
     /// sample at a zero crossing has all-zero samples and a true peak of anything. No meter
@@ -731,7 +720,6 @@ impl Detector {
     /// under-reads the hole itself and nothing else.
     #[inline]
     pub fn push(&mut self, x: f64) -> f64 {
-        self.has_samples_since_reset = true;
         let x = if x.is_finite() { x } else { 0.0 };
         let mut out = [0.0f64; MAX_STREAM];
         let n = self.stage.n_phases;
@@ -770,7 +758,13 @@ impl Detector {
             // the centre exactly once as input advances, including the first ones, which arrive
             // there while `drain()` is clocking the bank out.
             let centre = (self.stage.head + self.stage.taps - 1 - self.lag) % self.stage.taps;
-            let xs = self.stage.hist[centre].abs();
+            let mut xs = self.stage.hist[centre].abs();
+            if self.stage.taps.is_multiple_of(2) {
+                // If taps is even (like 12-tap ITU X4), group delay is half-integer (5.5),
+                // straddling two taps (lag and lag - 1, i.e., indices 5 and 6).
+                let centre_adj = (self.stage.head + self.stage.taps - self.lag) % self.stage.taps;
+                xs = xs.max(self.stage.hist[centre_adj].abs());
+            }
             if xs > peak {
                 peak = xs;
             }
@@ -824,10 +818,16 @@ impl TruePeak {
         }
     }
 
-    /// Create an ITU-R BS.1770-5 Annex 2 compliant meter for sample rate `fs`.
+    /// Create a multi-channel true-peak meter with sample-peak flooring strictly enabled
+    /// across all channels for brickwall ceiling limiting and verification.
     #[must_use]
-    pub fn itu_for_rate(fs: u32, channels: usize) -> Self {
-        Self::new(Ratio::itu_for_rate(fs), channels)
+    pub fn new_floored(ratio: Ratio, channels: usize) -> Self {
+        Self {
+            chans: (0..channels)
+                .map(|_| Detector::new_floored(ratio))
+                .collect(),
+            ratio,
+        }
     }
 
     /// Feed one channel's block.
@@ -1501,7 +1501,12 @@ mod tests {
         for &r in Ratio::ALL.iter() {
             let mut d = Detector::new(r);
             d.push_block(&x);
-            let want = naive_max(&x, r).max(x.iter().fold(0.0f64, |a, &v| a.max(v.abs())));
+            let raw_naive = naive_max(&x, r);
+            let want = if r.floors_sample() {
+                raw_naive.max(x.iter().fold(0.0f64, |a, &v| a.max(v.abs())))
+            } else {
+                raw_naive
+            };
             assert!(
                 (d.peak() - want).abs() < 1e-12,
                 "{r}: streaming {} vs batch reference {want}",
@@ -1547,7 +1552,7 @@ mod tests {
             }
             let want = r.group_delay();
             // Measured: index 25 for every derived bank (exactly `(taps - 1) / 2`), and 6
-            // against 5.875 for the printed x4 bank, so the dominant tap is the nearest
+            // against 5.5 for the printed x4 bank, so the dominant tap is the nearest
             // whole sample to the group delay and a one-sample error fails.
             assert!(
                 (best.0 as f64 - want).abs() <= 0.5,
@@ -1997,16 +2002,28 @@ mod accuracy {
     }
 
     #[test]
-    fn itu_for_rate_adapts_ratio_per_annex_2() {
-        assert_eq!(Ratio::itu_for_rate(44_100), Ratio::X4);
-        assert_eq!(Ratio::itu_for_rate(48_000), Ratio::X4);
-        assert_eq!(Ratio::itu_for_rate(88_200), Ratio::X2);
-        assert_eq!(Ratio::itu_for_rate(96_000), Ratio::X2);
-        assert_eq!(Ratio::itu_for_rate(192_000), Ratio::X2);
+    fn vertex_refines_signed_extrema_and_never_under_reads_sample() {
+        // Positive crest pointing away from zero:
+        let v1 = vertex(0.1, 1.0, 0.2);
+        assert!(v1 >= 1.0);
 
-        let tp48 = TruePeak::itu_for_rate(48_000, 2);
-        assert_eq!(tp48.ratio(), Ratio::X4);
-        let tp96 = TruePeak::itu_for_rate(96_000, 2);
-        assert_eq!(tp96.ratio(), Ratio::X2);
+        // Negative crest pointing away from zero:
+        let v2 = vertex(-0.1, -1.0, -0.2);
+        assert!(v2 >= 1.0);
+
+        // Extrema pointing toward zero:
+        // In signed space, b is a local max between -1.0 and -0.2, but closer to zero.
+        let v3 = vertex(-1.0, -0.1, -0.2);
+        assert!(
+            v3 >= 0.1,
+            "vertex magnitude must never be less than |b|: got {v3}"
+        );
+
+        // In signed space, b is a local min between 1.0 and 0.2, but closer to zero.
+        let v4 = vertex(1.0, 0.1, 0.2);
+        assert!(
+            v4 >= 0.1,
+            "vertex magnitude must never be less than |b|: got {v4}"
+        );
     }
 }

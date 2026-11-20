@@ -53,7 +53,7 @@
 //!
 //! | module | contents |
 //! |---|---|
-//! | [`accum`] | Neumaier and pairwise compensated summation and prefix sums |
+//! | [`accum`] | Neumaier compensated summation and prefix sums |
 //! | [`assess`] | Content-demand third-octave spectrum assessment against headroom |
 //! | [`convolve`] | Overlap-add FFT convolution against planar FIRs |
 //! | [`dither`] | The exact NumPy PCG64 stream that the TPDF dither is drawn from |
@@ -78,8 +78,8 @@
 //! | [`robust_fit`] | Ensemble MAD statistics and whole-curve bootstrap confidence intervals |
 //! | [`stereo`] | Interaural L/R mismatch analysis, balance, and per-ear trim |
 //! | [`synth_alt`] | Vicanek matched PEQ, Bank parallel IIR (`freqpoles` + Cholesky LS) |
-//! | [`target`] | Parameterized targets, Bradley–Terry preference learner, ISO 226 delta |
-//! | [`tp`] | ITU-R BS.1770-5 true-peak detector, 4x–32x polyphase interpolators |
+//! | [`target`] | Parameterized targets, target fixture transforms, ISO 226 delta |
+//! | [`tp`] | ITU-R BS.1770-5 true-peak detector, 2x–32x polyphase interpolators |
 //! | [`verify`] | Third-octave prediction-vs-capture acoustic verifier |
 //! | [`wav`] | RIFF reader (PCM/float/extensible), IEEE-float and TPDF-dithered PCM writers |
 //! | [`window`] | `I0`, Kaiser `beta`, half-Kaiser IR tail |

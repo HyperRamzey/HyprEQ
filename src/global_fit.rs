@@ -40,7 +40,7 @@ pub struct GlobalFitConfig {
     pub lambda_2: f64,
     /// Variance floor `(dB)` preventing infinite weights where `sigma_total == 0`.
     pub sigma_floor_db: f64,
-    /// Scale per-bin weights by ERB bandwidth density (`erb_hz(1000) / erb_hz(f)`).
+    /// Scale per-bin weights by ERB log density (`(f / erb_hz(f)) / (1000 / erb_hz(1000))`).
     pub use_erb_weights: bool,
     /// Over-relaxation factor in `(1.0, 1.8)` for ADMM.
     pub admm_alpha: f64,

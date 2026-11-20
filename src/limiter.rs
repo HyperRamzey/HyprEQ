@@ -237,22 +237,6 @@ impl Default for Cfg {
 }
 
 impl Cfg {
-    /// Create a limiter configuration with oversampling ratio adapted to `rate`
-    /// to maintain an effective oversampled rate >= 384 kHz:
-    /// - X8 for rate <= 48 kHz
-    /// - X4 for 48 kHz < rate <= 96 kHz
-    /// - X2 for rate > 96 kHz
-    #[must_use]
-    pub fn for_rate(rate: u32) -> Self {
-        let mut cfg = Self::default();
-        if rate > 96_000 {
-            cfg.ratio = Ratio::X2;
-        } else if rate > 48_000 {
-            cfg.ratio = Ratio::X4;
-        }
-        cfg
-    }
-
     /// Validate, with an error that says what to type instead.
     pub fn validate(&self) -> Result<(), String> {
         if !self.enable {
@@ -668,8 +652,10 @@ impl Limiter {
         let ring_len = (latency + 2 * delta + ramp + 8).max(16);
         Self {
             cfg,
-            side: (0..channels).map(|_| Detector::new(cfg.ratio)).collect(),
-            out_meter: TruePeak::new(cfg.ratio, channels),
+            side: (0..channels)
+                .map(|_| Detector::new_floored(cfg.ratio))
+                .collect(),
+            out_meter: TruePeak::new_floored(cfg.ratio, channels),
             lines: vec![vec![0.0; latency.max(1)]; channels.max(1)],
             pos: 0,
             latency,
@@ -1350,12 +1336,28 @@ mod tests {
     }
 
     #[test]
-    fn cfg_for_rate_adapts_ratio_to_sampling_frequency() {
-        assert_eq!(Cfg::for_rate(44_100).ratio, Ratio::X8);
-        assert_eq!(Cfg::for_rate(48_000).ratio, Ratio::X8);
-        assert_eq!(Cfg::for_rate(88_200).ratio, Ratio::X4);
-        assert_eq!(Cfg::for_rate(96_000).ratio, Ratio::X4);
-        assert_eq!(Cfg::for_rate(192_000).ratio, Ratio::X2);
+    fn limiting_with_ratio_x4_enforces_brickwall_sample_ceiling_on_nyquist_tones() {
+        // Alternating Nyquist sequence [+1.0, -1.0, +1.0, -1.0, ...]
+        let nyquist_tone: Vec<f64> = (0..2048)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let ceiling = -3.0;
+        let c = cfg(ceiling, Ratio::X4, 1.0);
+        let (out, rep) = run(c, &[nyquist_tone], 256);
+        let max_sample_dbfs = out[0]
+            .iter()
+            .copied()
+            .fold(0.0f64, |a, v| a.max(v.abs()))
+            .log10()
+            * 20.0;
+        assert!(
+            max_sample_dbfs <= ceiling + 1e-6,
+            "sample peak {max_sample_dbfs:.4} dBFS must never overshoot ceiling {ceiling:.2} dB"
+        );
+        assert!(
+            rep.within_ceiling(),
+            "report must confirm output is within ceiling"
+        );
     }
 
     /// The fastest attack and release the interface accepts still hold the ceiling.
@@ -1889,7 +1891,7 @@ mod tests {
         }
         // Which ratios can honour the bottom of the range at a normal rate, and which
         // cannot. This is the honest shape of the control, and it is set by filter depth:
-        // the printed 12-tap x4 bank is 5.875 samples deep, so 0.2 ms (9 frames at
+        // the printed 12-tap x4 bank is 5.5 samples deep, so 0.2 ms (9 frames at
         // 48 kHz) is real for it, while every derived Kaiser bank is 51 taps and 25
         // samples deep, so its floor is 0.52 ms at 48 kHz and the UI has to say so rather
         // than pretend the slider reaches 0.2 ms for every setting. Depth is what bought
@@ -1924,7 +1926,11 @@ mod tests {
                 "{r} should delay by the lookahead it got plus the meter's reporting lag"
             );
         }
-        assert_eq!(Ratio::X4.report_delay(), 6, "the printed bank is 5.875");
+        assert_eq!(
+            Ratio::X4.report_delay(),
+            6,
+            "the printed bank is 5.5 (ceiling 6)"
+        );
         // The top of the range stays usable where the sample rate is normal.
         assert!(!cfg(-1.0, Ratio::X2, MAX_LOOKAHEAD_MS).lookahead_was_raised(48_000));
         assert!(!cfg(-1.0, Ratio::X4, MAX_LOOKAHEAD_MS).lookahead_was_raised(192_000));

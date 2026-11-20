@@ -29,13 +29,13 @@ pub struct TargetParams {
 }
 
 impl TargetParams {
-    /// The three basis features `[shelf, bell, tilt]` at `f_hz`.
+    /// The three basis features `[shelf, mid_high_shelf, tilt]` at `f_hz`.
     ///
     /// A finite but non-positive frequency is floored to 1 nHz before the logarithms. `log2(0)` is
     /// `-inf`, and IEEE-754 makes `0.0 * -inf` a NaN — so a baseline CSV with a row at 0 Hz poisoned
     /// every knot of the target curve *even when `theta_tilt` was zero*, which is the usual case and
-    /// the one that looks safest. The floor keeps the shelf at its `f -> 0` limit (1), the bell at
-    /// its (0), and the tilt at a large but finite slope.
+    /// the one that looks safest. The floor keeps the shelf at its `f -> 0` limit (1), the mid high-shelf
+    /// at its (0), and the tilt at a large but finite slope.
     ///
     /// A non-finite frequency is passed through, not invented: a NaN in the axis is bad input, and
     /// substituting a plausible number for it would hide the row that caused it.

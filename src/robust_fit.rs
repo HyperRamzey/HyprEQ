@@ -74,13 +74,7 @@ pub fn analyze_ensemble(
 
     let mut resampled: Vec<Vec<f64>> = Vec::with_capacity(curves.len());
     for raw in curves {
-        let mut pts: Vec<(f64, f64)> = raw
-            .iter()
-            .copied()
-            .filter(|(f, g)| f.is_finite() && *f > 0.0 && g.is_finite())
-            .collect();
-        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
-        pts.dedup_by(|a, b| a.0 == b.0);
+        let pts = crate::model::sort_and_dedup_pairs(raw);
         if pts.len() < 2 {
             continue;
         }

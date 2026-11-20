@@ -1122,7 +1122,7 @@ fn limit_ir(ir: &mut [f64], lim_cfg: &hypreq::limiter::Cfg, headroom_db: f64) ->
         return 0.0;
     }
     let ceiling_db = lim_cfg.ceiling_db.min(headroom_db).min(0.0);
-    let mut tp = TruePeak::new(lim_cfg.ratio, 1);
+    let mut tp = TruePeak::new_floored(lim_cfg.ratio, 1);
     tp.push_ch(0, ir);
     tp.drain();
     let ir_dbtp = tp.dbtp();
@@ -1148,7 +1148,7 @@ fn limit_stereo_ir(
         return 0.0;
     }
     let ceiling_db = lim_cfg.ceiling_db.min(headroom_db).min(0.0);
-    let mut tp = TruePeak::new(lim_cfg.ratio, 2);
+    let mut tp = TruePeak::new_floored(lim_cfg.ratio, 2);
     tp.push_ch(0, left);
     tp.push_ch(1, right);
     tp.drain();
@@ -1306,8 +1306,8 @@ fn run_model(
         ir_mpv_meas.sample_peak_dbfs,
         ir_mpv_meas.true_peak_dbtp,
         lim_cfg.ratio.label(),
-        ir_mpv_meas.itu_ratio.label(),
         ir_mpv_meas.itu_dbtp,
+        ir_mpv_meas.itu_ratio.label(),
         ir_l1_db
     );
     println!(
@@ -1393,8 +1393,8 @@ fn run_model(
         ir_rt_meas.sample_peak_dbfs,
         ir_rt_meas.true_peak_dbtp,
         lim_cfg.ratio.label(),
-        ir_rt_meas.itu_ratio.label(),
-        ir_rt_meas.itu_dbtp
+        ir_rt_meas.itu_dbtp,
+        ir_rt_meas.itu_ratio.label()
     );
     println!("  f32 vs f64 Error  : {:.2} dBFS RMS", err_rms_dbfs);
     println!("  Written WAVs      : {mono_rt}, {stereo_rt}");
@@ -2448,7 +2448,7 @@ fn run_target_curve(
     // The target is sampled where the fit will read it, not where the baseline file happens to have
     // rows. `--target-baseline` CSVs are often three rows (20 / 1000 / 20000 Hz), and both things
     // that get added to a baseline are functions of frequency, not of those rows: the parameterized
-    // deviation (whose 105 Hz shelf and 2500 Hz bell live entirely between them) and an ISO 226
+    // deviation (whose 105 Hz shelf and 2500 Hz mid high-shelf live entirely between them) and an ISO 226
     // contour. Sampled at the baseline's own knots they collapsed to straight lines between three
     // points and the shelf vanished; sampled on the merged grid they survive whatever the file's
     // row spacing is. The grid is a superset of the baseline knots, so nothing is lost -- a PCHIP
@@ -2888,7 +2888,7 @@ fn synth_stage(
             // inter-knot peaks and resonance. All-cut filters cap max_boost at 0.0 dB so
             // the preamp never becomes positive.
             let nyq = 0.5 * f64::from(fs);
-            let mut eval_grid = hypreq::fft::geomspace(20.0, nyq.min(20_000.0), 512);
+            let mut eval_grid = hypreq::fft::geomspace(20.0_f64.min(nyq), nyq, 512);
             eval_grid.push(0.0);
             eval_grid.push(nyq);
             eval_grid.extend(cf.iter().copied());
@@ -2907,7 +2907,7 @@ fn synth_stage(
                 .iter()
                 .map(|b| {
                     format!(
-                        "{}Hz/{:+.1}dB/Q{:.1}",
+                        "{}/{:+.1}dB/Q{:.1}",
                         hypreq::assess::band_name(b.f0_hz),
                         b.gain_db,
                         b.q
@@ -2942,7 +2942,7 @@ fn synth_stage(
                     })?;
             let pred = bank.eval_mag_db(&cf);
             let nyq = 0.5 * f64::from(fs);
-            let mut eval_grid = hypreq::fft::geomspace(20.0, nyq.min(20_000.0), 512);
+            let mut eval_grid = hypreq::fft::geomspace(20.0_f64.min(nyq), nyq, 512);
             eval_grid.push(0.0);
             eval_grid.push(nyq);
             eval_grid.extend(cf.iter().copied());

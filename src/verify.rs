@@ -400,22 +400,25 @@ pub fn verify(
                 Vec::new()
             };
             let gate = tally.gate_db;
-            let mut out_f = Vec::new();
-            let mut out_levels = Vec::new();
-            let mut out_err = Vec::new();
+            let mut out_levels = Vec::with_capacity(grid_48.len());
+            let mut out_err = Vec::with_capacity(grid_48.len());
             for (i, &f) in grid_48.iter().enumerate() {
                 let in_scored_span = scored_spans.iter().any(|&(lo, hi)| f >= lo && f <= hi);
                 let lvl = raw_d_levels[i];
                 let above_gate = !gate.is_finite() || lvl >= gate;
                 if in_scored_span && above_gate {
-                    out_f.push(f);
                     out_levels.push(lvl);
                     if !raw_d_err.is_empty() {
                         out_err.push(raw_d_err[i]);
                     }
+                } else {
+                    out_levels.push(f64::NAN);
+                    if !raw_d_err.is_empty() {
+                        out_err.push(f64::NAN);
+                    }
                 }
             }
-            (out_f, out_levels, out_err)
+            (grid_48, out_levels, out_err)
         } else {
             (Vec::new(), Vec::new(), Vec::new())
         }
@@ -686,7 +689,7 @@ pub fn psycho_summary(rep: &Report, mode: crate::psycho::PprMode) -> Option<Psyc
         Vec::new()
     };
     let centres = [100.0_f64, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0];
-    let (eval_f, eval_levels, eval_err) = if !rep.dense_f.is_empty() {
+    let (eval_f, eval_levels, eval_err) = if rep.dense_f.len() >= 2 {
         (
             rep.dense_f.clone(),
             rep.dense_levels.clone(),
@@ -1505,6 +1508,71 @@ mod tests {
                 (100.0..=8000.0).contains(&f),
                 "dense grid must not extrapolate target: got {f}"
             );
+        }
+    }
+
+    #[test]
+    fn dense_grid_preserves_uniform_spacing_and_marks_noise_gated_bins_as_nan() {
+        let post: Vec<(f64, f64)> = vec![
+            (20.0, -50.0),
+            (44.0, -50.0),
+            (57.0, 0.0),
+            (100.0, 0.0),
+            (1000.0, 0.0),
+            (10000.0, 0.0),
+            (20000.0, 0.0),
+        ];
+        let flat: Vec<(f64, f64)> = vec![(20.0, 0.0), (1000.0, 0.0), (20000.0, 0.0)];
+        let r = verify(&post, &flat, Some(&flat), &cfg()).expect("report");
+        assert!(
+            r.bands
+                .iter()
+                .any(|b| b.centre_hz < 45.0 && b.status == Status::TooQuiet),
+            "sub-45 Hz bands must be gated as TooQuiet"
+        );
+        assert_eq!(
+            r.dense_f.len(),
+            r.dense_levels.len(),
+            "dense_f and dense_levels must have identical length"
+        );
+        assert!(
+            r.dense_f.len() >= 2,
+            "dense grid must populate uniform 1/48-octave bins"
+        );
+
+        // Grid must preserve uniform 1/48-octave log spacing everywhere without gaps
+        let expected_ratio = 2.0_f64.powf(1.0 / 48.0);
+        for pair in r.dense_f.windows(2) {
+            let ratio = pair[1] / pair[0];
+            assert!(
+                (ratio - expected_ratio).abs() < 1e-4,
+                "dense grid spacing dilated across gap: ratio {ratio:.6} vs expected {expected_ratio:.6}"
+            );
+        }
+
+        // Noise-gated / unscored bins must be marked as NaN, while scored passband bins must be finite
+        let grid = crate::assess::bands_below(20000.0);
+        let scored_spans: Vec<(f64, f64)> = r
+            .bands
+            .iter()
+            .zip(&grid)
+            .filter(|(b, _)| b.status.scored())
+            .map(|(_, g)| (g.lo_hz, g.hi_hz))
+            .collect();
+
+        for (&f, &lvl) in r.dense_f.iter().zip(&r.dense_levels) {
+            let in_scored = scored_spans.iter().any(|&(lo, hi)| f >= lo && f <= hi);
+            if in_scored {
+                assert!(
+                    lvl.is_finite() && lvl >= r.gate_db,
+                    "scored bin at {f} Hz must be finite and above gate, got {lvl}"
+                );
+            } else {
+                assert!(
+                    lvl.is_nan(),
+                    "unscored / noise-gated bin at {f} Hz must be marked NaN in dense_levels, got {lvl}"
+                );
+            }
         }
     }
 }

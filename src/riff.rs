@@ -369,6 +369,12 @@ pub fn read_info_file(f: &mut std::fs::File) -> Result<(WavInfo, u64)> {
                 return Err(Error::msg("short WAV fmt chunk"));
             }
             let tag = u16::from_le_bytes([b[0], b[1]]);
+            if tag != WAVE_FORMAT_PCM
+                && tag != WAVE_FORMAT_IEEE_FLOAT
+                && tag != WAVE_FORMAT_EXTENSIBLE
+            {
+                return Err(Error::msg(format!("unsupported WAV format tag {tag:#06x}")));
+            }
             info.tag = tag;
             info.channels = u16::from_le_bytes([b[2], b[3]]);
             info.rate = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
@@ -791,6 +797,25 @@ mod tests {
         let p = tmp("bad.wav");
         std::fs::write(&p, b"not a wav at all, really").unwrap();
         assert!(read_info(&p).is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_non_extensible_format_tags() {
+        let p = tmp("alaw.wav");
+        let mut h = header(48000, 2, 16, false, None).unwrap();
+        // Overwrite tag with 0x0006 (A-law)
+        h[20] = 0x06;
+        h[21] = 0x00;
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(&h).unwrap();
+        f.write_all(&[0u8; 16]).unwrap();
+        drop(f);
+        let err = read_info(&p).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported WAV format tag 0x0006"),
+            "got {err}"
+        );
     }
 
     #[test]

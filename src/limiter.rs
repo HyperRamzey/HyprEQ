@@ -913,18 +913,17 @@ impl Limiter {
             }
         }
         self.hold_idx = (self.hold_idx + 1) % self.release_window;
-        let aim_db = 20.0 * self.ceiling_lin.max(f64::MIN_POSITIVE).log10();
-        let mut group = f64::NEG_INFINITY;
+        let mut group = 0.0_f64;
         for c in 0..nch {
-            let lvl = 20.0 * self.hold[c].max(f64::MIN_POSITIVE).log10();
-            if lvl > group {
-                group = lvl;
+            let h = self.hold[c];
+            if h > group {
+                group = h;
             }
             // Reduction the level demands, never a boost: the ceiling is a limit, and
             // a slow stage that could raise the level is an expander wearing its clothes.
-            self.g_target[c] = 10f64.powf((aim_db - lvl).min(0.0) / 20.0);
+            self.g_target[c] = (self.ceiling_lin / h.max(f64::MIN_POSITIVE)).min(1.0);
         }
-        self.g_target_group = 10f64.powf((aim_db - group).min(0.0) / 20.0);
+        self.g_target_group = (self.ceiling_lin / group.max(f64::MIN_POSITIVE)).min(1.0);
         let atk = 1.0 - self.atk_coef;
         let rel = 1.0 - self.slow_rel_coef;
         for c in 0..nch {

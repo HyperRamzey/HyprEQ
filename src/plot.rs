@@ -2453,12 +2453,16 @@ fn meta_annotations(
                 let (freq_str, spec) = if let Some(colon) = inside.find(':') {
                     (&inside[..colon], Some(&inside[colon + 1..]))
                 } else {
-                    (inside, None)
+                    (inside, Some("+.2f"))
                 };
                 if let Ok(freq) = freq_str.parse::<f64>() {
-                    let val = crate::fft::interp(freq, f_plot, wav_eq);
-                    let formatted = format_number(val, spec);
-                    text = text.replace(&full_tag, &formatted);
+                    if freq.is_finite() && freq > 0.0 {
+                        let val = crate::fft::interp(freq, f_plot, wav_eq);
+                        let formatted = format_number(val, spec);
+                        text = text.replace(&full_tag, &formatted);
+                    } else {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -2471,7 +2475,7 @@ fn meta_annotations(
             text = text
                 .replace("{curve_db:+.2f}", &format_number(curve_val, Some("+.2f")))
                 .replace("{curve_db:+.2}", &format_number(curve_val, Some("+.2")))
-                .replace("{curve_db}", &format_number(curve_val, None));
+                .replace("{curve_db}", &format_number(curve_val, Some("+.2f")));
         }
         out.push(Annotation {
             text,
@@ -3805,25 +3809,33 @@ mod tests {
     fn metadata_annotations_substitute_their_template_fields() {
         let mut m = model();
         m.plot_meta = serde_json::from_str(
-            r#"{"annotations":[{"text":"4. Concha Zero\n({notch_db:+.2}dB in '{notch_mode}' mode; {curve_db@1000.0:+.2f}dB)","xy":[3703.0,"notch_db"],"xytext":[1500.0,7.3],"color":"green"}]}"#,
+            r#"{"annotations":[{"text":"4. Concha Zero\n({notch_db:+.2}dB in '{notch_mode}' mode; {curve_db@1000.0:+.2f}dB @ 1k; {curve_db}dB @ xy)","xy":[3703.0,"notch_db"],"xytext":[1500.0,7.3],"color":"green"}]}"#,
         )
         .unwrap();
         let (ir, mag) = inputs_64();
         let d = PlotData::build(&m, &inputs(&ir, &mag));
         assert_eq!(d.annotations.len(), 1);
+        let text = &d.annotations[0].text;
         assert!(
-            !d.annotations[0].text.contains('{'),
-            "unsubstituted template survived: {:?}",
-            d.annotations[0].text
+            !text.contains('{'),
+            "unsubstituted template survived: {text:?}"
+        );
+        assert!(text.contains("in 'safe' mode"), "{text:?}");
+        let want_1k = format!(
+            "{:+.2}dB @ 1k",
+            crate::fft::interp(1000.0, &d.f_plot, &d.wav_eq)
         );
         assert!(
-            d.annotations[0].text.contains("in 'safe' mode"),
-            "{:?}",
-            d.annotations[0].text
+            text.contains(&want_1k),
+            "expected interpolated 1 kHz value {want_1k:?} in {text:?}"
+        );
+        let want_xy = format!(
+            "{:+.2}dB @ xy",
+            crate::fft::interp(3703.0, &d.f_plot, &d.wav_eq)
         );
         assert!(
-            d.annotations[0].text.contains("dB @ 1000") || !d.annotations[0].text.contains("@"),
-            "curve_db@ evaluated"
+            text.contains(&want_xy),
+            "bare {{curve_db}} must format with +.2 precision ({want_xy:?}), got {text:?}"
         );
     }
 

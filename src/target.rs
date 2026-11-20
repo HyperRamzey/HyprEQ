@@ -22,7 +22,7 @@ pub enum TargetFamily {
 pub struct TargetParams {
     /// Bass shelf gain around 105 Hz (dB).
     pub theta_bass: f64,
-    /// Presence / ear-gain trim around 2.5 kHz (dB).
+    /// Presence / ear-gain high-shelf trim around 2.5 kHz (dB).
     pub theta_mid: f64,
     /// Log-frequency tilt (dB/octave, anchored to 0 dB at 1 kHz).
     pub theta_tilt: f64,
@@ -41,7 +41,7 @@ impl TargetParams {
     /// substituting a plausible number for it would hide the row that caused it.
     #[must_use]
     pub fn features(f_hz: f64) -> [f64; 3] {
-        // Smooth 2nd-order-like low-shelf basis, broad mid bell, and octave tilt.
+        // Smooth 2nd-order-like low-shelf basis, 2nd-order high-shelf ear-gain trim, and octave tilt.
         let f = if f_hz.is_finite() {
             f_hz.max(1e-9)
         } else {

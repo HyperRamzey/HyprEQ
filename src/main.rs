@@ -21,8 +21,8 @@ use clap::Parser;
 use hypreq::convolve::{convolve_planar_fft, convolve_planar_pair};
 use hypreq::error::Error;
 use hypreq::ir::{
-    apply_notch_mode, export_audit_csv, l1_gain_db, mpv_n_fft, synthesize_minimum_phase_ir,
-    NotchMode,
+    apply_notch_mode, export_audit_csv, gauss_apodize_params, l1_gain_db, mpv_n_fft,
+    synthesize_minimum_phase_ir, NotchMode,
 };
 use hypreq::limiter::{
     Limiter, DEFAULT_ATTACK_MS, DEFAULT_CEILING_DB, DEFAULT_LINK_RELEASE, DEFAULT_LINK_TRANSIENT,
@@ -670,7 +670,7 @@ fn run(args: Args) -> Result<(), Error> {
         let recipe_fixture = cli_preset_fixture
             .or_else(|| effective_target_preset(m, &args).and_then(preset_fixture_only));
         let custom_target = args.target_csv.is_some()
-            || (args.target_preset.is_some() && cli_preset_fixture.is_none());
+            || (effective_target_preset(m, &args).is_some() && recipe_fixture.is_none());
         let target_fixture = if custom_target {
             recipe_fixture
         } else {
@@ -1195,16 +1195,7 @@ fn run_model(
     // both written when the shipped pairing was the only one. A run that replaced the target
     // must caption its own curve: the preset's name, the csv baseline, or the parameterized
     // shape of the shipped one -- the same honesty the audit table now gets.
-    let target_label: Option<String> = if target_extension_active_for(model, args) {
-        let ctx = target_context(model, args)?;
-        Some(match (ctx.preset_name.as_ref(), args.target_csv.as_ref()) {
-            (Some(name), _) => format!("Target Curve ({name})"),
-            (None, Some(_)) => "Target Curve (csv baseline)".to_string(),
-            (None, None) => format!("Target Curve ({} + params)", model.target_name),
-        })
-    } else {
-        None
-    };
+    let target_label = stages.target_label;
 
     let f64_wav = format!("{prefix}_f64_{rate_tag}.wav");
     let mono_rt = format!("{prefix}_mastering_mono_{rate_tag}.wav");
@@ -1258,8 +1249,7 @@ fn run_model(
     let ir_mpv_meas = measure_signal(std::slice::from_ref(&mpv.ir), fs, lim_cfg.ratio);
     let ir_l1_db = l1_gain_db(&mpv.ir);
 
-    let f_nyq = f64::from(fs) / 2.0;
-    let f_apod_start = f_nyq * (20200.0 / 24000.0);
+    let (f_apod_start, _) = gauss_apodize_params(fs);
     let apod_desc = if use_apodize {
         format!("Gaussian Apodizer (>{:.1} kHz)", f_apod_start / 1000.0)
     } else {
@@ -2949,6 +2939,21 @@ fn synth_stage(
                         Error::msg("--synth parallel-iir: the IIR fit did not converge")
                     })?;
             let pred = bank.eval_mag_db(&cf);
+            let nyq = 0.5 * f64::from(fs);
+            let mut eval_grid = hypreq::fft::geomspace(20.0, nyq.min(20_000.0), 512);
+            eval_grid.push(0.0);
+            eval_grid.push(nyq);
+            eval_grid.extend(cf.iter().copied());
+            eval_grid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            eval_grid.dedup();
+            let dense_mag = bank.eval_mag_db(&eval_grid);
+            let max_boost = dense_mag
+                .into_iter()
+                .filter(|v| v.is_finite())
+                .fold(0.0_f64, f64::max);
+            let preamp_db = headroom_db - max_boost;
+            let mut export_bank = bank.clone();
+            export_bank.scale_gain(10f64.powf(preamp_db / 20.0));
             let mut lines = vec![
                 "=== Bank Fixed-Pole Parallel IIR Synthesis ===".to_string(),
                 format!(
@@ -2959,11 +2964,15 @@ fn synth_stage(
             ];
             if write_files {
                 let path = format!("{prefix}_parallel_iir.txt");
-                std::fs::write(&path, bank.to_text())
+                std::fs::write(&path, export_bank.to_text_with_preamp(preamp_db))
                     .map_err(|e| Error::msg(format!("cannot write '{path}': {e}")))?;
-                lines.push(format!("  IIR bank file   : {path}"));
+                lines.push(format!(
+                    "  IIR bank file   : {path} (Preamp {preamp_db:+.2} dB)"
+                ));
             } else {
-                lines.push("  IIR bank file   : not written (--measure-only)".to_string());
+                lines.push(format!(
+                    "  IIR bank file   : not written (--measure-only), Preamp {preamp_db:+.2} dB"
+                ));
             }
             (pred, lines)
         }
@@ -3000,6 +3009,15 @@ fn corrected_curve_stages(
     write_files: bool,
 ) -> Result<FilterStages, Error> {
     let ctx = target_context(model, args)?;
+    let target_label: Option<String> = if target_extension_active_for(model, args) {
+        Some(match (ctx.preset_name.as_ref(), args.target_csv.as_ref()) {
+            (Some(name), _) => format!("Target Curve ({name})"),
+            (None, Some(_)) => "Target Curve (csv baseline)".to_string(),
+            (None, None) => format!("Target Curve ({} + params)", model.target_name),
+        })
+    } else {
+        None
+    };
     let ensemble = ensemble_stage(args, &model.raw_ensemble)?;
     let calibration = match args.rig_calibration.as_ref() {
         Some(path) => Some(
@@ -3129,6 +3147,7 @@ fn corrected_curve_stages(
         pre_cap,
         raw_active: diverged.then_some(raw_active),
         target: design_target,
+        target_label,
     })
 }
 
@@ -3147,6 +3166,8 @@ struct FilterStages {
     /// This run's resolved target curve (preset/CSV/family/trims/contour), when the run
     /// diverged. `--verify-with` reads this instead of `model.target_pts`.
     target: Option<Vec<(f64, f64)>>,
+    /// The legend target label computed when target extension is active.
+    target_label: Option<String>,
 }
 
 /// The delivered filter alone, for callers that have no use for the pre-ceiling curve.
@@ -4337,12 +4358,28 @@ mod tests {
                     std::path::Path::new(&path).exists(),
                     "{path} was not written"
                 );
+                let content = std::fs::read_to_string(&path).unwrap();
+                assert!(
+                    content.contains("Preamp:"),
+                    "PEQ must export preamp: {content}"
+                );
                 std::fs::remove_file(path).ok();
             } else {
+                assert!(
+                    joined.contains("Preamp"),
+                    "parallel-iir report must mention Preamp: {joined}"
+                );
                 let path = format!("{}_parallel_iir.txt", model.file_prefix);
-                if std::path::Path::new(&path).exists() {
-                    std::fs::remove_file(path).ok();
-                }
+                assert!(
+                    std::path::Path::new(&path).exists(),
+                    "{path} was not written"
+                );
+                let content = std::fs::read_to_string(&path).unwrap();
+                assert!(
+                    content.contains("preamp_db:"),
+                    "parallel IIR must export preamp: {content}"
+                );
+                std::fs::remove_file(path).ok();
             }
         }
     }
@@ -4653,6 +4690,52 @@ mod tests {
             res.is_ok(),
             "custom target with unknown fixture must not be rejected: {res:?}"
         );
+    }
+
+    #[test]
+    fn model_recorded_fixtureless_target_preset_does_not_inherit_replaced_target_fixture() {
+        let mut model = notch_cap_fixture();
+        model.fixture = Some(hypreq::fixture::Fixture::GrasKb5000);
+        model.target_name = "harman_5128".to_string(); // Replaced target has Bk5128 fixture in target_fixtures
+
+        let dir = std::env::temp_dir().join(format!("hypreq-fixless-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let preset_path = dir.join("custom_preset.json");
+        std::fs::write(
+            &preset_path,
+            r#"{"family": "harman", "params": {"theta_bass": 0.0, "theta_mid": 0.0, "theta_tilt": 0.0}}"#,
+        )
+        .unwrap();
+
+        model.target_preset = Some(preset_path.clone());
+
+        let mut models = Database::default();
+        models
+            .target_fixtures
+            .insert("harman_5128".to_string(), hypreq::fixture::Fixture::Bk5128);
+        models.models.push(model.clone());
+
+        // Resolution in main():
+        let args = argv(&["-H", &model.name]);
+        let cli_preset_fixture = args
+            .target_preset
+            .as_ref()
+            .and_then(|p| preset_fixture_only(p));
+        let recipe_fixture = cli_preset_fixture
+            .or_else(|| effective_target_preset(&model, &args).and_then(preset_fixture_only));
+        let custom_target = args.target_csv.is_some()
+            || (effective_target_preset(&model, &args).is_some() && recipe_fixture.is_none());
+        let target_fixture = if custom_target {
+            recipe_fixture
+        } else {
+            recipe_fixture.or_else(|| models.target_fixtures.get(&model.target_name).copied())
+        };
+
+        assert_eq!(
+            target_fixture, None,
+            "fixtureless model-recorded target preset must not inherit replaced target's fixture"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `q_max = L_max - listen_spl - R(f)`. Feeding zeros for `R` was not neutral: it widened the

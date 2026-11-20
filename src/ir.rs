@@ -184,21 +184,7 @@ pub fn synthesize_minimum_phase_ir(
     target_db[0] = curve.eval(0.0);
 
     if gauss_apodize {
-        // Scale-clamped Gaussian roll-off: w(f) = 2^(-0.5 * x^2) where x = (f - f_start) / width.
-        // In dB: -10 * log10(2) * x^2 ~= -3.0103 * x^2 dB (-3.0103 dB at x = 1).
-        // The 24 kHz scale floor keeps 44.1 kHz runs from moving f_start down to 18.559 kHz,
-        // which would attenuate audible 19-20.2 kHz treble by up to 3.521 dB. At 44.1 kHz this
-        // leaves the band up to 20.2 kHz flat and rolls off only the remaining 1.85 kHz to Nyquist.
-        // Keep the original arithmetic at 48 kHz and above so the shipped 48 kHz WAVs stay
-        // bit-identical; the algebraically equivalent max() form differs by a few ULPs in
-        // `width` and would perturb apodized 48 kHz IRs.
-        let f_nyq = fs_f / 2.0;
-        let (f_start, width) = if f_nyq >= 24_000.0 {
-            let f_start = f_nyq * (20_200.0 / 24_000.0);
-            (f_start, (f_nyq - f_start) / (3_800.0 / 1_650.0))
-        } else {
-            (20_200.0, 1_650.0)
-        };
+        let (f_start, width) = gauss_apodize_params(fs);
         for (f, db) in freqs.iter().zip(target_db.iter_mut()) {
             if *f > f_start {
                 let x = (f - f_start) / width;
@@ -392,10 +378,15 @@ pub fn linear_phase_ir_centered(mag_lin: &[f64], n_fft: usize) -> Vec<f64> {
 /// Transition skirt has width `skirt_oct` octaves (centered on `f_lo` and `f_hi`, with `±skirt_oct/2`).
 #[must_use]
 pub fn notch_blend_weight(f: f64, f_lo: f64, f_hi: f64, skirt_oct: f64) -> f64 {
+    if !f.is_finite() || !f_lo.is_finite() || !f_hi.is_finite() || !skirt_oct.is_finite() {
+        return 0.0;
+    }
     if f <= 0.0 || f_lo <= 0.0 || f_hi <= f_lo || skirt_oct <= 0.0 {
         return if f >= f_lo && f <= f_hi { 1.0 } else { 0.0 };
     }
-    let half_skirt = skirt_oct * 0.5;
+    let band_oct = (f_hi / f_lo).log2();
+    let effective_skirt = skirt_oct.min(band_oct);
+    let half_skirt = effective_skirt * 0.5;
     let lo_start = f_lo * 2.0f64.powf(-half_skirt);
     let lo_end = f_lo * 2.0f64.powf(half_skirt);
     let hi_start = f_hi * 2.0f64.powf(-half_skirt);
@@ -406,7 +397,7 @@ pub fn notch_blend_weight(f: f64, f_lo: f64, f_hi: f64, skirt_oct: f64) -> f64 {
     } else if f >= lo_end {
         1.0
     } else {
-        let t = (f / lo_start).log2() / skirt_oct;
+        let t = (f / lo_start).log2() / effective_skirt;
         0.5 * (1.0 - (std::f64::consts::PI * t).cos())
     };
 
@@ -415,7 +406,7 @@ pub fn notch_blend_weight(f: f64, f_lo: f64, f_hi: f64, skirt_oct: f64) -> f64 {
     } else if f >= hi_end {
         0.0
     } else {
-        let t = (hi_end / f).log2() / skirt_oct;
+        let t = (hi_end / f).log2() / effective_skirt;
         0.5 * (1.0 - (std::f64::consts::PI * t).cos())
     };
 
@@ -552,6 +543,24 @@ pub fn mpv_n_fft(taps: usize) -> usize {
     65536usize.max(fft::shl_bit_length(
         taps.saturating_mul(4).saturating_sub(1),
     ))
+}
+
+/// Scale-clamped Gaussian apodizer `(f_start_hz, width_hz)` for sample rate `fs`.
+///
+/// Roll-off is `w(f) = 2^(-0.5 * x^2)` where `x = (f - f_start) / width` (approx.
+/// `-3.0103 * x^2` dB, i.e. `-3.0103` dB at `x = 1`). The 24 kHz Nyquist floor keeps
+/// 44.1 kHz runs from moving `f_start` down to 18.559 kHz, which would attenuate audible
+/// 19–20.2 kHz treble by up to 3.521 dB. At 48 kHz and above the original arithmetic is
+/// preserved verbatim so shipped 48 kHz IRs remain bit-identical.
+#[must_use]
+pub fn gauss_apodize_params(fs: u32) -> (f64, f64) {
+    let f_nyq = f64::from(fs) / 2.0;
+    if f_nyq >= 24_000.0 {
+        let f_start = f_nyq * (20_200.0 / 24_000.0);
+        (f_start, (f_nyq - f_start) / (3_800.0 / 1_650.0))
+    } else {
+        (20_200.0, 1_650.0)
+    }
 }
 
 /// Knot gain at `notch_ref_hz` — the number the concha callout prints. A knot at
@@ -761,6 +770,42 @@ mod tests {
                 "48 kHz bin {f} Hz: the scale clamp must not perturb shipped 48 kHz IRs"
             );
         }
+    }
+
+    #[test]
+    fn gauss_apodize_params_clamps_below_48khz_and_scales_above() {
+        let (s44, w44) = gauss_apodize_params(44_100);
+        assert_eq!(s44, 20_200.0);
+        assert_eq!(w44, 1_650.0);
+
+        let (s48, w48) = gauss_apodize_params(48_000);
+        assert!((s48 - 20_200.0).abs() < 1e-12);
+        assert!((w48 - 1_650.0).abs() < 1e-12);
+
+        let (s96, w96) = gauss_apodize_params(96_000);
+        assert!((s96 - 40_400.0).abs() < 1e-12);
+        assert!((w96 - 3_300.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn notch_blend_weight_reaches_full_weight_on_narrow_bands_and_guards_non_finite() {
+        // Guard against non-finite values leaking NaN
+        assert_eq!(notch_blend_weight(f64::NAN, 3000.0, 5000.0, 0.20), 0.0);
+        assert_eq!(notch_blend_weight(4000.0, f64::NAN, 5000.0, 0.20), 0.0);
+        assert_eq!(notch_blend_weight(4000.0, 3000.0, f64::NAN, 0.20), 0.0);
+        assert_eq!(notch_blend_weight(4000.0, 3000.0, 5000.0, f64::NAN), 0.0);
+
+        // Narrow band [3900, 4100] (0.072 octaves < 0.20 octaves) must reach full w = 1.0 at geometric center
+        let f_center = (3900.0 * 4100.0_f64).sqrt();
+        let w = notch_blend_weight(f_center, 3900.0, 4100.0, 0.20);
+        assert!(
+            (w - 1.0).abs() < 1e-12,
+            "narrow band peak weight must be 1.0, got {w}"
+        );
+
+        // Outside band must taper to 0.0
+        assert_eq!(notch_blend_weight(3500.0, 3900.0, 4100.0, 0.20), 0.0);
+        assert_eq!(notch_blend_weight(4500.0, 3900.0, 4100.0, 0.20), 0.0);
     }
 
     #[test]

@@ -10,12 +10,6 @@ pub fn erb_hz(f_hz: f64) -> f64 {
     24.7 * (4.37 * (f_hz.max(0.0) / 1000.0) + 1.0)
 }
 
-/// Dimensionless ERB density weight normalized to `1.0` at 1 kHz (`ERB(1000) / ERB(f)`).
-#[must_use]
-pub fn erb_density(f_hz: f64) -> f64 {
-    erb_hz(1000.0) / erb_hz(f_hz)
-}
-
 /// Dimensionless ERB density weight on log-frequency grids, normalized to `1.0` at 1 kHz:
 /// `(f / ERB(f)) / (1000 / ERB(1000))`.
 ///
@@ -164,14 +158,42 @@ pub fn harman_ppr(f_hz: &[f64], error_db: &[f64], mode: PprMode) -> Option<PprSc
     if grid.len() < 2 {
         return None;
     }
-    let err = interp.eval_grid(&grid);
+
+    // Evaluate only over bins covered by valid data rather than interpolating across large unmeasured gaps (>0.40 octaves)
+    // or extrapolating beyond measured endpoints.
+    let mut eval_grid = Vec::with_capacity(grid.len());
+    let mut err = Vec::with_capacity(grid.len());
+    let v_min = vf[0];
+    let v_max = vf[vf.len() - 1];
+    for &g in &grid {
+        if g < v_min || g > v_max {
+            continue;
+        }
+        let idx = match vf.binary_search_by(|v| v.total_cmp(&g)) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        let next_idx = (idx + 1).min(vf.len() - 1);
+        if idx < next_idx {
+            let gap_oct = (vf[next_idx] / vf[idx]).log2();
+            if gap_oct > 0.40 {
+                continue;
+            }
+        }
+        eval_grid.push(g);
+        err.push(interp.eval(g));
+    }
+    if err.len() < 2 {
+        return None;
+    }
+
     let n = err.len() as f64;
     let mean = err.iter().sum::<f64>() / n;
     let var = err.iter().map(|&e| (e - mean) * (e - mean)).sum::<f64>() / (n - 1.0);
     let sd = var.sqrt();
 
     // Natural log, as published. See the `AS` term in the docs above.
-    let lx: Vec<f64> = grid.iter().map(|f| f.ln()).collect();
+    let lx: Vec<f64> = eval_grid.iter().map(|f| f.ln()).collect();
     let lx_mean = lx.iter().sum::<f64>() / n;
     let mut cov = 0.0;
     let mut lx_var = 0.0;
@@ -190,7 +212,27 @@ pub fn harman_ppr(f_hz: &[f64], error_db: &[f64], mode: PprMode) -> Option<PprSc
         PprMode::OverEar => (114.49 - 12.62 * sd - 15.52 * abs_slope, mean),
         PprMode::InEar => {
             let g40 = crate::global_fit::uniform_log_grid(40.0, 10_000.0, 48);
-            let e40 = interp.eval_grid(&g40);
+            let mut e40 = Vec::with_capacity(g40.len());
+            for &g in &g40 {
+                if g < v_min || g > v_max {
+                    continue;
+                }
+                let idx = match vf.binary_search_by(|v| v.total_cmp(&g)) {
+                    Ok(i) => i,
+                    Err(i) => i.saturating_sub(1),
+                };
+                let next_idx = (idx + 1).min(vf.len() - 1);
+                if idx < next_idx {
+                    let gap_oct = (vf[next_idx] / vf[idx]).log2();
+                    if gap_oct > 0.40 {
+                        continue;
+                    }
+                }
+                e40.push(interp.eval(g));
+            }
+            if e40.is_empty() {
+                return None;
+            }
             // ME = SUM|y|/n: the absolute values are taken per bin, before the mean.
             let m40 = e40.iter().map(|e| e.abs()).sum::<f64>() / (e40.len() as f64);
             (68.685 - 3.238 * sd - 4.473 * abs_slope - 2.658 * m40, m40)
@@ -316,6 +358,39 @@ mod tests {
         assert!(
             s.score < 68.685 - 2.6,
             "a 3 dB thrash must pay the 2.658 x ME term, score {:.3}",
+            s.score
+        );
+    }
+
+    #[test]
+    fn harman_ppr_excludes_unmeasured_gaps_and_does_not_bridge_them() {
+        let grid = crate::global_fit::uniform_log_grid(100.0, 8000.0, 48);
+        // Error is 0 dB everywhere except a gap at 400..800 Hz where it is NaN
+        let err: Vec<f64> = grid
+            .iter()
+            .map(|&f| {
+                if (400.0..=800.0).contains(&f) {
+                    f64::NAN
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let s = harman_ppr(&grid, &err, PprMode::OverEar).expect("ppr score");
+        // Since all surviving bins have error 0.0, sd must be 0.0 and abs_slope must be 0.0
+        assert!(
+            s.sd_db < 1e-9,
+            "sd should be 0.0 on zero-error surviving bins, got {}",
+            s.sd_db
+        );
+        assert!(
+            s.abs_slope < 1e-9,
+            "abs_slope should be 0.0, got {}",
+            s.abs_slope
+        );
+        assert!(
+            (s.score - 114.49).abs() < 1e-6,
+            "score should be exactly 114.49, got {}",
             s.score
         );
     }

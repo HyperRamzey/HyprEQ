@@ -237,6 +237,22 @@ impl Default for Cfg {
 }
 
 impl Cfg {
+    /// Create a limiter configuration with oversampling ratio adapted to `rate`
+    /// to maintain an effective oversampled rate >= 384 kHz:
+    /// - X8 for rate <= 48 kHz
+    /// - X4 for 48 kHz < rate <= 96 kHz
+    /// - X2 for rate > 96 kHz
+    #[must_use]
+    pub fn for_rate(rate: u32) -> Self {
+        let mut cfg = Self::default();
+        if rate > 96_000 {
+            cfg.ratio = Ratio::X2;
+        } else if rate > 48_000 {
+            cfg.ratio = Ratio::X4;
+        }
+        cfg
+    }
+
     /// Validate, with an error that says what to type instead.
     pub fn validate(&self) -> Result<(), String> {
         if !self.enable {
@@ -1331,6 +1347,15 @@ mod tests {
         let lat = Cfg::default().latency_samples(48_000);
         assert_eq!(lat, 96 + Ratio::X8.report_delay());
         assert!(lat > 96, "the interpolator's own delay went missing");
+    }
+
+    #[test]
+    fn cfg_for_rate_adapts_ratio_to_sampling_frequency() {
+        assert_eq!(Cfg::for_rate(44_100).ratio, Ratio::X8);
+        assert_eq!(Cfg::for_rate(48_000).ratio, Ratio::X8);
+        assert_eq!(Cfg::for_rate(88_200).ratio, Ratio::X4);
+        assert_eq!(Cfg::for_rate(96_000).ratio, Ratio::X4);
+        assert_eq!(Cfg::for_rate(192_000).ratio, Ratio::X2);
     }
 
     /// The fastest attack and release the interface accepts still hold the ceiling.

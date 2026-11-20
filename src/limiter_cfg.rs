@@ -130,13 +130,14 @@ pub fn limiter_report_lines(
             rep.link_transient * 100.0,
         ),
         format!(
-            "  Limiter Pre -> Post : {} -> {} dBTP ({}) | Independent {}: {} dBTP | ITU x4: {} dBTP | Within ceiling: {}",
+            "  Limiter Pre -> Post : {} -> {} dBTP ({}) | Independent {}: {} dBTP | ITU {}: {} dBTP | Within ceiling: {}",
             sgn(rep.pre_dbtp, 3),
             sgn(rep.post_dbtp, 3),
             rep.ratio.label(),
             post.ratio.label(),
             sgn(post.true_peak_dbtp, 3),
-            sgn(post.itu_x4_dbtp, 3),
+            post.itu_ratio.label(),
+            sgn(post.itu_dbtp, 3),
             if rep.within_ceiling() && post.true_peak_dbtp <= rep.ceiling_db + 1e-9 {
                 "True"
             } else {
@@ -201,6 +202,8 @@ mod tests {
             per_channel_sample_dbfs: vec![-3.1, -6.0],
             true_peak_dbtp: -3.04,
             per_channel_dbtp: vec![-3.04, -5.9],
+            itu_ratio: Ratio::X4,
+            itu_dbtp: -3.21,
             itu_x4_dbtp: -3.21,
             itu_x4_per_channel_dbtp: vec![-3.21, -6.1],
             rms_dbfs: -14.2,

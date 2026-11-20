@@ -43,6 +43,8 @@ pub struct SignalMeasurements {
     pub per_channel_sample_dbfs: Vec<f64>,
     pub true_peak_dbtp: f64,
     pub per_channel_dbtp: Vec<f64>,
+    pub itu_ratio: Ratio,
+    pub itu_dbtp: f64,
     pub itu_x4_dbtp: f64,
     pub itu_x4_per_channel_dbtp: Vec<f64>,
     pub rms_dbfs: f64,
@@ -66,6 +68,8 @@ impl SignalMeasurements {
             per_channel_sample_dbfs: Vec::new(),
             true_peak_dbtp: f64::NEG_INFINITY,
             per_channel_dbtp: Vec::new(),
+            itu_ratio: Ratio::itu_for_rate(fs),
+            itu_dbtp: f64::NEG_INFINITY,
             itu_x4_dbtp: f64::NEG_INFINITY,
             itu_x4_per_channel_dbtp: Vec::new(),
             rms_dbfs: f64::NEG_INFINITY,
@@ -100,11 +104,12 @@ pub fn measure_signal_block(
         return SignalMeasurements::empty(nch, fs, ratio);
     }
 
+    let itu_ratio = Ratio::itu_for_rate(fs);
     let mut tp_main = TruePeak::new(ratio, nch);
-    let mut tp_itu = if ratio == Ratio::X4 {
+    let mut tp_itu = if ratio == itu_ratio {
         None
     } else {
-        Some(TruePeak::new(Ratio::X4, nch))
+        Some(TruePeak::new(itu_ratio, nch))
     };
     let meters = crate::meter::Meters::with_channels(nch);
 
@@ -181,6 +186,8 @@ pub fn measure_signal_block(
         per_channel_sample_dbfs: sp_ch.iter().map(|&v| db_from_peak(v)).collect(),
         true_peak_dbtp: tp_db,
         per_channel_dbtp: tp_main.per_channel_dbtp(),
+        itu_ratio,
+        itu_dbtp: itu_db,
         itu_x4_dbtp: itu_db,
         itu_x4_per_channel_dbtp,
         rms_dbfs: rms_db,
@@ -223,7 +230,7 @@ pub fn print_signal_measurements(label: &str, m: &SignalMeasurements) {
     let ch_itu = join_signed(&m.itu_x4_per_channel_dbtp, 2);
     println!("  {label}:");
     println!(
-        "    True Peak ({})  : {} dBTP{} | ITU BS.1770-5 (x4): {} dBTP{}",
+        "    True Peak ({})  : {} dBTP{} | ITU BS.1770-5 ({}): {} dBTP{}",
         m.ratio.label(),
         sgn(m.true_peak_dbtp, 3),
         if m.channels > 1 {
@@ -231,7 +238,8 @@ pub fn print_signal_measurements(label: &str, m: &SignalMeasurements) {
         } else {
             String::new()
         },
-        sgn(m.itu_x4_dbtp, 3),
+        m.itu_ratio.label(),
+        sgn(m.itu_dbtp, 3),
         if m.channels > 1 {
             format!(" [{ch_itu}]")
         } else {

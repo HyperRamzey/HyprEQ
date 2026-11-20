@@ -1302,11 +1302,12 @@ fn run_model(
         mpv.unwindowed_floor_dbfs, mpv.windowed_floor_dbfs
     );
     println!(
-        "  IR Peak / Meter   : {:+.3} dBFS sample | {:+.3} dBTP ({}) | {:+.3} dBTP (ITU x4) | ||h||_1 bound: {:+.2} dB",
+        "  IR Peak / Meter   : {:+.3} dBFS sample | {:+.3} dBTP ({}) | {:+.3} dBTP (ITU {}) | ||h||_1 bound: {:+.2} dB",
         ir_mpv_meas.sample_peak_dbfs,
         ir_mpv_meas.true_peak_dbtp,
         lim_cfg.ratio.label(),
-        ir_mpv_meas.itu_x4_dbtp,
+        ir_mpv_meas.itu_ratio.label(),
+        ir_mpv_meas.itu_dbtp,
         ir_l1_db
     );
     println!(
@@ -1388,11 +1389,12 @@ fn run_model(
         rt.unwindowed_floor_dbfs, rt.windowed_floor_dbfs
     );
     println!(
-        "  IR Peak / Meter   : {:+.3} dBFS sample | {:+.3} dBTP ({}) | {:+.3} dBTP (ITU x4)",
+        "  IR Peak / Meter   : {:+.3} dBFS sample | {:+.3} dBTP ({}) | {:+.3} dBTP (ITU {})",
         ir_rt_meas.sample_peak_dbfs,
         ir_rt_meas.true_peak_dbtp,
         lim_cfg.ratio.label(),
-        ir_rt_meas.itu_x4_dbtp
+        ir_rt_meas.itu_ratio.label(),
+        ir_rt_meas.itu_dbtp
     );
     println!("  f32 vs f64 Error  : {:.2} dBFS RMS", err_rms_dbfs);
     println!("  Written WAVs      : {mono_rt}, {stereo_rt}");

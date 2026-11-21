@@ -438,15 +438,15 @@ fn report_leaves_the_audio_alone_and_split_changes_it() {
         !out_split.contains("EQ FIR (dt770_80ohm)"),
         "split printed a shared filter it did not apply:\n{out_split}"
     );
-    // Re-pinned with the 479-bin placement ensemble grid for dt770_80: with smooth edge
-    // transitions in the notch zone, 35 left knots and 41 right knots are held/blended,
+    // Re-pinned with the 479-bin placement ensemble + global fit grid for dt770_80:
+    // with smooth QP regularization across the notch zone, 36 left knots and 41 right knots are held/blended,
     // moving the centre in 41 knots.
     assert!(
         out_split.contains("Centre            : moved in 41 knot(s)"),
         "split did not account for the ceiling biting:\n{out_split}"
     );
     assert!(
-        out_split.contains("Notch cap         : held 35 left / 41 right knot(s)"),
+        out_split.contains("Notch cap         : held 36 left / 41 right knot(s)"),
         "the ceiling's accounting is missing:\n{out_split}"
     );
 

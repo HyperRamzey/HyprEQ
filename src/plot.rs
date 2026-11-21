@@ -2512,6 +2512,7 @@ mod tests {
             target_pts: vec![(20.0, 4.0), (1000.0, 0.0), (20000.0, -2.0)],
             harm_offset: 1.0,
             gauss_apodize: false,
+            global_fit: false,
             hf_bypass_hz: 10000.0,
             hf_taper_start_hz: None,
             subbass_leak_discount_db: None,

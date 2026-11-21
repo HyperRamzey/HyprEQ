@@ -294,9 +294,20 @@ struct Args {
         help_heading = "Groundwork (opt-in)"
     )]
     ensemble_alpha: f64,
-    /// Solve the global curvature-constrained box-QP over the 1/48-octave grid
-    #[arg(long, help_heading = "Groundwork (opt-in)")]
+    /// Solve the global curvature-constrained box-QP over the 1/48-octave grid (overrides model JSON global_fit)
+    #[arg(
+        long,
+        conflicts_with = "no_global_fit",
+        help_heading = "Groundwork (opt-in)"
+    )]
     global_fit: bool,
+    /// Disable global curvature-constrained box-QP (overrides model JSON global_fit)
+    #[arg(
+        long,
+        conflicts_with = "global_fit",
+        help_heading = "Groundwork (opt-in)"
+    )]
+    no_global_fit: bool,
     /// Alternative synthesis backend alongside the default FIR
     #[arg(
         long,
@@ -629,11 +640,12 @@ fn run(args: Args) -> Result<(), Error> {
     if args.list_models {
         for m in models.models.iter() {
             println!(
-                "{:<12} | {} | target={} | gauss_apodize={}",
+                "{:<12} | {} | target={} | gauss_apodize={} | global_fit={}",
                 m.key,
                 m.name,
                 m.target_name,
-                py_bool(m.gauss_apodize)
+                py_bool(m.gauss_apodize),
+                py_bool(m.global_fit)
             );
         }
         return Ok(());
@@ -2730,7 +2742,8 @@ fn global_fit_stage(
     rig_sigma: Option<&[(f64, f64)]>,
     raw_active: &[(f64, f64)],
 ) -> Result<CurveAndReport, Error> {
-    if !args.global_fit {
+    let use_global_fit = global_fit_flag(args).unwrap_or(model.global_fit);
+    if !use_global_fit {
         return Ok((ctrl.to_vec(), Vec::new()));
     }
     let f = hypreq::global_fit::uniform_log_grid(20.0, 20000.0, 48);
@@ -3126,7 +3139,8 @@ fn corrected_curve_stages(
         })
         .transpose()?;
 
-    if args.global_fit {
+    let use_global_fit = global_fit_flag(args).unwrap_or(model.global_fit);
+    if use_global_fit {
         let sigma = ensemble.as_ref().map(|e| e.sigma.as_slice());
         let (fitted, lines) = global_fit_stage(
             &base_ctrl,
@@ -3648,6 +3662,20 @@ fn apodize_flag(args: &Args) -> Option<bool> {
     }
 }
 
+/// `--global-fit` / `--no-global-fit` as a tri-state over the model's own default.
+///
+/// Neither flag is `None`, which is what lets a model in the database keep saying `global_fit:
+/// false` (or `true`) while an operator overrides it in one invocation.
+fn global_fit_flag(args: &Args) -> Option<bool> {
+    if args.global_fit {
+        Some(true)
+    } else if args.no_global_fit {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// `--notch-mode` as a mode.
 ///
 /// No error path here, and no second wording of the rejection: the argument phase ran
@@ -4059,6 +4087,7 @@ mod tests {
             target_pts: vec![(20.0, 0.0), (20000.0, 0.0)],
             harm_offset: 0.0,
             gauss_apodize: false,
+            global_fit: false,
             hf_bypass_hz: 20000.0,
             hf_taper_start_hz: None,
             subbass_leak_discount_db: None,
@@ -4241,6 +4270,7 @@ mod tests {
         assert!(a.ensemble_csv.is_empty());
         assert_eq!(a.ensemble_alpha, 0.0);
         assert!(!a.global_fit);
+        assert!(!a.no_global_fit);
         assert_eq!(a.synth, "fir");
         assert_eq!(a.peq_bands, 8);
         assert_eq!(a.target_family, None);
@@ -5899,6 +5929,37 @@ mod tests {
             "mean of the ears, not the last column"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn model_global_fit_data_runs_by_default_and_respects_no_global_fit() {
+        let mut model = notch_cap_fixture();
+        model.global_fit = true;
+        let plain_args = argv(&["-H", "hd6xx"]);
+        let (_, lines_plain) = corrected_curve(&model, &plain_args).expect("plain run");
+        let plain_text = lines_plain.join("\n");
+        assert!(
+            plain_text.contains("Global Curvature-Constrained Fit"),
+            "model.global_fit = true must run the QP stage on a plain invocation:\n{plain_text}"
+        );
+
+        let opt_out_args = argv(&["-H", "hd6xx", "--no-global-fit"]);
+        let (_, lines_opt_out) = corrected_curve(&model, &opt_out_args).expect("opt-out run");
+        let opt_out_text = lines_opt_out.join("\n");
+        assert!(
+            !opt_out_text.contains("Global Curvature-Constrained Fit"),
+            "--no-global-fit must suppress global fit even when model.global_fit = true:\n{opt_out_text}"
+        );
+
+        let mut false_model = notch_cap_fixture();
+        false_model.global_fit = false;
+        let force_args = argv(&["-H", "hd6xx", "--global-fit"]);
+        let (_, lines_force) = corrected_curve(&false_model, &force_args).expect("force run");
+        let force_text = lines_force.join("\n");
+        assert!(
+            force_text.contains("Global Curvature-Constrained Fit"),
+            "--global-fit must enable global fit when model.global_fit = false:\n{force_text}"
+        );
     }
 }
 

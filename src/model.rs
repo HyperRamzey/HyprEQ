@@ -70,6 +70,7 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
         "notch_ref_hz": 5365.9,
         "autoeq_offset_db": 0.0,
         "gauss_apodize": false,
+        "global_fit": true,
         "plot_meta": {
           "title_template": "VERIFICATION: JBL Live 770NC (Passive) Convolver (Preamp: {pre_rt:.2f} dB | Unwindowed Floor: {unwin_rt:.1f} dBFS)",
           "bypass_label": "Uncorrected >9.1 kHz Coupler Cylinder Null Zone (Clamped to 0.0 dB)",
@@ -99,6 +100,7 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
         "notch_ref_hz": 3703.0,
         "autoeq_offset_db": 4.55,
         "gauss_apodize": true,
+        "global_fit": true,
         "plot_meta": {
           "title_template": "VERIFICATION: Beyerdynamic DT 770 Pro (80 Ω) Convolver (Notch Mode: {notch_mode} | Preamp: {pre_rt:.2f} dB)",
           "bypass_label": "Uncorrected >8.8 kHz Coupler Null & >15.8 kHz 0.0 dB Wire Zone (Left Unmodified)",
@@ -131,6 +133,7 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
         "notch_ref_hz": 3839.0,
         "autoeq_offset_db": 4.30,
         "gauss_apodize": true,
+        "global_fit": true,
         "plot_meta": {
           "title_template": "VERIFICATION: FiiO FT1 Pro (Open-Back Planar) Convolver (Notch Mode: {notch_mode} | Preamp: {pre_rt:.2f} dB)",
           "bypass_label": "Uncorrected >9.75 kHz Coupler Null & 0.0 dB Wire Zone (Left Unmodified)",
@@ -201,6 +204,7 @@ pub struct Model {
     pub target_pts: Vec<(f64, f64)>,
     pub harm_offset: f64,
     pub gauss_apodize: bool,
+    pub global_fit: bool,
     pub hf_bypass_hz: f64,
     pub hf_taper_start_hz: Option<f64>,
     pub subbass_leak_discount_db: Option<f64>,
@@ -1151,6 +1155,11 @@ pub fn normalize_model_entry(
             .and_then(Value::as_bool)
             .or_else(|| defaults.get("gauss_apodize").and_then(Value::as_bool))
             .unwrap_or(false),
+        global_fit: cfg
+            .get("global_fit")
+            .and_then(Value::as_bool)
+            .or_else(|| defaults.get("global_fit").and_then(Value::as_bool))
+            .unwrap_or(false),
         hf_bypass_hz,
         hf_taper_start_hz: cfg.get("hf_taper_start_hz").and_then(as_f64),
         subbass_leak_discount_db: cfg.get("subbass_leak_discount_db").and_then(as_f64),
@@ -1423,6 +1432,7 @@ pub fn upgrade_measurements_json(data_file: &Path) -> Result<PathBuf, ModelError
                 "notch_ref_hz",
                 "autoeq_offset_db",
                 "gauss_apodize",
+                "global_fit",
             ] {
                 if let Some(v) = defs.get(field) {
                     cfg.entry(field.to_string()).or_insert_with(|| v.clone());
@@ -2059,6 +2069,7 @@ mod tests {
                 target_pts: vec![(20.0, 0.0)],
                 harm_offset: 0.0,
                 gauss_apodize: false,
+                global_fit: false,
                 hf_bypass_hz: 9500.0,
                 hf_taper_start_hz: None,
                 subbass_leak_discount_db: None,
@@ -2127,6 +2138,7 @@ mod tests {
             target_pts: vec![(20.0, 0.0), (20000.0, 0.0)],
             harm_offset: 0.0,
             gauss_apodize: false,
+            global_fit: false,
             hf_bypass_hz: 20000.0,
             hf_taper_start_hz: None,
             subbass_leak_discount_db: None,

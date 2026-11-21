@@ -307,6 +307,7 @@
       "target": "harman_2018",
       "harm_offset": -2.45,
       "gauss_apodize": false,
+      "global_fit": true,
       "hf_bypass_hz": 9100.0,
       "hf_taper_start_hz": 8000.0,
       "subbass_leak_discount_db": 2.88,
@@ -3651,6 +3652,7 @@
       "target": "harman_2018",
       "harm_offset": 0.0,
       "gauss_apodize": true,
+      "global_fit": true,
       "hf_bypass_hz": 8800.0,
       "notch_range_hz": [
         2800.0,
@@ -7391,6 +7393,7 @@
       "target": "harman_2018",
       "harm_offset": 0.0,
       "gauss_apodize": true,
+      "global_fit": true,
       "hf_bypass_hz": 9750.0,
       "notch_range_hz": [
         3400.0,
@@ -11602,6 +11605,7 @@
       "target": "harman_2018",
       "harm_offset": 0.0,
       "gauss_apodize": true,
+      "global_fit": true,
       "hf_bypass_hz": 9200.0,
       "hf_taper_start_hz": 8200.0,
       "subbass_leak_discount_db": 2.5,

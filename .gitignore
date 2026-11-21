@@ -1,5 +1,6 @@
 # Build output and Python bytecode — never source.
-/target/
+target*/
+dist/
 __pycache__/
 *.pyc
 

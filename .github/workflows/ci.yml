@@ -1,0 +1,77 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # `--locked` everywhere: this repository ships binaries, so the committed
+  # Cargo.lock is part of what is being tested.
+  RUSTFLAGS: ""
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig1-dev libfreetype6-dev fonts-dejavu-core
+      - run: cargo fmt --check --all
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo build --locked --release
+      - run: cargo test --locked
+      - name: CLI capabilities probe (smoke)
+        run: |
+          ./target/release/hypreq --help
+          ./target/release/hypreq --list-models
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo build --locked --release
+      - run: cargo test --locked
+      - name: CLI capabilities probe (smoke)
+        run: |
+          .\target\release\hypreq.exe --help
+          .\target\release\hypreq.exe --list-models
+
+  # The GNU target is what a Windows user without Visual Studio builds, and what
+  # scripts/release.sh cross-builds for the release zip — so prove it from Linux,
+  # where the mingw toolchain is a package and not a shell-PATH lottery.
+  windows-gnu:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mingw-w64 binutils-mingw-w64-x86-64
+      - run: cargo build --locked --release --target x86_64-pc-windows-gnu
+      # Instruction count and FMA bounded check:
+      - name: No FMA contraction in Windows binary
+        run: |
+          f="target/x86_64-pc-windows-gnu/release/hypreq.exe"
+          ins=$(x86_64-w64-mingw32-objdump -d "$f" | grep -cE '^ ') || ins=0
+          fma=$(x86_64-w64-mingw32-objdump -d "$f" | grep -cE '\b(vfmadd|vfmsub|vfnmadd|vfnmsub)' || true)
+          echo "$(basename "$f"): ins=$ins fma=$fma"
+          test "$ins" -gt 1000 || { echo "cannot disassemble $f" >&2; exit 1; }
+          test "$fma" -le 1400 || { echo "Unexpected extra FMA in $f" >&2; exit 1; }

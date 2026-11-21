@@ -3836,19 +3836,23 @@ mod tests {
         // `--bypass-eq --no-tp-limiter` used to derive the input's own path and overwrite
         // the file it had just read.
         let p = default_out_path("in/jingle.wav", "bypass", None);
-        assert_eq!(p, "in/jingle_out.wav");
+        assert_eq!(PathBuf::from(&p), PathBuf::from("in/jingle_out.wav"));
         assert_ne!(PathBuf::from(&p), PathBuf::from("in/jingle.wav"));
         assert_eq!(
-            default_out_path("in/jingle.wav", "bypass", Some("x16")),
-            "in/jingle_tp_x16.wav"
+            PathBuf::from(default_out_path("in/jingle.wav", "bypass", Some("x16"))),
+            PathBuf::from("in/jingle_tp_x16.wav")
         );
         assert_eq!(
-            default_out_path("in/jingle.wav", "dt770_80ohm", Some("x16")),
-            "in/jingle_dt770_80ohm_tp_x16.wav"
+            PathBuf::from(default_out_path(
+                "in/jingle.wav",
+                "dt770_80ohm",
+                Some("x16")
+            )),
+            PathBuf::from("in/jingle_dt770_80ohm_tp_x16.wav")
         );
         assert_eq!(
-            default_out_path("in/jingle.wav", "dt770_80ohm", None),
-            "in/jingle_dt770_80ohm.wav"
+            PathBuf::from(default_out_path("in/jingle.wav", "dt770_80ohm", None)),
+            PathBuf::from("in/jingle_dt770_80ohm.wav")
         );
         // A bare file name still gets a directory: `Path::parent()` is None there.
         assert_eq!(
@@ -3903,12 +3907,22 @@ mod tests {
     #[test]
     fn the_mpv_snippet_names_a_path_that_does_not_exist_yet() {
         let p = mpv_snippet_path("not/written/yet/ir.wav");
-        assert!(p.starts_with('/'), "must be absolute, got {p}");
+        if cfg!(windows) {
+            assert!(
+                p.contains("\\:") || p.starts_with('/'),
+                "must be absolute on Windows, got {p}"
+            );
+        } else {
+            assert!(p.starts_with('/'), "must be absolute, got {p}");
+        }
         assert!(
             p.ends_with("/not/written/yet/ir.wav"),
             "must keep the given path, got {p}"
         );
-        assert!(!p.contains('\\'), "no backslashes may survive, got {p}");
+        assert!(
+            !p.replace("\\:", "").contains('\\'),
+            "no unescaped backslashes may survive, got {p}"
+        );
 
         // A drive letter is escaped, not rewritten: `C:/x` becomes `C\:/x`.
         let win = mpv_snippet_path("C:/eq/ir.wav");
@@ -3918,7 +3932,7 @@ mod tests {
         );
         // An absolute input is left alone apart from the separator walk.
         let abs = mpv_snippet_path("/tmp/already/absolute.wav");
-        assert_eq!(abs, "/tmp/already/absolute.wav");
+        assert_eq!(abs.replace('\\', "/"), "/tmp/already/absolute.wav");
     }
 
     #[test]

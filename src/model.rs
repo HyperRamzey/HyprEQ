@@ -1679,10 +1679,15 @@ mod tests {
     /// A scratch directory unique to this test: `cargo test` runs tests in parallel in one
     /// process, so a name keyed only on the pid would collide across tests.
     fn scratch(name: &str) -> PathBuf {
+        let tname = std::thread::current()
+            .name()
+            .unwrap_or("t")
+            .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
         let dir = std::env::temp_dir().join(format!(
-            "hypreq_{}_{:?}",
+            "hypreq_{}_{}_{}",
             name,
-            std::thread::current().name().unwrap_or("t")
+            std::process::id(),
+            tname
         ));
         fs::create_dir_all(&dir).unwrap();
         dir

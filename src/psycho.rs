@@ -113,28 +113,6 @@ pub struct PprScore {
     pub mean_err_db: f64,
 }
 
-/// Olive, Welti & Khonsaripour (2017/2018) Predicted Preference Rating on 1/48-octave spacing.
-///
-/// Form as published — US 2019/0087739 A1 (*Linear model to predict listener preference ratings of
-/// headphones*, Olive, Welti & Khonsaripour, Harman International, priority 2017-09-15), claims
-/// 11–13 and 20, which give all three predictors explicitly:
-///
-/// - `AS = SUM[(ln x − ln x̄)(y − ȳ)] / SUM[(ln x − ln x̄)²]` — a regression of the deviation on the
-///   **natural** logarithm of frequency. Regressing on log₁₀ instead scales the slope by ln 10 ≈
-///   2.302585, so every `AS`-weighted penalty is over-applied by that factor.
-/// - `SD = sqrt(SUM (y − ȳ)² / (n − 1))` — the sample standard deviation (the `n − 1` here is what
-///   this function's `n - 1.0` divisor is).
-/// - `ME_40Hz–10kHz = SUM |y_i| / n` — the mean of the **absolute** deviations. `|mean y|` is a
-///   different statistic entirely: boosts and cuts of similar size cancel, so a curve thrashing
-///   ±6 dB scores like a flat one on the term that exists to catch exactly that.
-///
-/// Ranges as published: `OverEar` scores `s, g` over 50 Hz–10 kHz as
-/// `114.49 − 12.62·s − 15.52·AS`; `InEar` scores `s, g` over 20 Hz–10 kHz and `m` over 40 Hz–10 kHz
-/// as `68.685 − 3.238·s − 4.473·AS − 2.658·ME`.
-///
-/// `error_db` is the headphone response error curve — the equalized magnitude response minus its
-/// design target — not a rig-tracking residual. See [`crate::verify::psycho_summary`].
-#[must_use]
 enum PprSegment {
     Curve {
         f_min: f64,
@@ -172,7 +150,27 @@ impl PprSegment {
     }
 }
 
-/// Score a candidate error curve against Harman preference models.
+/// Olive, Welti & Khonsaripour (2017/2018) Predicted Preference Rating on 1/48-octave spacing.
+///
+/// Form as published — US 2019/0087739 A1 (*Linear model to predict listener preference ratings of
+/// headphones*, Olive, Welti & Khonsaripour, Harman International, priority 2017-09-15), claims
+/// 11–13 and 20, which give all three predictors explicitly:
+///
+/// - `AS = SUM[(ln x − ln x̄)(y − ȳ)] / SUM[(ln x − ln x̄)²]` — a regression of the deviation on the
+///   **natural** logarithm of frequency. Regressing on log₁₀ instead scales the slope by ln 10 ≈
+///   2.302585, so every `AS`-weighted penalty is over-applied by that factor.
+/// - `SD = sqrt(SUM (y − ȳ)² / (n − 1))` — the sample standard deviation (the `n − 1` here is what
+///   this function's `n - 1.0` divisor is).
+/// - `ME_40Hz–10kHz = SUM |y_i| / n` — the mean of the **absolute** deviations. `|mean y|` is a
+///   different statistic entirely: boosts and cuts of similar size cancel, so a curve thrashing
+///   ±6 dB scores like a flat one on the term that exists to catch exactly that.
+///
+/// Ranges as published: `OverEar` scores `s, g` over 50 Hz–10 kHz as
+/// `114.49 − 12.62·s − 15.52·AS`; `InEar` scores `s, g` over 20 Hz–10 kHz and `m` over 40 Hz–10 kHz
+/// as `68.685 − 3.238·s − 4.473·AS − 2.658·ME`.
+///
+/// `error_db` is the headphone response error curve — the equalized magnitude response minus its
+/// design target — not a rig-tracking residual. See [`crate::verify::psycho_summary`].
 ///
 /// Returns `None` if the input curve is empty, has fewer than two valid knots,
 /// or produces degenerate statistics.

@@ -597,8 +597,8 @@ fn vertex(a: f64, b: f64, c: f64) -> f64 {
 
 /// Streaming true-peak detector for one channel.
 ///
-/// The only state is the filter's shift register plus the last two interpolated
-/// magnitudes (needed by the peak refinement), so feeding one block, many blocks, or one
+/// The only state is the filter's shift register plus the last two signed interpolated
+/// samples (needed by the peak refinement), so feeding one block, many blocks, or one
 /// sample at a time gives identical readings: chunk-size invariance falls out of the
 /// structure instead of being a special case that has to be tested into existence.
 pub struct Detector {

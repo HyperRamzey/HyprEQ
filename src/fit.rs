@@ -415,10 +415,10 @@ pub fn beta(s_db: f64, policy: &Policy) -> f64 {
 /// `β = 0` gives `|D|/|S|`, the plain inversion, i.e. `target_db − raw_db`: the curve the
 /// engine writes today. `β → ∞` gives 1, i.e. 0 dB. Both ends are asserted in the tests, and
 /// the second one is the reason this form was chosen over the one that penalises `‖G‖²`.
-#[must_use]
 ///
 /// `raw_db` is the measurement *relative to its own reference level* — see [`reference_db`]. The
 /// load is compared against `|S|²`, so an absolute reading is a policy change in disguise.
+#[must_use]
 #[cfg(test)]
 pub fn regularized_gain_db(raw_db: f64, target_db: f64, beta: f64) -> f64 {
     if !raw_db.is_finite() || !target_db.is_finite() {

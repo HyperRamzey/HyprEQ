@@ -2591,13 +2591,18 @@ fn ensemble_stage(
     recorded: &[Vec<hypreq::model::Point>],
 ) -> Result<Option<EnsembleOutcome>, Error> {
     let usable = |rows: &[hypreq::model::Point]| -> Vec<(f64, f64)> {
-        rows.iter()
+        let raw: Vec<(f64, f64)> = rows
+            .iter()
             .filter_map(|p| {
                 let f = *p.first()?;
                 let g = hypreq::model::point_gain(p);
                 (f.is_finite() && f > 0.0 && g.is_finite()).then_some((f, g))
             })
-            .collect()
+            .collect();
+        // Sort/dedup and level-align each placement curve at 1 kHz before ensemble statistics so
+        // constant SPL/gain offsets between captures never inflate `sigma_r` or bias the median.
+        let sorted = hypreq::model::sort_and_dedup_pairs(&raw);
+        normalize_ensemble_curve(&sorted)
     };
     let mut curves: Vec<Vec<(f64, f64)>> = Vec::new();
     let from = if args.ensemble_csv.is_empty() {
@@ -2641,14 +2646,31 @@ fn ensemble_stage(
             "--ensemble-csv: spread needs at least two placement curves, one was usable",
         ));
     }
-    let f_min = curves
+    // Build the common log grid over the curves' shared frequency overlap so flat PCHIP
+    // endpoint clamping on mismatched bounds does not manufacture artificial edge spread;
+    // fall back to the union only if the frequency spans are disjoint.
+    let overlap_min = curves
         .iter()
-        .flat_map(|c| c.iter().map(|p| p.0))
-        .fold(f64::INFINITY, f64::min);
-    let f_max = curves
-        .iter()
-        .flat_map(|c| c.iter().map(|p| p.0))
+        .filter_map(|c| c.first().map(|p| p.0))
         .fold(f64::NEG_INFINITY, f64::max);
+    let overlap_max = curves
+        .iter()
+        .filter_map(|c| c.last().map(|p| p.0))
+        .fold(f64::INFINITY, f64::min);
+    let (f_min, f_max) =
+        if overlap_min.is_finite() && overlap_max.is_finite() && overlap_min < overlap_max {
+            (overlap_min, overlap_max)
+        } else {
+            let lo = curves
+                .iter()
+                .flat_map(|c| c.iter().map(|p| p.0))
+                .fold(f64::INFINITY, f64::min);
+            let hi = curves
+                .iter()
+                .flat_map(|c| c.iter().map(|p| p.0))
+                .fold(f64::NEG_INFINITY, f64::max);
+            (lo, hi)
+        };
     let grid = hypreq::global_fit::uniform_log_grid(f_min, f_max, 48);
     let mode = if args.ensemble_alpha > 0.0 {
         hypreq::robust_fit::EnsembleMode::UpperVariance {
@@ -2888,7 +2910,7 @@ fn synth_stage(
             // inter-knot peaks and resonance. All-cut filters cap max_boost at 0.0 dB so
             // the preamp never becomes positive.
             let nyq = 0.5 * f64::from(fs);
-            let mut eval_grid = hypreq::fft::geomspace(20.0_f64.min(nyq), nyq, 512);
+            let mut eval_grid = hypreq::fft::geomspace(20.0_f64.min(nyq * 0.5).max(1.0), nyq, 512);
             eval_grid.push(0.0);
             eval_grid.push(nyq);
             eval_grid.extend(cf.iter().copied());
@@ -2942,7 +2964,7 @@ fn synth_stage(
                     })?;
             let pred = bank.eval_mag_db(&cf);
             let nyq = 0.5 * f64::from(fs);
-            let mut eval_grid = hypreq::fft::geomspace(20.0_f64.min(nyq), nyq, 512);
+            let mut eval_grid = hypreq::fft::geomspace(20.0_f64.min(nyq * 0.5).max(1.0), nyq, 512);
             eval_grid.push(0.0);
             eval_grid.push(nyq);
             eval_grid.extend(cf.iter().copied());
@@ -3865,10 +3887,11 @@ mod tests {
     fn aliases_never_shadow_a_loaded_model() {
         // `-H` resolves aliases before plain keys, so an alias that collides with a model
         // key would make that model unreachable under its own name.
-        let shipped = filter_aliases(|n| ["jbl770nc", "dt770_80", "ft1pro"].contains(&n));
+        let shipped = filter_aliases(|n| ["jbl770nc", "dt770_80", "ft1pro", "g733"].contains(&n));
         assert_eq!(shipped.len(), MODEL_ALIASES.len());
 
-        let shadowed = filter_aliases(|n| ["dt770", "jbl770nc", "dt770_80", "ft1pro"].contains(&n));
+        let shadowed =
+            filter_aliases(|n| ["dt770", "jbl770nc", "dt770_80", "ft1pro", "g733"].contains(&n));
         assert!(
             !shadowed.iter().any(|(a, _)| *a == "dt770"),
             "a model named 'dt770' is unreachable while its alias is active: {shadowed:?}"
@@ -4399,8 +4422,8 @@ mod tests {
                 );
                 let content = std::fs::read_to_string(&path).unwrap();
                 assert!(
-                    content.contains("preamp_db:"),
-                    "parallel IIR must export preamp: {content}"
+                    content.contains("# baked_preamp_db:") && !content.contains("\npreamp_db:"),
+                    "parallel IIR must comment baked preamp, not emit unbaked key: {content}"
                 );
                 std::fs::remove_file(path).ok();
             }
@@ -5743,6 +5766,40 @@ mod tests {
         .expect_err("one explicit CSV must be refused, not run as a 1-curve ensemble");
         assert!(e.to_string().contains("at least two"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ensemble_stage_normalises_spl_offsets_and_uses_frequency_overlap() {
+        let args = argv(&["-H", "hd6xx"]);
+        let base: Vec<hypreq::model::Point> = vec![
+            vec![20.0, 2.0],
+            vec![1000.0, 0.0],
+            vec![4000.0, -3.0],
+            vec![18000.0, -5.0],
+        ];
+        // Identical shape shifted up by +10 dB SPL and extending to 20 kHz.
+        let shifted: Vec<hypreq::model::Point> = vec![
+            vec![20.0, 12.0],
+            vec![1000.0, 10.0],
+            vec![4000.0, 7.0],
+            vec![18000.0, 5.0],
+            // Point extending to 20 kHz whose slope matches PCHIP's endpoint derivative
+            // at 18 kHz so the shape on [20, 18000] is identical between both curves:
+            vec![20000.0, 4.9200251782271],
+        ];
+        let out = ensemble_stage(&args, &[base, shifted])
+            .expect("valid ensemble")
+            .expect("two curves");
+        let max_sig = out.sigma.iter().map(|p| p.1).fold(0.0_f64, f64::max);
+        assert!(
+            max_sig < 1e-6,
+            "a pure +10 dB SPL offset must not inflate sigma_r (got {max_sig:.4} dB)"
+        );
+        let f_hi = out.raw.last().map_or(0.0, |p| p.0);
+        assert!(
+            f_hi <= 18000.0 + 1e-6,
+            "common grid must use the overlap upper bound (18 kHz), got {f_hi:.1} Hz"
+        );
     }
 
     /// `--target-family` used to default to the literal `"harman"`, and the preset-override

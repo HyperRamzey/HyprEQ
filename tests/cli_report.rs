@@ -438,15 +438,15 @@ fn report_leaves_the_audio_alone_and_split_changes_it() {
         !out_split.contains("EQ FIR (dt770_80ohm)"),
         "split printed a shared filter it did not apply:\n{out_split}"
     );
-    // Re-pinned with the continuous 0.20-octave raised-cosine blend skirt: with smooth edge
-    // transitions replacing the discontinuous brickwall cutoff, 8 left knots and 11 right knots
-    // are held/blended in the notch zone, moving the centre in 11 knots.
+    // Re-pinned with the 479-bin placement ensemble grid for dt770_80: with smooth edge
+    // transitions in the notch zone, 35 left knots and 41 right knots are held/blended,
+    // moving the centre in 41 knots.
     assert!(
-        out_split.contains("Centre            : moved in 11 knot(s)"),
+        out_split.contains("Centre            : moved in 41 knot(s)"),
         "split did not account for the ceiling biting:\n{out_split}"
     );
     assert!(
-        out_split.contains("Notch cap         : held 8 left / 11 right knot(s)"),
+        out_split.contains("Notch cap         : held 35 left / 41 right knot(s)"),
         "the ceiling's accounting is missing:\n{out_split}"
     );
 
@@ -1500,18 +1500,18 @@ fn the_shipped_database_declares_its_acoustic_fixture_and_default_recipe() {
     );
     assert_eq!(
         text.matches("\"fixture\": \"gras_kb5000\"").count(),
-        3,
-        "all three shipped models must declare the acoustic ear of their rig"
+        4,
+        "all four shipped models must declare the acoustic ear of their rig"
     );
     assert_eq!(
         text.matches("\"target_preset\": \"targets/harman_kb5000_7.json\"")
             .count(),
-        3,
+        4,
         "every shipped model's default target is the Olive & Clark recipe"
     );
     assert_eq!(
         text.matches("\"fixture_conflict_ok\":").count(),
-        3,
+        4,
         "the built-in-curve fallback path needs its recorded reason, or --no-target-preset refuses"
     );
     assert!(
@@ -1525,7 +1525,7 @@ fn the_shipped_database_declares_its_acoustic_fixture_and_default_recipe() {
     let stdout = run("shipped-fixture-list", &["--list-models"]);
     assert_eq!(
         stdout.matches("[GRAS KB5000]").count(),
-        3,
+        4,
         "every shipped model lists its acoustic fixture:\n{stdout}"
     );
     // The opted-out (built-in harman_2018) path: recorded conflict, so it runs without a note -

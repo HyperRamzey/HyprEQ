@@ -33,19 +33,16 @@ pub const DEFAULT_DATA_FILE: &str = "measurements.json";
 pub const DEFAULT_MODELS_DIR: &str = "models";
 
 /// Alternate spellings of model keys. Applied only when the target exists.
-pub const MODEL_ALIASES: [(&str, &str); 5] = [
+pub const MODEL_ALIASES: [(&str, &str); 7] = [
     ("fiio_ft1_pro", "ft1pro"),
     ("ft1_pro", "ft1pro"),
     ("dt770", "dt770_80"),
     ("dt770_80ohm", "dt770_80"),
     ("jbl_770nc", "jbl770nc"),
+    ("logitech_g733", "g733"),
+    ("g733_lightspeed", "g733"),
 ];
 
-/// Built-in per-model metadata (`short_title`, `notch_ref_hz`, `autoeq_offset_db`,
-/// `gauss_apodize`, `plot_meta`), keyed by model. Mirrors
-/// `hypreq.py::DEFAULT_MODEL_METADATA`.
-#[must_use]
-#[inline]
 /// Gain of one raw-curve row, whatever shape the row has.
 ///
 /// A row is `[freq, gain]`, or `[freq, left, right]` when the database carries the two ears
@@ -53,6 +50,8 @@ pub const MODEL_ALIASES: [(&str, &str); 5] = [
 /// 1 kHz normalisation and the control-point derivation use. Public so that *every* reader of
 /// `raw_pts` agrees: a site that takes `p.last()` instead silently scores the right ear only,
 /// and a model whose ears differ stops meaning the same thing in two halves of one report.
+#[must_use]
+#[inline]
 pub fn point_gain(p: &[f64]) -> f64 {
     if p.len() == 3 {
         (p[1] + p[2]) / 2.0
@@ -61,6 +60,9 @@ pub fn point_gain(p: &[f64]) -> f64 {
     }
 }
 
+/// Built-in per-model metadata (`short_title`, `notch_ref_hz`, `autoeq_offset_db`,
+/// `gauss_apodize`, `plot_meta`), keyed by model. Mirrors
+/// `hypreq.py::DEFAULT_MODEL_METADATA`.
 static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
     json!({
       "jbl770nc": {
@@ -2309,7 +2311,7 @@ mod tests {
                 .expect("the shipped measurements.json must load from the crate root");
         assert_eq!(
             db.keys(),
-            vec!["jbl770nc", "dt770_80", "ft1pro"],
+            vec!["jbl770nc", "dt770_80", "ft1pro", "g733"],
             "model order must be the file's key order, not alphabetical"
         );
         assert_eq!(db.resolve("all"), Some("all"));

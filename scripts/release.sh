@@ -55,6 +55,8 @@ stage_linux="$dist/hypreq-$V-linux-x86_64"
 mkdir -p "$stage_linux"
 install -m755 "$bin/hypreq" "$stage_linux/"
 cp README.md LICENSE measurements.json "$stage_linux/"
+mkdir -p "$stage_linux/targets"
+cp targets/README.md targets/harman_kb5000_7.json targets/harman_beta_2024_5128.json "$stage_linux/targets/"
 tarball "$dist" "$dist/hypreq-$V-linux-x86_64.tar.gz" "hypreq-$V-linux-x86_64"
 rm -rf "$stage_linux"
 
@@ -82,8 +84,11 @@ PY
 }
 
 [[ -f $W/hypreq.exe ]] || { echo "missing $W/hypreq.exe" >&2; exit 1; }
-x86_64-w64-mingw32-strip --strip-all "$W/hypreq.exe" 2>/dev/null || true
-zero_pe_stamps "$W/hypreq.exe"
+# Stage a stripped copy for packaging; keep $W/hypreq.exe unstripped so the FMA guard below
+# can resolve symbol names on Windows too (mirroring Linux $L/hypreq vs $bin/hypreq).
+install -m755 "$W/hypreq.exe" "$bin/hypreq.exe"
+x86_64-w64-mingw32-strip --strip-all "$bin/hypreq.exe" 2>/dev/null || true
+zero_pe_stamps "$bin/hypreq.exe"
 
 cat >"$dist/README-WINDOWS.txt" <<EOF
 HyprEQ $V — Windows x86_64
@@ -94,14 +99,15 @@ for AutoEq headphone measurements.
 Quick Start:
   hypreq.exe --help
   hypreq.exe --list-models
-  hypreq.exe -H ft1pro
-  hypreq.exe -H all
+  hypreq.exe -H ft1pro --no-target-preset
+  hypreq.exe -H all --no-target-preset
 
-The executable looks for 'measurements.json' in the current working directory,
-or specify an alternate location with --data-file <PATH>.
+The executable looks for 'measurements.json' and 'targets/' in the current working
+directory, or specify an alternate location with --data-file <PATH>.
+See targets/README.md to import the Olive & Clark KB5000_7 baseline CSV for default runs.
 EOF
 
-python3 - "$W" "$dist" "$V" "$here" <<'PY'
+python3 - "$bin" "$dist" "$V" "$here" <<'PY'
 import pathlib, sys, zipfile
 w, d, v, h = map(pathlib.Path, sys.argv[1:5])
 archive_name = f"hypreq-{v}-windows-x86_64"
@@ -111,7 +117,14 @@ with zipfile.ZipFile(d / f"{archive_name}.zip", "w", zipfile.ZIP_DEFLATED) as z:
         info.external_attr = 0o755 << 16
         info.compress_type = zipfile.ZIP_DEFLATED
         z.writestr(info, (w / n).read_bytes())
-    for doc in ("README.md", "LICENSE", "measurements.json"):
+    for doc in (
+        "README.md",
+        "LICENSE",
+        "measurements.json",
+        "targets/README.md",
+        "targets/harman_kb5000_7.json",
+        "targets/harman_beta_2024_5128.json",
+    ):
         info = zipfile.ZipInfo(f"{archive_name}/{doc}", date_time=(1980, 1, 1, 0, 0, 0))
         info.external_attr = 0o644 << 16
         info.compress_type = zipfile.ZIP_DEFLATED
@@ -137,7 +150,7 @@ def scan(f, is_win=False):
     fma = 0
     non_fft_fma = 0
     curr = ""
-    fma_re = re.compile(r"\b(vfmadd|vfmsub|vfnmadd|vfnmsub)")
+    fma_re = re.compile(r"\b(vfmadd|vfmsub|vfnmadd|vfnmsub|vfmaddsub|vfmsubadd)")
     for line in proc.stdout:
         if line.endswith(":\n") and not line.startswith(" "):
             curr = line.strip()[:-1]
@@ -147,11 +160,11 @@ def scan(f, is_win=False):
                 fma += 1
                 if "rustfft" not in curr:
                     non_fft_fma += 1
+    proc.wait()
     name = f.split("/")[-1]
     print(f"  {name:40s} ins={ins:<7d} total_fma={fma} (non_rustfft={non_fft_fma})")
-    assert ins > 1000, f"Cannot disassemble {f}"
-    if not is_win:
-        assert non_fft_fma == 0, f"FMA contraction found in hypreq ({non_fft_fma} instructions)!"
+    assert proc.returncode == 0 and ins > 1000, f"Cannot disassemble {f}"
+    assert non_fft_fma == 0, f"FMA contraction found outside rustfft in {f} ({non_fft_fma} instructions)!"
     assert fma <= 1400, f"Unexpected extra FMA instructions ({fma})!"
 
 scan(sys.argv[1], False)

@@ -1683,12 +1683,8 @@ mod tests {
             .name()
             .unwrap_or("t")
             .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
-        let dir = std::env::temp_dir().join(format!(
-            "hypreq_{}_{}_{}",
-            name,
-            std::process::id(),
-            tname
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("hypreq_{}_{}_{}", name, std::process::id(), tname));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

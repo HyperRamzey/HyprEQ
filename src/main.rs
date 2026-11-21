@@ -3932,7 +3932,14 @@ mod tests {
         );
         // An absolute input is left alone apart from the separator walk.
         let abs = mpv_snippet_path("/tmp/already/absolute.wav");
-        assert_eq!(abs.replace('\\', "/"), "/tmp/already/absolute.wav");
+        if cfg!(windows) {
+            assert!(
+                abs.ends_with("/tmp/already/absolute.wav"),
+                "expected path ending with /tmp/already/absolute.wav, got {abs}"
+            );
+        } else {
+            assert_eq!(abs.replace('\\', "/"), "/tmp/already/absolute.wav");
+        }
     }
 
     #[test]

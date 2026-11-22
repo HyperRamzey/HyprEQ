@@ -172,27 +172,7 @@ pub fn synthesize_minimum_phase_ir(
         )));
     }
 
-    let f_nodes: Vec<f64> = ctrl_pts.iter().map(|p| p.0).collect();
-    let g_nodes: Vec<f64> = ctrl_pts.iter().map(|p| p.1).collect();
-    let curve = Pchip::new(&f_nodes, &g_nodes);
-
-    let fs_f = fs as f64;
-    let freqs = rfftfreq(n_fft, fs_f);
-    let mut target_db: Vec<f64> = freqs.iter().map(|&f| curve.eval(f)).collect();
-    // DC is the lowest sorted knot's gain, evaluated at 0 Hz (which Pchip clamps to its
-    // lowest sorted frequency knot f_min).
-    target_db[0] = curve.eval(0.0);
-
-    if gauss_apodize {
-        let (f_start, width) = gauss_apodize_params(fs);
-        for (f, db) in freqs.iter().zip(target_db.iter_mut()) {
-            if *f > f_start {
-                let x = (f - f_start) / width;
-                *db += -3.0103 * x * x;
-            }
-        }
-    }
-
+    let target_db = eval_target_db(ctrl_pts, fs, n_fft, gauss_apodize);
     let max_boost_db = target_db.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let preamp_db = headroom_db - max_boost_db;
 
@@ -200,57 +180,7 @@ pub fn synthesize_minimum_phase_ir(
         .iter()
         .map(|db| 10f64.powf((db + preamp_db) / 20.0))
         .collect();
-    let log_mag: Vec<f64> = mag_lin.iter().map(|m| m.max(1e-18).ln()).collect();
-
-    // Hermitian extension of a *real, even* log-magnitude: log_mag[-2:0:-1] mirrors
-    // the interior bins, so the cepstrum comes out real and the fold is exact.
-    let bins = log_mag.len();
-    let mut log_spec_full = Vec::with_capacity(n_fft);
-    log_spec_full.extend_from_slice(&log_mag);
-    for k in (1..bins - 1).rev() {
-        log_spec_full.push(log_mag[k]);
-    }
-    if log_spec_full.len() != n_fft {
-        return Err(IrError(format!(
-            "internal: spectrum length {} != n_fft {n_fft}",
-            log_spec_full.len()
-        )));
-    }
-
-    let cepstrum: Vec<f64> = ifft(
-        &log_spec_full
-            .iter()
-            .map(|&v| Complex64::new(v, 0.0))
-            .collect::<Vec<_>>(),
-    )
-    .iter()
-    .map(|c| c.re)
-    .collect();
-
-    // Cepstral lifter: keep n=0 and n=n/2 once, the causal half twice.
-    let half = n_fft / 2;
-    // The one-sided lift: DC and Nyquist keep their weight, the lower half doubles so the
-    // inverse transform comes out real, and the upper half is dropped.
-    let lifted: Vec<Complex64> = cepstrum
-        .iter()
-        .enumerate()
-        .map(|(n, &c)| {
-            let w = if n == 0 || n == half {
-                1.0
-            } else if n < half {
-                2.0
-            } else {
-                0.0
-            };
-            Complex64::new(c * w, 0.0)
-        })
-        .collect();
-
-    // Minimum-phase spectrum = exp(FFT(lifted cepstrum)), then an inverse transform.
-    // The order is the algorithm: `exp` of the cepstrum is not a spectrum at all, and
-    // skipping this forward transform costs exactly the preamp (the filter comes out
-    // a near-unity delta instead of the headroom-scaled one).
-    let min_phase_spec: Vec<Complex64> = crate::fft::fft(&lifted).iter().map(|c| c.exp()).collect();
+    let min_phase_spec = minimum_phase_spectrum(&mag_lin, n_fft)?;
     let ir_full: Vec<f64> = ifft(&min_phase_spec).iter().map(|c| c.re).collect();
 
     let mut ir = ir_full[..n_taps].to_vec();
@@ -336,6 +266,224 @@ pub fn synthesize_stereo_minimum_phase_ir(
     scale_channel(&mut left);
     scale_channel(&mut right);
     Ok((left, right))
+}
+
+/// Evaluate a PCHIP control curve on the `rfftfreq(n_fft, fs)` grid with optional
+/// ultrasonic Gaussian apodization.
+fn eval_target_db(ctrl_pts: &[(f64, f64)], fs: u32, n_fft: usize, gauss_apodize: bool) -> Vec<f64> {
+    let f_nodes: Vec<f64> = ctrl_pts.iter().map(|p| p.0).collect();
+    let g_nodes: Vec<f64> = ctrl_pts.iter().map(|p| p.1).collect();
+    let curve = Pchip::new(&f_nodes, &g_nodes);
+
+    let fs_f = fs as f64;
+    let freqs = rfftfreq(n_fft, fs_f);
+    let mut target_db: Vec<f64> = freqs.iter().map(|&f| curve.eval(f)).collect();
+    // DC is the lowest sorted knot's gain, evaluated at 0 Hz (which Pchip clamps to its
+    // lowest sorted frequency knot f_min).
+    target_db[0] = curve.eval(0.0);
+
+    if gauss_apodize {
+        let (f_start, width) = gauss_apodize_params(fs);
+        for (f, db) in freqs.iter().zip(target_db.iter_mut()) {
+            if *f > f_start {
+                let x = (f - f_start) / width;
+                *db += -3.0103 * x * x;
+            }
+        }
+    }
+    target_db
+}
+
+/// Hilbert-cepstral full-spectrum minimum-phase reconstruction from a half-spectrum linear magnitude.
+fn minimum_phase_spectrum(mag_lin: &[f64], n_fft: usize) -> Result<Vec<Complex64>, IrError> {
+    let log_mag: Vec<f64> = mag_lin.iter().map(|m| m.max(1e-18).ln()).collect();
+
+    // Hermitian extension of a *real, even* log-magnitude: log_mag[-2:0:-1] mirrors
+    // the interior bins, so the cepstrum comes out real and the fold is exact.
+    let bins = log_mag.len();
+    let mut log_spec_full = Vec::with_capacity(n_fft);
+    log_spec_full.extend_from_slice(&log_mag);
+    for k in (1..bins - 1).rev() {
+        log_spec_full.push(log_mag[k]);
+    }
+    if log_spec_full.len() != n_fft {
+        return Err(IrError(format!(
+            "internal: spectrum length {} != n_fft {n_fft}",
+            log_spec_full.len()
+        )));
+    }
+
+    let cepstrum: Vec<f64> = ifft(
+        &log_spec_full
+            .iter()
+            .map(|&v| Complex64::new(v, 0.0))
+            .collect::<Vec<_>>(),
+    )
+    .iter()
+    .map(|c| c.re)
+    .collect();
+
+    // Cepstral lifter: keep n=0 and n=n/2 once, the causal half twice.
+    let half = n_fft / 2;
+    let lifted: Vec<Complex64> = cepstrum
+        .iter()
+        .enumerate()
+        .map(|(n, &c)| {
+            let w = if n == 0 || n == half {
+                1.0
+            } else if n < half {
+                2.0
+            } else {
+                0.0
+            };
+            Complex64::new(c * w, 0.0)
+        })
+        .collect();
+
+    Ok(crate::fft::fft(&lifted).iter().map(|c| c.exp()).collect())
+}
+
+/// Synthesize a phase-matched stereo FIR pair `(left, right, shared_delay_samples)` that delivers
+/// per-ear magnitude correction with zero interaural phase / group-delay mismatch.
+///
+/// Independent minimum-phase L/R filters ([`synthesize_stereo_minimum_phase_ir`]) convert any
+/// low-frequency L/R magnitude trim into an interaural group-delay difference via the Hilbert
+/// transform; Møller et al. (JAES 55(3), pp. 115–134, March 2007) showed that >35 µs of dichotic
+/// low-frequency group-delay mismatch shifts the stereo image laterally independent of program
+/// material.
+///
+/// Here both channels share the minimum-phase response of the geometric-mean magnitude
+/// `M_c(f) = sqrt(M_L(f) * M_R(f))` and multiply it by real, zero-phase differential ratios
+/// `M_L(f) / M_c(f)` and `M_R(f) / M_c(f)`. Both full responses are shifted by an identical causal
+/// modeling delay `delay = (n_taps / 2).max(1)` so the symmetric differential pre-ringing is held
+/// cleanly inside `[0..n_taps]`, keeping interaural group delay near 0 µs while preserving exact
+/// L/R magnitude targets.
+#[allow(clippy::too_many_arguments)]
+pub fn synthesize_stereo_phase_matched_ir(
+    left_ctrl: &[(f64, f64)],
+    right_ctrl: &[(f64, f64)],
+    fs: u32,
+    n_fft: usize,
+    n_taps: usize,
+    n_tail: usize,
+    headroom_db: f64,
+    gauss_apodize: bool,
+    kaiser_beta: f64,
+) -> Result<(IrResult, IrResult, usize), IrError> {
+    if fs == 0 {
+        return Err(IrError("sample rate must be positive (got 0)".to_string()));
+    }
+    if left_ctrl.len() < 2 || right_ctrl.len() < 2 {
+        return Err(IrError(
+            "control curve needs at least two knots to interpolate".to_string(),
+        ));
+    }
+    if n_fft < 4 || !n_fft.is_multiple_of(2) {
+        return Err(IrError(format!(
+            "n_fft must be even and >= 4 (got {n_fft})"
+        )));
+    }
+    if n_taps < 4 || n_taps > n_fft {
+        return Err(IrError(format!(
+            "n_taps must be in 4..=n_fft for phase-matched stereo (got {n_taps} taps, n_fft {n_fft})"
+        )));
+    }
+
+    let target_l_db = eval_target_db(left_ctrl, fs, n_fft, gauss_apodize);
+    let target_r_db = eval_target_db(right_ctrl, fs, n_fft, gauss_apodize);
+    let max_l = target_l_db
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max_r = target_r_db
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let shared_max_boost = max_l.max(max_r);
+    let shared_preamp = headroom_db - shared_max_boost;
+
+    let mag_l: Vec<f64> = target_l_db
+        .iter()
+        .map(|db| 10f64.powf((db + shared_preamp) / 20.0))
+        .collect();
+    let mag_r: Vec<f64> = target_r_db
+        .iter()
+        .map(|db| 10f64.powf((db + shared_preamp) / 20.0))
+        .collect();
+    // Compute geometric-mean magnitude and differential ratios directly in dB space to avoid
+    // intermediate `mag_l * mag_r` f64 underflow on deeply apodized ultrasonic bins.
+    let mag_c: Vec<f64> = target_l_db
+        .iter()
+        .zip(&target_r_db)
+        .map(|(&l_db, &r_db)| 10f64.powf((0.5 * (l_db + r_db) + shared_preamp) / 20.0))
+        .collect();
+
+    let hc_full = minimum_phase_spectrum(&mag_c, n_fft)?;
+    let half = n_fft / 2;
+    let mut hl_full = Vec::with_capacity(n_fft);
+    let mut hr_full = Vec::with_capacity(n_fft);
+    for (k, &hc) in hc_full.iter().enumerate() {
+        let bin = if k <= half { k } else { n_fft - k };
+        let mc = mag_c[bin];
+        let (dl, dr) = if mc > 1e-18 {
+            let half_diff_db = 0.5 * (target_l_db[bin] - target_r_db[bin]);
+            let ratio = 10f64.powf(half_diff_db / 20.0);
+            (ratio, 1.0 / ratio)
+        } else {
+            (1.0, 1.0)
+        };
+        hl_full.push(hc * dl);
+        hr_full.push(hc * dr);
+    }
+
+    let ir_l_full: Vec<f64> = ifft(&hl_full).iter().map(|c| c.re).collect();
+    let ir_r_full: Vec<f64> = ifft(&hr_full).iter().map(|c| c.re).collect();
+
+    // Center the impulse symmetrically at `n_taps / 2` with matched leading/trailing Kaiser
+    // tapers so the zero-phase differential filter `D_L(f) = sqrt(M_L / M_R)` stays symmetric
+    // around `delay`, avoiding asymmetric truncation phase shift at low frequencies.
+    let delay = (n_taps / 2).max(1);
+    let edge_tail = n_tail.min(delay / 4);
+    let lead_tail = edge_tail;
+    let trail_tail = edge_tail;
+
+    let finish = |full: &[f64], mag_lin: Vec<f64>, max_boost_db: f64| -> IrResult {
+        let mut ir = Vec::with_capacity(n_taps);
+        for i in 0..n_taps {
+            ir.push(full[(i + n_fft - delay) % n_fft]);
+        }
+        // Symmetrically centered IR has both leading and trailing edges; report worst-case floor.
+        let unwindowed_floor_dbfs = db_floor(&ir[..ir.len().min(128)], 128).max(db_floor(&ir, 128));
+        if lead_tail > 0 {
+            ir[..lead_tail].reverse();
+            half_kaiser_tail_apply(&mut ir[..lead_tail], lead_tail, kaiser_beta);
+            ir[..lead_tail].reverse();
+        }
+        if trail_tail > 0 {
+            half_kaiser_tail_apply(&mut ir, trail_tail, kaiser_beta);
+        }
+        let windowed_floor_dbfs = db_floor(&ir[..ir.len().min(100)], 100).max(db_floor(&ir, 100));
+        let energy_in = crate::accum::sum_of_squares(&ir);
+        let energy_full = crate::accum::sum_of_squares(full);
+        let energy_pct = if energy_full > 0.0 {
+            energy_in / energy_full * 100.0
+        } else {
+            100.0
+        };
+        IrResult {
+            ir,
+            mag_lin,
+            max_boost_db,
+            preamp_db: shared_preamp,
+            energy_pct,
+            unwindowed_floor_dbfs,
+            windowed_floor_dbfs,
+        }
+    };
+
+    let left = finish(&ir_l_full, mag_l, max_l);
+    let right = finish(&ir_r_full, mag_r, max_r);
+    Ok((left, right, delay))
 }
 
 /// `20·log10(max|last n taps| + eps)` — the decay at the truncation point. The `eps`
@@ -1154,5 +1302,133 @@ mod linear_probe_tests {
         .unwrap_err()
         .to_string();
         assert_eq!(e, "sample rate must be positive (got 0)");
+    }
+
+    #[test]
+    fn phase_matched_stereo_eliminates_dichotic_igd_while_preserving_lr_magnitudes() {
+        // Asymmetric bass shelf (L = +4 dB below 150 Hz, R = 0 dB): independent minimum-phase
+        // L/R filters induce > 35 µs of interaural group delay; phase-matched split must keep
+        // IGD near 0 µs while matching both L and R target magnitudes.
+        let left_ctrl = [
+            (20.0, 4.0),
+            (60.0, 4.0),
+            (120.0, 2.0),
+            (250.0, 0.0),
+            (1000.0, 0.0),
+            (20000.0, 0.0),
+        ];
+        let right_ctrl = [
+            (20.0, 0.0),
+            (60.0, 0.0),
+            (120.0, 0.0),
+            (250.0, 0.0),
+            (1000.0, 0.0),
+            (20000.0, 0.0),
+        ];
+        let (ind_l, ind_r) = synthesize_stereo_minimum_phase_ir(
+            &left_ctrl,
+            &right_ctrl,
+            48000,
+            32768,
+            16384,
+            4096,
+            -1.5,
+            false,
+            16.0,
+        )
+        .expect("independent stereo");
+        let igd_ind = crate::stereo::measure_interaural_group_delay(
+            &ind_l.ir,
+            &ind_r.ir,
+            48000,
+            crate::stereo::IGD_BAND_LO_HZ,
+            crate::stereo::IGD_BAND_HI_HZ,
+        )
+        .expect("ind igd");
+        assert!(
+            igd_ind.exceeds_threshold,
+            "Sabotage check: 4 dB bass mismatch should exceed 35 µs on independent min-phase split (got {:.1} µs)",
+            igd_ind.max_igd_us
+        );
+
+        let (pm_l, pm_r, delay) = synthesize_stereo_phase_matched_ir(
+            &left_ctrl,
+            &right_ctrl,
+            48000,
+            32768,
+            16384,
+            4096,
+            -1.5,
+            false,
+            16.0,
+        )
+        .expect("phase-matched stereo");
+        assert_eq!(delay, 8192);
+        let igd_pm = crate::stereo::measure_interaural_group_delay(
+            &pm_l.ir,
+            &pm_r.ir,
+            48000,
+            crate::stereo::IGD_BAND_LO_HZ,
+            crate::stereo::IGD_BAND_HI_HZ,
+        )
+        .expect("pm igd");
+        assert!(
+            igd_pm.max_igd_us < 1.0 && !igd_pm.exceeds_threshold,
+            "phase-matched stereo should have < 1 µs IGD (got {:.4} µs)",
+            igd_pm.max_igd_us
+        );
+
+        // Verify both L and R realized magnitudes still track their distinct target curves.
+        let n = 32768;
+        let hl = crate::fft::rfft(&pm_l.ir, n);
+        let hr = crate::fft::rfft(&pm_r.ir, n);
+        let freqs = rfftfreq(n, 48000.0);
+        let mut max_err_l = 0.0_f64;
+        let mut max_err_r = 0.0_f64;
+        for (k, &f) in freqs.iter().enumerate() {
+            if (20.0..=20000.0).contains(&f) {
+                let err_l = (20.0 * (hl[k].norm() / pm_l.mag_lin[k]).log10()).abs();
+                let err_r = (20.0 * (hr[k].norm() / pm_r.mag_lin[k]).log10()).abs();
+                max_err_l = max_err_l.max(err_l);
+                max_err_r = max_err_r.max(err_r);
+            }
+        }
+        assert!(max_err_l < 0.02, "left magnitude error {max_err_l:.4} dB");
+        assert!(max_err_r < 0.02, "right magnitude error {max_err_r:.4} dB");
+    }
+
+    #[test]
+    fn phase_matched_stereo_with_identical_ears_produces_identical_irs_and_zero_igd() {
+        let ctrl = [
+            (20.0, 3.0),
+            (100.0, 1.5),
+            (1000.0, 0.0),
+            (6000.0, -2.5),
+            (20000.0, 0.0),
+        ];
+        let (pm_l, pm_r, delay) = synthesize_stereo_phase_matched_ir(
+            &ctrl, &ctrl, 48000, 16384, 8192, 2048, -1.5, false, 16.0,
+        )
+        .expect("identical phase-matched");
+        assert_eq!(delay, 4096);
+        let max_diff = pm_l
+            .ir
+            .iter()
+            .zip(&pm_r.ir)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_diff < 1e-15,
+            "identical ears differed by {max_diff:.2e}"
+        );
+        let igd = crate::stereo::measure_interaural_group_delay(
+            &pm_l.ir,
+            &pm_r.ir,
+            48000,
+            crate::stereo::IGD_BAND_LO_HZ,
+            crate::stereo::IGD_BAND_HI_HZ,
+        )
+        .expect("igd");
+        assert!(igd.max_igd_us < 1e-6);
     }
 }

@@ -55,6 +55,7 @@
 //! |---|---|
 //! | [`accum`] | Neumaier compensated summation and prefix sums |
 //! | [`assess`] | Content-demand third-octave spectrum assessment against headroom |
+//! | [`complex_eq`] | Kirkeby–Nelson complex-IR excess-phase inversion, complex octave smoothing, Radlovic coherence gating |
 //! | [`convolve`] | Overlap-add FFT convolution against planar FIRs |
 //! | [`dither`] | The exact NumPy PCG64 stream that the TPDF dither is drawn from |
 //! | [`driver`] | Level-dependent distortion and sub-resonance excursion boost bounds |
@@ -89,6 +90,7 @@
 
 pub mod accum;
 pub mod assess;
+pub mod complex_eq;
 pub mod convolve;
 pub mod dither;
 pub mod driver;

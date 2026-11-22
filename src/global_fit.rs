@@ -1,9 +1,21 @@
 //! Global curvature-constrained box-QP regularizer on a uniform log-frequency grid.
 //!
 //! Minimizes:
-//! `J(q) = sum_k w_k (q_k - r_k)^2 + lambda_0 sum_k (q_k - a_k)^2 + lambda_2 sum_k (Delta^2 q_k)^2`
+//! `J(q) = sum_k w_k phi_gamma(q_k - r_k) + lambda_0 sum_k (q_k - a_k)^2 + lambda_2 sum_k (Delta^2 q_k)^2`
 //! subject to `q_min_k <= q_k <= q_max_k`, where `Delta^2 q_k = q_{k+1} - 2 q_k + q_{k-1}`
-//! operates in log2-frequency (octave) space.
+//! operates in log2-frequency (octave) space and
+//! `phi_gamma(e) = gamma * e^2` for `e > 0` (residual post-EQ peak above target) else `e^2`
+//! (residual dip/notch below target).
+//!
+//! * When `peak_penalty_ratio == 1.0` (the default), `phi_gamma(e) = e^2` is symmetric.
+//! * When `peak_penalty_ratio > 1.0`, positive post-EQ overshoot (`q_k - r_k > 0`) is penalized
+//!   more heavily than negative residual dips, reflecting Bücklein (JAES 29(3), pp. 126–131,
+//!   March 1981), who showed that narrowband peaks are substantially more audible than dips of
+//!   equal magnitude and bandwidth. The convex asymmetric-quadratic (expectile) formulation is
+//!   HyprEQ's own optimization model of that perceptual asymmetry.
+//! * [`fec_uncertainty_sigma_db`] adds an optional acoustic-impedance loading uncertainty prior
+//!   in the 4–10 kHz ear-canal standing-wave region for non-FEC (closed-back / in-ear) models,
+//!   motivated by Møller, Hammershøi, Jensen & Sørensen (JAES 43(4), pp. 203–217, April 1995).
 //!
 //! Solved in O(K) per iteration via a single pentadiagonal LDL^T factorization paired with
 //! over-relaxed ADMM (`alpha = 1.6`), with zero external linear-algebra crates.
@@ -48,6 +60,12 @@ pub struct GlobalFitConfig {
     pub max_iters: usize,
     /// Stopping tolerance on primal and dual residuals.
     pub tol: f64,
+    /// Bücklein (1981) asymmetric peak-vs-notch penalty ratio `gamma >= 1.0`.
+    ///
+    /// `1.0` (default) is the symmetric quadratic loss. Values `> 1.0` weight positive post-EQ
+    /// overshoot `(q_k - r_k > 0, residual peaks)` by `gamma * w_k` while keeping negative
+    /// residual dips at `w_k`, keeping the objective strictly convex and `C^1`-smooth.
+    pub peak_penalty_ratio: f64,
 }
 
 impl Default for GlobalFitConfig {
@@ -60,6 +78,7 @@ impl Default for GlobalFitConfig {
             admm_alpha: 1.6,
             max_iters: 600,
             tol: 1e-8,
+            peak_penalty_ratio: 1.0,
         }
     }
 }
@@ -213,18 +232,28 @@ pub fn solve_global_qp(input: &GlobalFitInput, cfg: &GlobalFitConfig) -> Option<
         }
     }
 
+    let gamma = if cfg.peak_penalty_ratio.is_finite() && cfg.peak_penalty_ratio > 1.0 {
+        cfg.peak_penalty_ratio
+    } else {
+        1.0
+    };
+    let r_safe: Vec<f64> = input
+        .raw_error_db
+        .iter()
+        .map(|&ri| if ri.is_finite() { ri } else { 0.0 })
+        .collect();
     let rhs0: Vec<f64> = w
         .iter()
-        .zip(&input.raw_error_db)
+        .zip(&r_safe)
         .zip(&input.anchor_db)
         .map(|((&wi, &ri), &ai)| {
-            let r_safe = if ri.is_finite() { ri } else { 0.0 };
             let a_safe = if ai.is_finite() { ai } else { 0.0 };
-            wi * r_safe + lam0 * a_safe
+            wi * ri + lam0 * a_safe
         })
         .collect();
 
-    // Fast path: unconstrained exact solve; return in 1 step if bounds are inactive.
+    // Fast path: unconstrained exact solve; return in 1 step if bounds and peak asymmetry
+    // are both inactive (for gamma == 1.0 this is identical to the symmetric QP).
     let (q_lo, q_hi) = box_bounds(&input.q_min_db, &input.q_max_db);
     let (u0, u1, u2) = build_system(&w, lam0, lam2, 0.0);
     let unconst = PentadiagLdlt::factor(&u0, &u1, &u2)?;
@@ -233,7 +262,12 @@ pub fn solve_global_qp(input: &GlobalFitInput, cfg: &GlobalFitConfig) -> Option<
         .iter()
         .zip(q_lo.iter().zip(&q_hi))
         .all(|(&q, (&lo, &hi))| q >= lo && q <= hi);
-    if bounds_ok {
+    let asym_inactive = gamma == 1.0
+        || q0
+            .iter()
+            .zip(r_safe.iter().zip(&w))
+            .all(|(&q, (&r, &wi))| wi == 0.0 || q <= r);
+    if bounds_ok && asym_inactive {
         return Some(GlobalFitResult {
             f_hz: input.f_hz.clone(),
             q_db: q0,
@@ -242,12 +276,20 @@ pub fn solve_global_qp(input: &GlobalFitInput, cfg: &GlobalFitConfig) -> Option<
         });
     }
 
-    // Box-constrained ADMM with cached pentadiagonal LDL^T.
+    // Box-constrained (and optionally Bücklein asymmetric) ADMM with cached pentadiagonal LDL^T.
+    // The symmetric data term `0.5 * w_k (q_k - r_k)^2` stays in the q-step; only the excess
+    // peak penalty `0.5 * (gamma - 1) * w_k * max(0, z_k - r_k)^2` and box `[lo, hi]` enter
+    // the separable z-step proximal operator, keeping the pentadiagonal factorization constant.
     let w_med = crate::fit::median_db(&w);
-    let rho = (2.0 * (w_med + lam0)).clamp(0.5, 10.0);
+    let rho = if gamma > 1.0 {
+        (2.0 * (0.5 * (1.0 + gamma) * w_med + lam0)).clamp(0.5, 20.0)
+    } else {
+        (2.0 * (w_med + lam0)).clamp(0.5, 10.0)
+    };
     let (d0, d1, d2) = build_system(&w, lam0, lam2, rho);
     let factor = PentadiagLdlt::factor(&d0, &d1, &d2)?;
 
+    let excess: Vec<f64> = w.iter().map(|&wi| (gamma - 1.0) * wi).collect();
     let mut z: Vec<f64> = q0
         .iter()
         .zip(q_lo.iter().zip(&q_hi))
@@ -266,9 +308,13 @@ pub fn solve_global_qp(input: &GlobalFitInput, cfg: &GlobalFitConfig) -> Option<
         let mut r_dual = 0.0f64;
         for i in 0..k {
             let q_hat = alpha * q[i] + (1.0 - alpha) * z[i];
-            let lo = q_lo[i];
-            let hi = q_hi[i];
-            let z_new = (q_hat + u[i]).clamp(lo, hi);
+            let v = q_hat + u[i];
+            let z_star = if excess[i] > 0.0 && v > r_safe[i] {
+                (excess[i] * r_safe[i] + rho * v) / (excess[i] + rho)
+            } else {
+                v
+            };
+            let z_new = z_star.clamp(q_lo[i], q_hi[i]);
             u[i] += q_hat - z_new;
             r_pri = r_pri.max((q[i] - z_new).abs());
             r_dual = r_dual.max(rho * (z_new - z[i]).abs());
@@ -334,6 +380,45 @@ fn box_bounds(q_min_db: &[f64], q_max_db: &[f64]) -> (Vec<f64>, Vec<f64>) {
         hi.push(h);
     }
     (lo, hi)
+}
+
+/// Acoustic-impedance loading uncertainty prior `sigma_fec(f)` in dB, motivated by the
+/// Free-Air Equivalent Coupling (FEC) criterion of Møller, Hammershøi, Jensen & Sørensen
+/// (JAES 43(4), pp. 203–217, April 1995).
+///
+/// Møller et al. showed that headphones whose radiation impedance seen from the ear canal
+/// differs from free air (non-FEC sealed closed-back and in-ear designs) exhibit ear-canal
+/// standing-wave loading divergence between couplers and human ears above ~2 kHz, concentrated
+/// across 4–10 kHz.
+///
+/// The smooth `C^1` log-frequency raised-cosine envelope and peak amplitudes (`0.0 dB` for
+/// [`AcousticClass::OpenBack`] and [`AcousticClass::Unknown`], `1.5 dB` at 7 kHz for
+/// [`AcousticClass::ClosedBack`], and `2.5 dB` at 7 kHz for [`AcousticClass::InEar`]) are
+/// HyprEQ's conservative engineering prior rather than a table from the paper.
+#[must_use]
+pub fn fec_uncertainty_sigma_db(f_hz: f64, class: crate::fixture::AcousticClass) -> f64 {
+    use crate::fixture::AcousticClass;
+    if !f_hz.is_finite() || f_hz <= 0.0 {
+        return 0.0;
+    }
+    let (f_lo, f_peak, f_hi, peak_db) = match class {
+        AcousticClass::OpenBack | AcousticClass::Unknown => return 0.0,
+        AcousticClass::ClosedBack => (2000.0_f64, 7000.0_f64, 16000.0_f64, 1.5_f64),
+        AcousticClass::InEar => (1500.0_f64, 7000.0_f64, 16000.0_f64, 2.5_f64),
+    };
+    if f_hz <= f_lo || f_hz >= f_hi {
+        return 0.0;
+    }
+    let lf = f_hz.log2();
+    let lp = f_peak.log2();
+    let t = if f_hz <= f_peak {
+        (lf - f_lo.log2()) / (lp - f_lo.log2())
+    } else {
+        (f_hi.log2() - lf) / (f_hi.log2() - lp)
+    };
+    // Smooth raised-cosine ramp: value and derivative vanish at endpoints and at the peak.
+    let w = 0.5 * (1.0 - (std::f64::consts::PI * t).cos());
+    peak_db * w
 }
 
 #[cfg(test)]
@@ -541,5 +626,144 @@ mod tests {
                 solid.q_db[i]
             );
         }
+    }
+
+    #[test]
+    fn bucklein_asymmetric_penalty_reduces_positive_overshoot_and_satisfies_kkt() {
+        let f = uniform_log_grid(40.0, 12000.0, 12);
+        let k = f.len();
+        // Alternating sharp dips and peaks so smoothing creates both positive and negative residuals.
+        let raw: Vec<f64> = (0..k)
+            .map(|i| {
+                let x = i as f64 / (k as f64);
+                4.0 * (6.0 * std::f64::consts::PI * x).sin() + if i % 5 == 0 { -3.5 } else { 1.0 }
+            })
+            .collect();
+        let inp = GlobalFitInput {
+            f_hz: f,
+            raw_error_db: raw.clone(),
+            total_sigma_db: vec![0.5; k],
+            anchor_db: vec![0.0; k],
+            q_min_db: vec![-12.0; k],
+            q_max_db: vec![3.5; k],
+        };
+        let cfg_sym = GlobalFitConfig::default();
+        let cfg_asym = GlobalFitConfig {
+            peak_penalty_ratio: 4.0,
+            max_iters: 1200,
+            tol: 1e-9,
+            ..GlobalFitConfig::default()
+        };
+        let sym = solve_global_qp(&inp, &cfg_sym).expect("sym");
+        let asym = solve_global_qp(&inp, &cfg_asym).expect("asym");
+        assert!(sym.converged && asym.converged);
+
+        // Positive residual (q_k - r_k > 0, post-EQ peak above target) must strictly shrink.
+        let mean_peak_sym: f64 = sym
+            .q_db
+            .iter()
+            .zip(&raw)
+            .map(|(&q, &r)| (q - r).max(0.0))
+            .sum::<f64>()
+            / (k as f64);
+        let mean_peak_asym: f64 = asym
+            .q_db
+            .iter()
+            .zip(&raw)
+            .map(|(&q, &r)| (q - r).max(0.0))
+            .sum::<f64>()
+            / (k as f64);
+        assert!(
+            mean_peak_asym < mean_peak_sym * 0.65,
+            "asymmetric penalty failed to suppress positive peaks: sym={mean_peak_sym:.4}, asym={mean_peak_asym:.4}"
+        );
+
+        // Verify KKT projected-gradient optimality of the asymmetric solution.
+        let floor_sq = cfg_asym.sigma_floor_db.powi(2);
+        let w: Vec<f64> = inp
+            .f_hz
+            .iter()
+            .zip(&inp.total_sigma_db)
+            .map(|(&hz, &sig)| crate::psycho::erb_log_density(hz) / (sig * sig + floor_sq))
+            .collect();
+        let mut l2q = vec![0.0; k];
+        for j in 0..k.saturating_sub(2) {
+            let t = asym.q_db[j] - 2.0 * asym.q_db[j + 1] + asym.q_db[j + 2];
+            l2q[j] += t;
+            l2q[j + 1] -= 2.0 * t;
+            l2q[j + 2] += t;
+        }
+        let mut max_kkt = 0.0_f64;
+        for i in 0..k {
+            let q = asym.q_db[i];
+            let we = if q > raw[i] { 4.0 * w[i] } else { w[i] };
+            let grad = we * (q - raw[i]) + cfg_asym.lambda_0 * q + cfg_asym.lambda_2 * l2q[i];
+            let pg = if q <= inp.q_min_db[i] + 1e-8 {
+                grad.min(0.0)
+            } else if q >= inp.q_max_db[i] - 1e-8 {
+                grad.max(0.0)
+            } else {
+                grad
+            };
+            max_kkt = max_kkt.max(pg.abs());
+        }
+        assert!(
+            max_kkt < 1e-5,
+            "asymmetric QP KKT residual too large: {max_kkt:.2e}"
+        );
+    }
+
+    #[test]
+    fn bucklein_asymmetric_penalty_ignores_non_finite_data_holes() {
+        let f = uniform_log_grid(100.0, 4000.0, 12);
+        let k = f.len();
+        let mut raw = vec![3.0; k];
+        raw[k / 2] = f64::NAN;
+        let inp = GlobalFitInput {
+            f_hz: f,
+            raw_error_db: raw,
+            total_sigma_db: vec![0.5; k],
+            anchor_db: vec![3.0; k],
+            q_min_db: vec![-12.0; k],
+            q_max_db: vec![12.0; k],
+        };
+        let cfg = GlobalFitConfig {
+            peak_penalty_ratio: 5.0,
+            ..GlobalFitConfig::default()
+        };
+        let res = solve_global_qp(&inp, &cfg).expect("converges");
+        assert!(res.converged);
+        // Because the NaN bin has w[i] = 0 and excess[i] = 0, it must NOT be dragged toward 0 dB!
+        assert!(
+            (res.q_db[k / 2] - 3.0).abs() < 1e-6,
+            "NaN hole dragged away from +3 dB flat line: {:.6}",
+            res.q_db[k / 2]
+        );
+    }
+
+    #[test]
+    fn fec_uncertainty_prior_distinguishes_open_closed_and_inear() {
+        use crate::fixture::AcousticClass;
+        // Open-back and Unknown carry zero added FEC prior everywhere.
+        for &hz in &[100.0, 1000.0, 4000.0, 7000.0, 10000.0, 20000.0] {
+            assert_eq!(fec_uncertainty_sigma_db(hz, AcousticClass::OpenBack), 0.0);
+            assert_eq!(fec_uncertainty_sigma_db(hz, AcousticClass::Unknown), 0.0);
+        }
+        // Closed-back and In-ear vanish in bass/mid and peak at 7 kHz with InEar > ClosedBack.
+        assert_eq!(
+            fec_uncertainty_sigma_db(1000.0, AcousticClass::ClosedBack),
+            0.0
+        );
+        assert_eq!(fec_uncertainty_sigma_db(1000.0, AcousticClass::InEar), 0.0);
+        assert_eq!(
+            fec_uncertainty_sigma_db(18000.0, AcousticClass::ClosedBack),
+            0.0
+        );
+        let closed_7k = fec_uncertainty_sigma_db(7000.0, AcousticClass::ClosedBack);
+        let inear_7k = fec_uncertainty_sigma_db(7000.0, AcousticClass::InEar);
+        assert!((closed_7k - 1.5).abs() < 1e-12);
+        assert!((inear_7k - 2.5).abs() < 1e-12);
+        assert!(fec_uncertainty_sigma_db(f64::NAN, AcousticClass::InEar) == 0.0);
+        assert!(fec_uncertainty_sigma_db(-500.0, AcousticClass::ClosedBack) == 0.0);
     }
 }

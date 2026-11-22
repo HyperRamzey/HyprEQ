@@ -73,6 +73,10 @@ struct Args {
     /// Largest left/right filter difference --stereo split may apply in one band, in dB
     #[arg(long, default_value_t = hypreq::stereo::DEFAULT_MAX_SKEW_DB, allow_negative_numbers = true)]
     stereo_max_skew: f64,
+    /// Match L/R filter phase on --stereo split so low-frequency interaural group delay stays
+    /// below Møller et al. (2007)'s 35 µs dichotic lateral-shift threshold
+    #[arg(long)]
+    stereo_phase_match: bool,
     /// Force Gaussian Nyquist roll-off (>20.2 kHz) for legacy brickwall-ringing sources
     #[arg(long, conflicts_with = "no_apodize")]
     apodize: bool,
@@ -286,7 +290,11 @@ struct Args {
     /// Repeated-placement raw measurement CSV (frequency,dB); repeatable
     #[arg(long, value_name = "CSV", help_heading = "Groundwork (opt-in)")]
     ensemble_csv: Vec<PathBuf>,
-    /// Masiero & Fels upper-variance weight on 1/6-oct smoothed ensemble curves (0 => median)
+    /// Ensemble collapse mode: median, rms (Schärer & Lindau 2009 / Lindau & Brinkmann 2012),
+    /// upper-variance (median + alpha * 1.4826 * MAD, adapted from Masiero & Fels 2011), or average
+    #[arg(long, value_name = "MODE", help_heading = "Groundwork (opt-in)")]
+    ensemble_mode: Option<String>,
+    /// Upper-variance weight on 1/6-oct smoothed ensemble curves (0 => median unless --ensemble-mode upper-variance)
     #[arg(
         long,
         default_value_t = 0.0,
@@ -308,6 +316,60 @@ struct Args {
         help_heading = "Groundwork (opt-in)"
     )]
     no_global_fit: bool,
+    /// Bücklein (1981) asymmetric peak-vs-notch penalty ratio >= 1.0 in the global box-QP
+    /// (1.0 = symmetric; >1.0 penalizes positive post-EQ overshoot above target more heavily)
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        value_name = "RATIO",
+        allow_negative_numbers = true,
+        help_heading = "Groundwork (opt-in)"
+    )]
+    peak_penalty: f64,
+    /// Add Møller et al. (1995) FEC ear-canal acoustic-impedance uncertainty prior (4–10 kHz)
+    /// for closed-back and in-ear models in the global box-QP
+    #[arg(long, help_heading = "Groundwork (opt-in)")]
+    fec_prior: bool,
+    /// Measured complex headphone IR WAV capture(s) for Kirkeby–Nelson causal mixed-phase
+    /// inversion with Hatziantoniou–Mourjopoulos complex smoothing and Radlovic coherence gating
+    #[arg(long, value_name = "WAV", help_heading = "Complex-IR Excess-Phase EQ")]
+    raw_ir_wav: Vec<PathBuf>,
+    /// Causal modeling delay Delta (ms) for --raw-ir-wav Kirkeby–Nelson inversion
+    #[arg(
+        long,
+        default_value_t = 40.0,
+        value_name = "MS",
+        allow_negative_numbers = true,
+        help_heading = "Complex-IR Excess-Phase EQ"
+    )]
+    excess_phase_delay_ms: f64,
+    /// Hatziantoniou–Mourjopoulos complex fractional-octave smoothing width in octaves (0 = off)
+    #[arg(
+        long,
+        default_value_t = 1.0 / 6.0,
+        value_name = "OCT",
+        allow_negative_numbers = true,
+        help_heading = "Complex-IR Excess-Phase EQ"
+    )]
+    complex_smooth_oct: f64,
+    /// In-band Kirkeby–Nelson regularization parameter beta_in (dimensionless, >= 0)
+    #[arg(
+        long,
+        default_value_t = 0.01,
+        value_name = "BETA",
+        allow_negative_numbers = true,
+        help_heading = "Complex-IR Excess-Phase EQ"
+    )]
+    complex_reg: f64,
+    /// Radlovic spatial-incoherence regularization weight beta_incoh multiplying (1 - gamma^2)
+    #[arg(
+        long,
+        default_value_t = 2.0,
+        value_name = "BETA",
+        allow_negative_numbers = true,
+        help_heading = "Complex-IR Excess-Phase EQ"
+    )]
+    complex_incoh_reg: f64,
     /// Alternative synthesis backend alongside the default FIR
     #[arg(
         long,
@@ -484,8 +546,20 @@ fn run(args: Args) -> Result<(), Error> {
         validate_choice(family, &["harman", "diffuse", "spatial"], "--target-family");
     }
     validate_choice(&args.ppr_mode, &["over-ear", "in-ear"], "--ppr-mode");
+    if let Some(ref mode_s) = args.ensemble_mode {
+        validate_choice(
+            mode_s,
+            &hypreq::robust_fit::EnsembleMode::CHOICES,
+            "--ensemble-mode",
+        );
+    }
     for (name, v) in [
         ("--ensemble-alpha", Some(args.ensemble_alpha)),
+        ("--peak-penalty", Some(args.peak_penalty)),
+        ("--excess-phase-delay-ms", Some(args.excess_phase_delay_ms)),
+        ("--complex-smooth-oct", Some(args.complex_smooth_oct)),
+        ("--complex-reg", Some(args.complex_reg)),
+        ("--complex-incoh-reg", Some(args.complex_incoh_reg)),
         ("--target-bass", args.target_bass),
         ("--target-mid", args.target_mid),
         ("--target-tilt", args.target_tilt),
@@ -498,6 +572,57 @@ fn run(args: Args) -> Result<(), Error> {
     }
     if args.ensemble_alpha < 0.0 {
         usage_error("--ensemble-alpha cannot be negative; 0.00 selects the median");
+    }
+    if args.peak_penalty < 1.0 {
+        usage_error(
+            "--peak-penalty must be >= 1.0 (1.0 = symmetric; >1.0 penalizes residual peaks)",
+        );
+    }
+    if args.excess_phase_delay_ms < 0.0 {
+        usage_error("--excess-phase-delay-ms cannot be negative");
+    }
+    if args.complex_smooth_oct < 0.0 {
+        usage_error("--complex-smooth-oct cannot be negative");
+    }
+    if args.complex_reg < 0.0 {
+        usage_error("--complex-reg cannot be negative");
+    }
+    if args.complex_incoh_reg < 0.0 {
+        usage_error("--complex-incoh-reg cannot be negative");
+    }
+    if args.stereo_phase_match && stereo_mode(&args) != hypreq::stereo::Mode::Split {
+        usage_error("--stereo-phase-match requires --stereo split");
+    }
+    if args.stereo_phase_match && args.experimental_phase.is_some() {
+        usage_error(
+            "--stereo-phase-match cannot be combined with --experimental-phase (phase-matched stereo already inserts a shared causal delay for zero interaural GD)",
+        );
+    }
+    if let Some(ref mode_s) = args.ensemble_mode {
+        if !mode_s.eq_ignore_ascii_case("upper-variance") && args.ensemble_alpha > 0.0 {
+            usage_error(
+                "--ensemble-alpha > 0 only applies to --ensemble-mode upper-variance (drop --ensemble-alpha or choose --ensemble-mode upper-variance)",
+            );
+        }
+    }
+    if args.no_global_fit && (args.peak_penalty > 1.0 || args.fec_prior) {
+        usage_error(
+            "--peak-penalty and --fec-prior act inside the global box-QP and cannot be combined with --no-global-fit",
+        );
+    }
+    if !args.raw_ir_wav.is_empty() && args.bypass_eq {
+        usage_error("--raw-ir-wav cannot be combined with --bypass-eq");
+    }
+    if !args.raw_ir_wav.is_empty() && stereo_mode(&args) == hypreq::stereo::Mode::Split {
+        usage_error("--raw-ir-wav complex inversion is mono-capture based and cannot be combined with --stereo split");
+    }
+    if !args.raw_ir_wav.is_empty() && args.target_preset.is_some() {
+        usage_error(
+            "--raw-ir-wav takes an optional target curve via --target-csv, not --target-preset",
+        );
+    }
+    if !args.raw_ir_wav.is_empty() && args.verify_with.is_some() {
+        usage_error("--raw-ir-wav cannot be combined with --verify-with");
     }
     if args.target_csv.is_some() && args.target_preset.is_some() {
         usage_error(
@@ -649,6 +774,10 @@ fn run(args: Args) -> Result<(), Error> {
             );
         }
         return Ok(());
+    }
+
+    if !args.raw_ir_wav.is_empty() {
+        return run_complex_ir_mode(&args, &lim_cfg);
     }
 
     let selected = match resolve_headphone(&models, &aliases, &args.headphone) {
@@ -1526,6 +1655,211 @@ fn run_model(
     Ok(())
 }
 
+/// Run complex-IR / excess-phase equalization from one or more measured impulse-response WAVs.
+fn run_complex_ir_mode(args: &Args, lim_cfg: &hypreq::limiter::Cfg) -> Result<(), Error> {
+    let mut raw_irs: Vec<Vec<f64>> = Vec::with_capacity(args.raw_ir_wav.len());
+    let mut common_fs: Option<u32> = None;
+    for path in &args.raw_ir_wav {
+        let wav = read_wav(path)
+            .map_err(|e| Error::msg(format!("--raw-ir-wav '{}': {e}", path.display())))?;
+        if wav.planar.is_empty() || wav.planar[0].is_empty() {
+            return Err(Error::msg(format!(
+                "--raw-ir-wav '{}': WAV holds no audio samples",
+                path.display()
+            )));
+        }
+        match common_fs {
+            None => common_fs = Some(wav.fs),
+            Some(prev) if prev != wav.fs => {
+                return Err(Error::msg(format!(
+                    "--raw-ir-wav '{}': sample rate {} Hz does not match first capture's {} Hz",
+                    path.display(),
+                    wav.fs,
+                    prev
+                )));
+            }
+            Some(_) => {}
+        }
+        // Collapse multi-channel capture IRs to mono by averaging channels sample-by-sample.
+        let n = wav.planar[0].len();
+        let ch_count = wav.planar.len();
+        let mono = if ch_count == 1 {
+            wav.planar.into_iter().next().unwrap_or_default()
+        } else {
+            let inv = 1.0 / (ch_count as f64);
+            (0..n)
+                .map(|i| {
+                    wav.planar
+                        .iter()
+                        .map(|ch| ch.get(i).copied().unwrap_or(0.0))
+                        .sum::<f64>()
+                        * inv
+                })
+                .collect()
+        };
+        raw_irs.push(mono);
+    }
+    let fs = common_fs.ok_or_else(|| Error::msg("--raw-ir-wav: no captures loaded"))?;
+    if let Some(want) = args.fs {
+        if want != i64::from(fs) {
+            println!(
+                "  [Warning] --fs={want} differs from capture IR sample rate {fs}; synthesizing complex EQ at {fs} Hz."
+            );
+        }
+    }
+
+    let target_ctrl: Option<Vec<(f64, f64)>> = if let Some(path) = args.target_csv.as_ref() {
+        let rows = hypreq::model::load_csv_points(path)
+            .map_err(|e| Error::msg(format!("--target-csv '{}': {e}", path.display())))?;
+        let pts: Vec<(f64, f64)> = rows
+            .iter()
+            .filter_map(|p| {
+                let f = *p.first()?;
+                let g = hypreq::model::point_gain(p);
+                (f.is_finite() && f > 0.0 && g.is_finite()).then_some((f, g))
+            })
+            .collect();
+        let sorted = hypreq::model::sort_and_dedup_pairs(&pts);
+        if sorted.len() < 2 {
+            return Err(Error::msg(format!(
+                "--target-csv '{}' holds fewer than two usable points",
+                path.display()
+            )));
+        }
+        Some(sorted)
+    } else {
+        None
+    };
+
+    let taps = taps_count(args);
+    let cfg = hypreq::complex_eq::ComplexEqConfig {
+        n_fft: hypreq::ir::mpv_n_fft(taps),
+        n_taps: taps,
+        n_tail: taps / 8,
+        delay_ms: args.excess_phase_delay_ms,
+        smooth_oct: args.complex_smooth_oct,
+        beta_in: args.complex_reg,
+        beta_out: 0.25,
+        beta_incoh: args.complex_incoh_reg,
+        f_lo_hz: 20.0,
+        f_hi_hz: 20000.0_f64.min((fs as f64) * 0.45),
+        headroom_db: args.headroom_db,
+        kaiser_beta: 16.0,
+    };
+    let mut res =
+        hypreq::complex_eq::design_kirkeby_inverse(&raw_irs, target_ctrl.as_deref(), fs, &cfg)
+            .map_err(|e| Error::msg(e.0))?;
+
+    let gr = limit_ir(&mut res.ir, lim_cfg, args.headroom_db);
+    if gr > 0.0 {
+        res.preamp_db -= gr;
+        res.leading_floor_dbfs -= gr;
+        res.trailing_floor_dbfs -= gr;
+    }
+
+    for line in hypreq::complex_eq::report_lines(&res) {
+        println!("{line}");
+    }
+
+    let rate_tag = format_rate_tag(fs);
+    let raw_prefix = args.output.as_deref().unwrap_or("complex_eq");
+    let prefix = raw_prefix
+        .strip_suffix(".wav")
+        .or_else(|| raw_prefix.strip_suffix(".WAV"))
+        .unwrap_or(raw_prefix);
+
+    if let Some(input) = args.input.as_deref() {
+        let wav_in = read_wav(Path::new(input))?;
+        if wav_in.fs != fs {
+            return Err(Error::msg(format!(
+                "--raw-ir-wav capture rate ({fs} Hz) does not match input audio '{}' rate ({} Hz)",
+                input, wav_in.fs
+            )));
+        }
+        let orig_n = wav_in.planar.first().map_or(0, Vec::len);
+        let mut work = convolve_planar_fft(&wav_in.planar, &res.ir, false);
+        if args.trim_tail {
+            let keep = res.delay_samples + orig_n;
+            for ch in &mut work {
+                if ch.len() < keep {
+                    ch.resize(keep, 0.0);
+                } else {
+                    ch.truncate(keep);
+                }
+                ch.drain(..res.delay_samples.min(ch.len()));
+            }
+        }
+        let m_eq = measure_signal(&work, fs, lim_cfg.ratio);
+        print_signal_measurements("Post-EQ (Pre-Limiter)", &m_eq);
+        if !args.measure_only {
+            if lim_cfg.enable {
+                let mut lim = Limiter::enabled(*lim_cfg, fs, work.len());
+                {
+                    let mut refs: Vec<&mut [f64]> =
+                        work.iter_mut().map(|c| c.as_mut_slice()).collect();
+                    lim.process(refs.as_mut_slice());
+                }
+                let tail = lim.flush();
+                if !tail.is_empty() {
+                    if args.trim_tail {
+                        let lat = lim.latency_samples();
+                        work = work
+                            .iter()
+                            .zip(&tail)
+                            .map(|(w, t)| {
+                                let joined: Vec<f64> = w.iter().chain(t.iter()).copied().collect();
+                                let end = (lat + orig_n).min(joined.len());
+                                joined[lat.min(joined.len())..end].to_vec()
+                            })
+                            .collect();
+                    } else {
+                        for (w, t) in work.iter_mut().zip(&tail) {
+                            w.extend_from_slice(t);
+                        }
+                    }
+                }
+                let rep = lim.report();
+                let m_out = measure_signal(&work, fs, lim_cfg.ratio);
+                println!();
+                println!("=== True-Peak Limiter Report ===");
+                print_limiter_report(&rep, &m_out, lim_cfg, fs);
+                print_signal_measurements("Output Audio (Verified)", &m_out);
+            } else {
+                println!();
+                println!("  [Note] True-peak limiter disabled (--no-tp-limiter).");
+                let m_out = measure_signal(&work, fs, lim_cfg.ratio);
+                print_signal_measurements("Output Audio", &m_out);
+            }
+            let out_path = args.output.clone().unwrap_or_else(|| {
+                default_out_path(
+                    input,
+                    "complex_eq",
+                    lim_cfg.enable.then(|| lim_cfg.ratio.label()),
+                )
+            });
+            let bits = u32::try_from(args.out_bits).unwrap_or(32);
+            let frames = write_wav_pcm_or_float(Path::new(&out_path), &work, fs, bits)?;
+            println!(
+                "  Written Output WAV  : {out_path} ({bits}-bit @ {} Hz, {}ch, {} frames)",
+                comma_sep(u64::from(fs)),
+                work.len(),
+                comma_sep(frames as u64)
+            );
+        }
+        return Ok(());
+    }
+
+    if !args.measure_only {
+        let f64_path = format!("{prefix}_complex_eq_{rate_tag}.wav");
+        let f32_path = format!("{prefix}_complex_eq_f32_{rate_tag}.wav");
+        write_wav_ieee_float(Path::new(&f64_path), std::slice::from_ref(&res.ir), fs, 64)?;
+        let ir_f32: Vec<f64> = res.ir.iter().map(|&x| f64::from(x as f32)).collect();
+        write_wav_ieee_float(Path::new(&f32_path), std::slice::from_ref(&ir_f32), fs, 32)?;
+        println!("  Written WAVs      : {f64_path}, {f32_path}");
+    }
+    Ok(())
+}
+
 /// Measure, EQ, limit, verify and write one audio file.
 fn run_audio_wav_mode(
     args: &Args,
@@ -1689,18 +2023,34 @@ fn run_audio_wav_mode(
         }
         match per_ear {
             Some((left_curve, right_curve)) => {
-                let (mut left, mut right) = hypreq::ir::synthesize_stereo_minimum_phase_ir(
-                    &left_curve,
-                    &right_curve,
-                    fs,
-                    n_fft_mpv,
-                    taps,
-                    taps / 8,
-                    args.headroom_db,
-                    use_apodize,
-                    18.0,
-                )
-                .map_err(|e| Error::msg(e.0))?;
+                let (mut left, mut right, pm_delay) = if args.stereo_phase_match {
+                    hypreq::ir::synthesize_stereo_phase_matched_ir(
+                        &left_curve,
+                        &right_curve,
+                        fs,
+                        n_fft_mpv,
+                        taps,
+                        taps / 8,
+                        args.headroom_db,
+                        use_apodize,
+                        18.0,
+                    )
+                    .map_err(|e| Error::msg(e.0))?
+                } else {
+                    let (l, r) = hypreq::ir::synthesize_stereo_minimum_phase_ir(
+                        &left_curve,
+                        &right_curve,
+                        fs,
+                        n_fft_mpv,
+                        taps,
+                        taps / 8,
+                        args.headroom_db,
+                        use_apodize,
+                        18.0,
+                    )
+                    .map_err(|e| Error::msg(e.0))?;
+                    (l, r, 0usize)
+                };
                 // Two ears, two filters: when experimental phase is enabled, both kernels are reshaped
                 // jointly so both channels share identical impulse alignment (0 samples ITD skew)
                 // and identical filter lengths.
@@ -1776,11 +2126,28 @@ fn run_audio_wav_mode(
                         lim_cfg.enable,
                     );
                 }
+                if let Some(igd) = hypreq::stereo::measure_interaural_group_delay(
+                    &left.ir,
+                    &right.ir,
+                    fs,
+                    hypreq::stereo::IGD_BAND_LO_HZ,
+                    hypreq::stereo::IGD_BAND_HI_HZ,
+                ) {
+                    println!("{}", hypreq::stereo::igd_report_line(&igd));
+                }
+                if pm_delay > 0 {
+                    println!(
+                        "  Phase-match delay : {} samples ({:.2} ms shared causal delay)",
+                        pm_delay,
+                        (pm_delay as f64) / f64::from(fs) * 1000.0
+                    );
+                }
                 let channels = work.len();
                 print_phase_block(&ear_phase, false);
-                let filter_lat = ear_phase
-                    .first()
-                    .map_or(0, |(_, adj)| adj.added_latency_samples);
+                let filter_lat = pm_delay
+                    + ear_phase
+                        .first()
+                        .map_or(0, |(_, adj)| adj.added_latency_samples);
                 let trim_to_in = args.trim_tail && filter_lat == 0;
                 work = convolve_planar_pair(&work, &left.ir, &right.ir, trim_to_in)
                     .ok_or_else(|| {
@@ -2684,12 +3051,26 @@ fn ensemble_stage(
             (lo, hi)
         };
     let grid = hypreq::global_fit::uniform_log_grid(f_min, f_max, 48);
-    let mode = if args.ensemble_alpha > 0.0 {
-        hypreq::robust_fit::EnsembleMode::UpperVariance {
-            alpha: args.ensemble_alpha,
+    let mode = match args.ensemble_mode.as_deref() {
+        Some(raw_mode) => {
+            let eff_alpha =
+                if raw_mode.eq_ignore_ascii_case("upper-variance") && args.ensemble_alpha == 0.0 {
+                    1.0
+                } else {
+                    args.ensemble_alpha
+                };
+            hypreq::robust_fit::EnsembleMode::parse(raw_mode, eff_alpha)
+                .unwrap_or(hypreq::robust_fit::EnsembleMode::Median)
         }
-    } else {
-        hypreq::robust_fit::EnsembleMode::Median
+        None => {
+            if args.ensemble_alpha > 0.0 {
+                hypreq::robust_fit::EnsembleMode::UpperVariance {
+                    alpha: args.ensemble_alpha,
+                }
+            } else {
+                hypreq::robust_fit::EnsembleMode::Median
+            }
+        }
     };
     let stats = hypreq::robust_fit::analyze_ensemble(&curves, &grid, Some(1.0 / 6.0), mode, 400)
         .ok_or_else(|| Error::msg(format!("{from}: could not resample the placement curves")))?;
@@ -2712,7 +3093,7 @@ fn ensemble_stage(
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|&(f, s)| format!("{s:.2} dB @ {}", hypreq::assess::band_name(f)))
         .unwrap_or_else(|| "n/a".to_string());
-    let lines = vec![
+    let mut lines = vec![
         "=== Placement Ensemble ===".to_string(),
         format!(
             "  Curves          : {} resampled to {} bins (1/6-oct smoothed)",
@@ -2731,6 +3112,18 @@ fn ensemble_stage(
                 .fold(0.0f64, f64::max)
         ),
     ];
+    match mode {
+        hypreq::robust_fit::EnsembleMode::Rms => lines.push(
+            "  Collapse mode   : rms (power-domain average, Schärer & Lindau 2009 / Lindau & Brinkmann 2012)".to_string(),
+        ),
+        hypreq::robust_fit::EnsembleMode::UpperVariance { alpha } => lines.push(format!(
+            "  Collapse mode   : upper-variance (median + {alpha:.2} * 1.4826 * MAD, adapted from Masiero & Fels 2011)"
+        )),
+        hypreq::robust_fit::EnsembleMode::Average => {
+            lines.push("  Collapse mode   : average (dB arithmetic mean)".to_string());
+        }
+        hypreq::robust_fit::EnsembleMode::Median => {}
+    }
     Ok(Some(EnsembleOutcome { raw, sigma, lines }))
 }
 
@@ -2781,10 +3174,19 @@ fn global_fit_stage(
         }
         _ => vec![RIG_SIGMA_DB; k],
     };
+    let fec_term: Vec<f64> = if args.fec_prior {
+        f.iter()
+            .map(|&hz| hypreq::global_fit::fec_uncertainty_sigma_db(hz, model.acoustic_class))
+            .collect()
+    } else {
+        vec![0.0; k]
+    };
+    let fec_peak = fec_term.iter().copied().fold(0.0_f64, f64::max);
     let total_sigma: Vec<f64> = sigma_r
         .iter()
         .zip(&rig_term)
-        .map(|(&r, &s)| (r * r + s * s).sqrt())
+        .zip(&fec_term)
+        .map(|((&r, &s), &fec)| (r * r + s * s + fec * fec).sqrt())
         .collect();
     // The distortion ceiling is stated in absolute SPL, so the calibration term it needs is the
     // headphone's own response R(f) — and it has to be *this run's* R(f): `raw_active` is the
@@ -2826,11 +3228,12 @@ fn global_fit_stage(
         q_min_db: q_min,
         q_max_db: q_max,
     };
-    let res = hypreq::global_fit::solve_global_qp(
-        &input,
-        &hypreq::global_fit::GlobalFitConfig::default(),
-    )
-    .ok_or_else(|| Error::msg("--global-fit: the box-QP could not be factorized"))?;
+    let qp_cfg = hypreq::global_fit::GlobalFitConfig {
+        peak_penalty_ratio: args.peak_penalty,
+        ..hypreq::global_fit::GlobalFitConfig::default()
+    };
+    let res = hypreq::global_fit::solve_global_qp(&input, &qp_cfg)
+        .ok_or_else(|| Error::msg("--global-fit: the box-QP could not be factorized"))?;
     let out: Vec<(f64, f64)> = res
         .f_hz
         .iter()
@@ -2849,9 +3252,27 @@ fn global_fit_stage(
                 "max iterations"
             }
         ),
-        "  Weights          : w = 1 / (sigma_r^2 + sigma_rig^2), ERB density, floor 0.30 dB"
-            .to_string(),
+        if args.fec_prior {
+            "  Weights          : w = 1 / (sigma_r^2 + sigma_rig^2 + sigma_fec^2), ERB density, floor 0.30 dB"
+                .to_string()
+        } else {
+            "  Weights          : w = 1 / (sigma_r^2 + sigma_rig^2), ERB density, floor 0.30 dB"
+                .to_string()
+        },
     ];
+    if args.peak_penalty > 1.0 {
+        lines.push(format!(
+            "  Peak penalty     : gamma = {:.2}x on positive overshoot (Bücklein 1981 asymmetric loss)",
+            args.peak_penalty
+        ));
+    }
+    if args.fec_prior {
+        lines.push(format!(
+            "  FEC prior        : class {} — peak +{:.2} dB ear-canal loading sigma (4–10 kHz, Møller et al. 1995)",
+            class_name(model.acoustic_class),
+            fec_peak
+        ));
+    }
     if ceiling_sweeps > 0 {
         lines.push(format!(
             "  Boost ceiling    : {ceiling_sweeps} sweeps, L_max at >3% THD, {ceiling_bins} of {k} bins limited (R(f) peak {r_peak:+.1} dB, listen {listen_spl:.0} dB)",
@@ -4279,6 +4700,86 @@ mod tests {
         assert_eq!(a.target_tilt, None);
         assert!(a.listen_spl.is_none());
         assert!(a.iso226_table.is_none());
+        assert_eq!(a.ensemble_mode, None);
+        assert_eq!(a.peak_penalty, 1.0);
+        assert!(!a.fec_prior);
+        assert!(!a.stereo_phase_match);
+        assert!(a.raw_ir_wav.is_empty());
+    }
+
+    #[test]
+    fn peak_penalty_and_fec_prior_wire_into_global_fit_stage() {
+        let db = hypreq::model::load_measurement_database(
+            Path::new("measurements.json"),
+            Path::new("models"),
+        )
+        .expect("shipped database");
+        let model = db.get("dt770_80").expect("dt770_80 closed-back model");
+        assert_eq!(
+            model.acoustic_class,
+            hypreq::fixture::AcousticClass::ClosedBack
+        );
+        let raw = raw_curve(model);
+        let args_plain = argv(&["-H", "dt770_80", "--global-fit"]);
+        let args_upgraded = argv(&[
+            "-H",
+            "dt770_80",
+            "--global-fit",
+            "--peak-penalty",
+            "4.0",
+            "--fec-prior",
+        ]);
+        let (q_plain, _) =
+            global_fit_stage(&model.ctrl_pts, model, &args_plain, None, None, &raw).expect("plain");
+        let (q_up, lines_up) =
+            global_fit_stage(&model.ctrl_pts, model, &args_upgraded, None, None, &raw)
+                .expect("upgraded");
+        assert!(lines_up.iter().any(|l| l.contains("Bücklein 1981")));
+        assert!(lines_up.iter().any(|l| l.contains("Møller et al. 1995")));
+        let max_diff = q_plain
+            .iter()
+            .zip(&q_up)
+            .map(|(a, b)| (a.1 - b.1).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_diff > 0.05,
+            "peak penalty + FEC prior should move the fitted curve (diff {max_diff:.4} dB)"
+        );
+    }
+
+    #[test]
+    fn ensemble_stage_supports_rms_and_upper_variance_modes() {
+        let c1 = vec![
+            vec![100.0, 0.0],
+            vec![1000.0, 0.0],
+            vec![4000.0, 0.0],
+            vec![10000.0, 0.0],
+        ];
+        let c2 = c1.clone();
+        let c3 = vec![
+            vec![100.0, 0.0],
+            vec![1000.0, 0.0],
+            vec![4000.0, -18.0],
+            vec![10000.0, 0.0],
+        ];
+        let recorded = vec![c1, c2, c3];
+        let args_rms = argv(&["-H", "hd6xx", "--ensemble-mode", "rms"]);
+        let out_rms = ensemble_stage(&args_rms, &recorded)
+            .expect("rms")
+            .expect("some");
+        assert!(out_rms
+            .lines
+            .iter()
+            .any(|l| l.contains("Schärer & Lindau 2009")));
+
+        let args_uv = argv(&["-H", "hd6xx", "--ensemble-mode", "upper-variance"]);
+        let out_uv = ensemble_stage(&args_uv, &recorded)
+            .expect("uv")
+            .expect("some");
+        assert!(out_uv
+            .lines
+            .iter()
+            .any(|l| l.contains("Masiero & Fels 2011") && l.contains("1.00")));
     }
 
     /// The three trims are `Option` rather than `f64` defaulted to `0.0`, and the difference only

@@ -2248,3 +2248,230 @@ fn non_positive_sample_rate_exits_2_even_with_list_models() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn ensemble_mode_rms_and_flag_conflicts_work_end_to_end() {
+    let dir = scratch("ensemble-rms-cli");
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &[
+            "-H",
+            "jbl770nc",
+            "--no-target-preset",
+            "--ensemble-mode",
+            "rms",
+            "--taps",
+            "4096",
+            "--no-plot",
+        ],
+    );
+    assert_eq!(code, Some(0), "rms run failed: {stderr}");
+    assert!(
+        stdout.contains("Collapse mode   : rms"),
+        "expected RMS collapse line in stdout: {stdout}"
+    );
+
+    // Conflicting --ensemble-mode rms with non-zero --ensemble-alpha must exit 2.
+    let (code_bad, _, stderr_bad) = run_in(
+        &dir,
+        &[
+            "-H",
+            "jbl770nc",
+            "--no-target-preset",
+            "--ensemble-mode",
+            "rms",
+            "--ensemble-alpha",
+            "0.5",
+            "--no-plot",
+        ],
+    );
+    assert_eq!(code_bad, Some(2));
+    assert!(stderr_bad.contains("--ensemble-alpha"), "{stderr_bad}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn peak_penalty_and_fec_prior_report_and_refuse_no_global_fit() {
+    let dir = scratch("peak-fec-cli");
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--peak-penalty",
+            "3.0",
+            "--fec-prior",
+            "--taps",
+            "4096",
+            "--no-plot",
+        ],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "peak-penalty + fec-prior run failed: {stderr}"
+    );
+    assert!(
+        stdout.contains("Peak penalty     : gamma = 3.00x"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("FEC prior        : class closed_back — peak +1.50 dB"),
+        "{stdout}"
+    );
+
+    let (code_bad, _, stderr_bad) = run_in(
+        &dir,
+        &[
+            "-H",
+            "dt770_80",
+            "--no-global-fit",
+            "--peak-penalty",
+            "2.0",
+            "--no-plot",
+        ],
+    );
+    assert_eq!(code_bad, Some(2));
+    assert!(stderr_bad.contains("--no-global-fit"), "{stderr_bad}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stereo_phase_match_cli_audits_and_eliminates_dichotic_igd() {
+    let dir = scratch("stereo-pm-cli");
+    let in_wav = dir.join("stereo.wav");
+    let fs = 48000u32;
+    let n = 4800usize;
+    let tone: Vec<f64> = (0..n)
+        .map(|i| 0.25 * (i as f64 * 440.0 * std::f64::consts::TAU / fs as f64).sin())
+        .collect();
+    hypreq::wav::write_wav_ieee_float(&in_wav, &[tone.clone(), tone], fs, 32)
+        .expect("write stereo wav");
+
+    // Refused without --stereo split.
+    let (code_bad, _, stderr_bad) = run_in(
+        &dir,
+        &[
+            "-H",
+            "dt770_80",
+            "--input",
+            "stereo.wav",
+            "--no-target-preset",
+            "--stereo-phase-match",
+            "--measure-only",
+        ],
+    );
+    assert_eq!(code_bad, Some(2));
+    assert!(stderr_bad.contains("--stereo split"), "{stderr_bad}");
+
+    // With --stereo split --stereo-phase-match, IGD is measured and stays within 35 µs.
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &[
+            "-H",
+            "dt770_80",
+            "--input",
+            "stereo.wav",
+            "--no-target-preset",
+            "--stereo",
+            "split",
+            "--stereo-phase-match",
+            "--taps",
+            "8192",
+            "--measure-only",
+        ],
+    );
+    assert_eq!(code, Some(0), "phase-matched split failed: {stderr}");
+    assert!(
+        stdout.contains("Interaural GD     :") && stdout.contains("within 35 µs"),
+        "expected IGD within 35 µs: {stdout}"
+    );
+    assert!(
+        stdout.contains("Phase-match delay : 4096 samples"),
+        "expected shared causal delay line: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn raw_ir_wav_cli_flattens_allpass_excess_phase_and_measures_audio() {
+    let dir = scratch("raw-ir-cli");
+    let fs = 48000u32;
+    // Synthesize a causal 2nd-order all-pass impulse response at 1 kHz, Q = 2.0.
+    let w0 = std::f64::consts::TAU * 1000.0 / (fs as f64);
+    let alpha = w0.sin() / 4.0;
+    let a0 = 1.0 + alpha;
+    let b0 = (1.0 - alpha) / a0;
+    let b1 = (-2.0 * w0.cos()) / a0;
+    let b2 = (1.0 + alpha) / a0;
+    let mut ap = vec![0.0_f64; 2048];
+    let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
+    for (n, yn) in ap.iter_mut().enumerate() {
+        let x0 = if n == 0 { 1.0 } else { 0.0 };
+        let out = b0 * x0 + b1 * x1 + b2 * x2 - b1 * y1 - b0 * y2;
+        *yn = out;
+        x2 = x1;
+        x1 = x0;
+        y2 = y1;
+        y1 = out;
+    }
+    let ir_path = dir.join("allpass.wav");
+    hypreq::wav::write_wav_ieee_float(&ir_path, &[ap], fs, 64).expect("write allpass ir");
+
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &[
+            "--raw-ir-wav",
+            "allpass.wav",
+            "--complex-smooth-oct",
+            "0",
+            "--complex-reg",
+            "0.0001",
+            "--excess-phase-delay-ms",
+            "40",
+            "--taps",
+            "8192",
+            "--output",
+            "test_ap",
+            "--no-tp-limiter",
+        ],
+    );
+    assert_eq!(code, Some(0), "raw-ir-wav run failed: {stderr}");
+    assert!(
+        stdout.contains("Complex-IR Mixed-Phase Inversion"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("Group-delay ripple:"), "{stdout}");
+    assert!(dir.join("test_ap_complex_eq_48k.wav").exists());
+    assert!(dir.join("test_ap_complex_eq_f32_48k.wav").exists());
+
+    // Audio measure-only mode must print Post-EQ signal measurements and write no audio.
+    let audio_path = dir.join("tone.wav");
+    let tone: Vec<f64> = (0..2400)
+        .map(|i| 0.2 * (i as f64 * 1000.0 * std::f64::consts::TAU / fs as f64).sin())
+        .collect();
+    hypreq::wav::write_wav_ieee_float(&audio_path, &[tone], fs, 32).expect("write tone");
+    let (code_m, stdout_m, stderr_m) = run_in(
+        &dir,
+        &[
+            "--raw-ir-wav",
+            "allpass.wav",
+            "--input",
+            "tone.wav",
+            "--taps",
+            "4096",
+            "--measure-only",
+        ],
+    );
+    assert_eq!(
+        code_m,
+        Some(0),
+        "raw-ir-wav measure-only failed: {stderr_m}"
+    );
+    assert!(
+        stdout_m.contains("Post-EQ (Pre-Limiter)"),
+        "expected Post-EQ measurement block in --measure-only: {stdout_m}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

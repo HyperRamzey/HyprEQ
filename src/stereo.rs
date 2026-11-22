@@ -40,6 +40,7 @@
 //!   between two headphones, and none of these thresholds should be read as if one did.
 
 use crate::assess;
+use crate::fft::{rfft, rfftfreq};
 use crate::fit;
 use crate::pchip::Pchip;
 
@@ -617,6 +618,172 @@ pub fn report_lines(m: &Mismatch, points: usize, t: Option<&Trim>) -> Vec<String
     lines
 }
 
+/// Low-frequency dichotic interaural group-delay (IGD) lateral-shift threshold, in microseconds,
+/// reported by Møller, Minnaar, Olesen, Christensen & Plogsties (*"On the Audibility of All-Pass
+/// Phase in Electroacoustical Transfer Functions,"* JAES 55(3), pp. 115–134, March 2007).
+///
+/// Above ~35 µs of low-frequency interaural group-delay mismatch, listeners hear a lateral shift
+/// of the stereo image that is independent of the audio signal.
+pub const DICHOTIC_IGD_THRESHOLD_US: f64 = 35.0;
+
+/// Lower frequency bound (Hz) for the low-frequency ITD / dichotic IGD audit band.
+pub const IGD_BAND_LO_HZ: f64 = 50.0;
+
+/// Upper frequency bound (Hz) for the low-frequency ITD / dichotic IGD audit band.
+pub const IGD_BAND_HI_HZ: f64 = 2000.0;
+
+/// Measured interaural group-delay difference between a stereo filter pair `(ir_l, ir_r)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterauralGroupDelay {
+    /// Peak `|GD_L(f) - GD_R(f)|` across `[band_lo_hz, band_hi_hz]`, in microseconds.
+    pub max_igd_us: f64,
+    /// Frequency at which `max_igd_us` occurs, in Hz.
+    pub peak_hz: f64,
+    /// Lower edge of the evaluated frequency band, in Hz.
+    pub band_lo_hz: f64,
+    /// Upper edge of the evaluated frequency band, in Hz.
+    pub band_hi_hz: f64,
+    /// `true` when `max_igd_us > DICHOTIC_IGD_THRESHOLD_US` (35 µs, Møller et al. 2007).
+    pub exceeds_threshold: bool,
+}
+
+/// Measure interaural group-delay mismatch `|GD_L(f) - GD_R(f)|` in microseconds between two
+/// impulse responses over `[band_lo_hz, band_hi_hz]`.
+///
+/// Computes the cross-spectrum `H_L(f) * H_R^*(f)` so common-mode phase wraps cancel before
+/// phase unwrapping and differentiation (`-1/(2π) · d(Δφ)/df · 1e6`). Returns `None` if inputs
+/// are empty, sample rate is zero, or the frequency band has fewer than two usable bins.
+#[must_use]
+pub fn measure_interaural_group_delay(
+    ir_l: &[f64],
+    ir_r: &[f64],
+    fs: u32,
+    band_lo_hz: f64,
+    band_hi_hz: f64,
+) -> Option<InterauralGroupDelay> {
+    if ir_l.is_empty()
+        || ir_r.is_empty()
+        || fs == 0
+        || !band_lo_hz.is_finite()
+        || !band_hi_hz.is_finite()
+        || band_lo_hz <= 0.0
+        || band_hi_hz <= band_lo_hz
+        || ir_l.iter().any(|v| !v.is_finite())
+        || ir_r.iter().any(|v| !v.is_finite())
+    {
+        return None;
+    }
+    let nyq = (fs as f64) * 0.5;
+    let hi = band_hi_hz.min(nyq);
+    if hi <= band_lo_hz {
+        return None;
+    }
+    let max_len = ir_l.len().max(ir_r.len());
+    let n_fft = (max_len.saturating_mul(2)).next_power_of_two().max(16384);
+    let hl = rfft(ir_l, n_fft);
+    let hr = rfft(ir_r, n_fft);
+    let freqs = rfftfreq(n_fft, fs as f64);
+    let n_bins = freqs.len();
+    if n_bins < 3 {
+        return None;
+    }
+
+    let max_mag_l = hl.iter().map(|c| c.norm()).fold(0.0_f64, f64::max);
+    let max_mag_r = hr.iter().map(|c| c.norm()).fold(0.0_f64, f64::max);
+    if max_mag_l <= 0.0 || max_mag_r <= 0.0 {
+        return None;
+    }
+    let floor_l = max_mag_l * 1e-12;
+    let floor_r = max_mag_r * 1e-12;
+
+    // Cross-spectrum phase Δφ(f) = arg(H_L * H_R^*), unwrapped bin-by-bin.
+    let mut dphi = vec![0.0_f64; n_bins];
+    let mut valid = vec![false; n_bins];
+    let mut prev_raw = 0.0_f64;
+    let mut carry = 0.0_f64;
+    let mut started = false;
+    for k in 0..n_bins {
+        let ml = hl[k].norm();
+        let mr = hr[k].norm();
+        if ml > floor_l && mr > floor_r {
+            let cross = hl[k] * hr[k].conj();
+            let raw = cross.im.atan2(cross.re);
+            if started {
+                let mut delta = raw - prev_raw;
+                while delta > std::f64::consts::PI {
+                    delta -= std::f64::consts::TAU;
+                    carry -= std::f64::consts::TAU;
+                }
+                while delta < -std::f64::consts::PI {
+                    delta += std::f64::consts::TAU;
+                    carry += std::f64::consts::TAU;
+                }
+            }
+            prev_raw = raw;
+            started = true;
+            dphi[k] = raw + carry;
+            valid[k] = true;
+        } else {
+            dphi[k] = prev_raw + carry;
+        }
+    }
+
+    let mut max_igd_us = 0.0_f64;
+    let mut peak_hz = 0.0_f64;
+    let mut measured = 0usize;
+    for k in 1..n_bins - 1 {
+        let f = freqs[k];
+        if f < band_lo_hz || f > hi {
+            continue;
+        }
+        if !valid[k - 1] || !valid[k] || !valid[k + 1] {
+            continue;
+        }
+        let df = freqs[k + 1] - freqs[k - 1];
+        if df <= 0.0 {
+            continue;
+        }
+        let igd_us = (-(dphi[k + 1] - dphi[k - 1]) / df / std::f64::consts::TAU * 1e6).abs();
+        if igd_us.is_finite() {
+            measured += 1;
+            if measured == 1 || igd_us > max_igd_us {
+                max_igd_us = igd_us;
+                peak_hz = f;
+            }
+        }
+    }
+    if measured == 0 {
+        return None;
+    }
+    Some(InterauralGroupDelay {
+        max_igd_us,
+        peak_hz,
+        band_lo_hz,
+        band_hi_hz: hi,
+        exceeds_threshold: max_igd_us > DICHOTIC_IGD_THRESHOLD_US,
+    })
+}
+
+/// Format the dichotic IGD measurement against Møller et al. (2007)'s 35 µs threshold.
+#[must_use]
+pub fn igd_report_line(igd: &InterauralGroupDelay) -> String {
+    let status = if igd.exceeds_threshold {
+        format!(
+            "exceeds {:.0} µs dichotic lateral-shift threshold (Møller et al. 2007; use --stereo-phase-match)",
+            DICHOTIC_IGD_THRESHOLD_US
+        )
+    } else {
+        format!(
+            "within {:.0} µs dichotic lateral-shift threshold (Møller et al. 2007)",
+            DICHOTIC_IGD_THRESHOLD_US
+        )
+    };
+    format!(
+        "  Interaural GD     : {:.1} µs @ {:.0} Hz ({:.0}–{:.0} Hz) — {status}",
+        igd.max_igd_us, igd.peak_hz, igd.band_lo_hz, igd.band_hi_hz
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1156,5 +1323,73 @@ mod tests {
                 .any(|l| l.contains("Centre            : held")),
             "both claims printed: {bitten:?}"
         );
+    }
+
+    #[test]
+    fn interaural_group_delay_measures_known_sample_shift_and_flags_threshold() {
+        // 48 kHz: 1 sample = 20.833 µs (< 35 µs), 3 samples = 62.5 µs (> 35 µs).
+        let mut ir_l = vec![0.0_f64; 1024];
+        let mut ir_r1 = vec![0.0_f64; 1024];
+        let mut ir_r3 = vec![0.0_f64; 1024];
+        ir_l[100] = 1.0;
+        ir_r1[101] = 1.0;
+        ir_r3[103] = 1.0;
+
+        let g1 =
+            measure_interaural_group_delay(&ir_l, &ir_r1, 48000, IGD_BAND_LO_HZ, IGD_BAND_HI_HZ)
+                .expect("1-sample shift");
+        assert!(
+            (g1.max_igd_us - 1e6 / 48000.0).abs() < 0.05,
+            "got {}",
+            g1.max_igd_us
+        );
+        assert!(!g1.exceeds_threshold);
+
+        let g3 =
+            measure_interaural_group_delay(&ir_l, &ir_r3, 48000, IGD_BAND_LO_HZ, IGD_BAND_HI_HZ)
+                .expect("3-sample shift");
+        assert!(
+            (g3.max_igd_us - 3e6 / 48000.0).abs() < 0.05,
+            "got {}",
+            g3.max_igd_us
+        );
+        assert!(g3.exceeds_threshold);
+        let line = igd_report_line(&g3);
+        assert!(
+            line.contains("35 µs") && line.contains("Møller et al. 2007"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn identical_irs_have_zero_interaural_group_delay() {
+        let mut ir = vec![0.0_f64; 512];
+        ir[32] = 0.8;
+        ir[33] = -0.3;
+        ir[34] = 0.1;
+        let g = measure_interaural_group_delay(&ir, &ir, 48000, IGD_BAND_LO_HZ, IGD_BAND_HI_HZ)
+            .expect("identical");
+        assert!(g.max_igd_us < 1e-6, "got {}", g.max_igd_us);
+        assert!(!g.exceeds_threshold);
+    }
+
+    #[test]
+    fn interaural_group_delay_rejects_non_finite_and_silent_irs() {
+        let mut bad = vec![0.0_f64; 128];
+        bad[10] = f64::NAN;
+        let mut ok = vec![0.0_f64; 128];
+        ok[10] = 1.0;
+        assert!(
+            measure_interaural_group_delay(&bad, &ok, 48000, IGD_BAND_LO_HZ, IGD_BAND_HI_HZ)
+                .is_none()
+        );
+        assert!(measure_interaural_group_delay(
+            &vec![0.0; 128],
+            &ok,
+            48000,
+            IGD_BAND_LO_HZ,
+            IGD_BAND_HI_HZ
+        )
+        .is_none());
     }
 }

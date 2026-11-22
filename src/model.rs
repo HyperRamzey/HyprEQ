@@ -171,6 +171,37 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
           ]
         }
       },
+      "g733": {
+        "short_title": "Logitech G733 LIGHTSPEED (PC Wireless)",
+        "notch_ref_hz": 3840.0,
+        "autoeq_offset_db": 0.0,
+        "gauss_apodize": true,
+        "global_fit": true,
+        "regularize": "auto",
+        "ensemble_mode": "rms",
+        "fec_prior": true,
+        "plot_meta": {
+          "title_template": "VERIFICATION: Logitech G733 LIGHTSPEED (PC Wireless) Convolver (Notch Mode: {notch_mode} | Preamp: {pre_rt:.2f} dB)",
+          "bypass_label": "Uncorrected >10.0 kHz Coupler Null & HF Wire Zone (Left Unmodified)",
+          "raw_label": "Raw Logitech G733 LIGHTSPEED (Clone GRAS 43AG / KB006x + IEC 711)",
+          "autoeq_ax1_label": "Standard AutoEq (+7.75dB concha boost & 2.0 oct treble blur)",
+          "wav_ax1_label": "Final WAV Convolver (Notch Mode: {notch_mode} | Unwindowed Floor: {unwin_rt:.1f} dBFS @ 16k)",
+          "raw_err_ax2_label": "Raw Unsmoothed Error (+7.8dB non-min-phase concha dip @ 3.84kHz)",
+          "autoeq_ax2_label": "Standard AutoEq Curve (Reference minimum phase 48kHz WAV)",
+          "ax1_ylim": [-16.0, 10.0],
+          "ax1_yticks": [-15, -10, -5, 0, 5, 10],
+          "ax2_ylim": [-12.0, 12.0],
+          "ax2_yticks": [-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0],
+          "annotations": [
+            {"text": "1. Closed-Back PC Wireless Sub-Bass\n({curve_db:+.2f}dB @ 20Hz)", "xy": [20.5, "curve"], "xytext": [22.0, 5.5], "color": "cyan"},
+            {"text": "2. Mid-Bass Warmth Transition\n({curve_db:+.2f}dB @ 120Hz)", "xy": [120.0, "curve"], "xytext": [85.0, 4.8], "color": "cyan"},
+            {"text": "3. 1kHz Flat Reference\n({curve_db:+.2f}dB @ 1kHz)", "xy": [1000.0, "curve"], "xytext": [550.0, 4.0], "color": "cyan"},
+            {"text": "4. 3.84kHz Concha Notch Shelf Bridge\n({notch_db:+.2f}dB in '{notch_mode}' mode;\navoids harsh concha glare)", "xy": [3840.0, "notch_db"], "xytext": [1400.0, 7.5], "color": "green"},
+            {"text": "5. 7.2kHz & 8.5kHz Treble Resonance Shaping\n({curve_db@7180.0:+.2f}dB & {curve_db@8500.0:+.2f}dB Cuts)", "xy": [8500.0, "curve"], "xytext": [3800.0, -7.5], "color": "green"},
+            {"text": "6. >10.0kHz Uncorrected Coupler Null Zone\n(0.0dB wire: ignores coupler cylinder null)", "xy": [11500.0, "curve"], "xytext": [5500.0, 5.0], "color": "cyan"}
+          ]
+        }
+      },
       "hd598": {
         "short_title": "Sennheiser HD 598 (Open-Back Dynamic)",
         "notch_ref_hz": 5500.0,
@@ -2350,7 +2381,7 @@ mod tests {
 
     #[test]
     fn built_in_metadata_covers_the_shipped_models() {
-        for k in ["jbl770nc", "dt770_80", "ft1pro"] {
+        for k in ["jbl770nc", "dt770_80", "ft1pro", "g733", "hd598"] {
             let m =
                 built_in_metadata(k).unwrap_or_else(|| panic!("missing built-in metadata for {k}"));
             let pm = m

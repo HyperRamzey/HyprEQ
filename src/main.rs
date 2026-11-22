@@ -236,12 +236,11 @@ struct Args {
     /// behaviour is the point of running it explicitly.
     #[arg(
         long,
-        default_value = "off",
         allow_hyphen_values = true,
         help_heading = "True-Peak Limiter & Measurements",
-        help = "Regularize the correction: 'off' (default), 'auto', or a lambda in dB of deviation"
+        help = "Regularize the correction: 'off', 'auto', or a lambda in dB of deviation (overrides model JSON regularize)"
     )]
-    regularize: String,
+    regularize: Option<String>,
     /// Verify the filter against a measurement taken after it (CSV: freq, dB)
     ///
     /// Closes the loop the rest of the program leaves open: the capture is compared band by band
@@ -327,9 +326,20 @@ struct Args {
     )]
     peak_penalty: f64,
     /// Add Møller et al. (1995) FEC ear-canal acoustic-impedance uncertainty prior (4–10 kHz)
-    /// for closed-back and in-ear models in the global box-QP
-    #[arg(long, help_heading = "Groundwork (opt-in)")]
+    /// for closed-back and in-ear models in the global box-QP (overrides model JSON fec_prior)
+    #[arg(
+        long,
+        conflicts_with = "no_fec_prior",
+        help_heading = "Groundwork (opt-in)"
+    )]
     fec_prior: bool,
+    /// Disable Møller et al. (1995) FEC acoustic-impedance uncertainty prior (overrides model JSON fec_prior)
+    #[arg(
+        long,
+        conflicts_with = "fec_prior",
+        help_heading = "Groundwork (opt-in)"
+    )]
+    no_fec_prior: bool,
     /// Measured complex headphone IR WAV capture(s) for Kirkeby–Nelson causal mixed-phase
     /// inversion with Hatziantoniou–Mourjopoulos complex smoothing and Radlovic coherence gating
     #[arg(long, value_name = "WAV", help_heading = "Complex-IR Excess-Phase EQ")]
@@ -731,8 +741,10 @@ fn run(args: Args) -> Result<(), Error> {
     validate_out_bits(args.out_bits);
     // `--regularize` takes a word or a number, so clap cannot check it; a value that is neither
     // of the documented forms is a usage error like any other bad choice.
-    if let Err(msg) = regularize_arg(&args.regularize) {
-        usage_error(msg);
+    if let Some(ref reg) = args.regularize {
+        if let Err(msg) = regularize_arg(reg) {
+            usage_error(msg);
+        }
     }
 
     if let Some(fs) = args.fs {
@@ -2314,6 +2326,16 @@ fn regularize_arg(raw: &str) -> Result<RegularizeArg, String> {
 /// nothing was done and nothing was said, which is the default path.
 type CurveAndReport = (Vec<(f64, f64)>, Vec<String>);
 
+/// Resolve regularize argument against model JSON default.
+fn resolve_regularize_arg(args: &Args, model: &Model) -> RegularizeArg {
+    let raw = args
+        .regularize
+        .as_deref()
+        .or(model.regularize.as_deref())
+        .unwrap_or("off");
+    regularize_arg(raw).unwrap_or(RegularizeArg::Off)
+}
+
 /// The control curve to build the filter from, and the lines describing what regularization did
 /// to it.
 ///
@@ -2324,7 +2346,7 @@ type CurveAndReport = (Vec<(f64, f64)>, Vec<String>);
 fn regularized_ctrl(model: &Model, args: &Args) -> CurveAndReport {
     // Validated in the argument phase, where a bad value becomes a usage error. `Off` is the
     // fallback rather than a panic so this function stays total.
-    let arg = regularize_arg(&args.regularize).unwrap_or(RegularizeArg::Off);
+    let arg = resolve_regularize_arg(args, model);
     if arg == RegularizeArg::Off {
         return (model.ctrl_pts.clone(), Vec::new());
     }
@@ -2421,11 +2443,12 @@ fn regularization_lines(
 /// The `--regularize` policy for this run, or `None` when the flag is off.
 fn regularization_policy(
     args: &Args,
+    model: &Model,
     raw_pts: &[hypreq::model::Point],
 ) -> Option<hypreq::fit::Policy> {
     // Validated in the argument phase, where a bad value becomes a usage error; `Off` is the
     // fallback rather than a panic so this stays total.
-    match regularize_arg(&args.regularize).unwrap_or(RegularizeArg::Off) {
+    match resolve_regularize_arg(args, model) {
         RegularizeArg::Off => None,
         RegularizeArg::Fixed(knee) => Some(hypreq::fit::Policy::fixed(knee)),
         RegularizeArg::Auto => {
@@ -2780,7 +2803,7 @@ fn derive_with_target(
         bypass,
         discount,
     );
-    let Some(policy) = regularization_policy(args, &raw) else {
+    let Some(policy) = regularization_policy(args, model, &raw) else {
         return Ok((plain, Vec::new()));
     };
     let done = hypreq::model::derive_ctrl_pts_from_raw_regularized(
@@ -2968,6 +2991,7 @@ fn normalize_ensemble_curve(raw: &[(f64, f64)]) -> Vec<(f64, f64)> {
 fn ensemble_stage(
     args: &Args,
     recorded: &[Vec<hypreq::model::Point>],
+    model_mode: Option<&str>,
 ) -> Result<Option<EnsembleOutcome>, Error> {
     let usable = |rows: &[hypreq::model::Point]| -> Vec<(f64, f64)> {
         let raw: Vec<(f64, f64)> = rows
@@ -3051,7 +3075,8 @@ fn ensemble_stage(
             (lo, hi)
         };
     let grid = hypreq::global_fit::uniform_log_grid(f_min, f_max, 48);
-    let mode = match args.ensemble_mode.as_deref() {
+    let raw_mode = args.ensemble_mode.as_deref().or(model_mode);
+    let mode = match raw_mode {
         Some(raw_mode) => {
             let eff_alpha =
                 if raw_mode.eq_ignore_ascii_case("upper-variance") && args.ensemble_alpha == 0.0 {
@@ -3174,7 +3199,8 @@ fn global_fit_stage(
         }
         _ => vec![RIG_SIGMA_DB; k],
     };
-    let fec_term: Vec<f64> = if args.fec_prior {
+    let use_fec = fec_prior_flag(args).unwrap_or(model.fec_prior);
+    let fec_term: Vec<f64> = if use_fec {
         f.iter()
             .map(|&hz| hypreq::global_fit::fec_uncertainty_sigma_db(hz, model.acoustic_class))
             .collect()
@@ -3228,8 +3254,13 @@ fn global_fit_stage(
         q_min_db: q_min,
         q_max_db: q_max,
     };
+    let eff_peak_penalty = if args.peak_penalty != 1.0 {
+        args.peak_penalty
+    } else {
+        model.peak_penalty.unwrap_or(1.0)
+    };
     let qp_cfg = hypreq::global_fit::GlobalFitConfig {
-        peak_penalty_ratio: args.peak_penalty,
+        peak_penalty_ratio: eff_peak_penalty,
         ..hypreq::global_fit::GlobalFitConfig::default()
     };
     let res = hypreq::global_fit::solve_global_qp(&input, &qp_cfg)
@@ -3252,7 +3283,7 @@ fn global_fit_stage(
                 "max iterations"
             }
         ),
-        if args.fec_prior {
+        if use_fec {
             "  Weights          : w = 1 / (sigma_r^2 + sigma_rig^2 + sigma_fec^2), ERB density, floor 0.30 dB"
                 .to_string()
         } else {
@@ -3260,13 +3291,13 @@ fn global_fit_stage(
                 .to_string()
         },
     ];
-    if args.peak_penalty > 1.0 {
+    if eff_peak_penalty > 1.0 {
         lines.push(format!(
             "  Peak penalty     : gamma = {:.2}x on positive overshoot (Bücklein 1981 asymmetric loss)",
-            args.peak_penalty
+            eff_peak_penalty
         ));
     }
-    if args.fec_prior {
+    if use_fec {
         lines.push(format!(
             "  FEC prior        : class {} — peak +{:.2} dB ear-canal loading sigma (4–10 kHz, Møller et al. 1995)",
             class_name(model.acoustic_class),
@@ -3476,7 +3507,7 @@ fn corrected_curve_stages(
     } else {
         None
     };
-    let ensemble = ensemble_stage(args, &model.raw_ensemble)?;
+    let ensemble = ensemble_stage(args, &model.raw_ensemble, model.ensemble_mode.as_deref())?;
     let calibration = match args.rig_calibration.as_ref() {
         Some(path) => Some(
             hypreq::fixture::RigCalibration::from_json_file(path)
@@ -3950,7 +3981,7 @@ fn trim_policy(model: &Model, args: &Args) -> (hypreq::fit::Policy, bool) {
         .iter()
         .map(|p| hypreq::model::point_gain(p))
         .collect();
-    match regularize_arg(&args.regularize).unwrap_or(RegularizeArg::Off) {
+    match resolve_regularize_arg(args, model) {
         RegularizeArg::Auto => (hypreq::fit::Policy::auto(&f, &g), false),
         RegularizeArg::Fixed(knee) => (hypreq::fit::Policy::fixed(knee), false),
         RegularizeArg::Off => (hypreq::fit::Policy::default(), true),
@@ -4091,6 +4122,17 @@ fn global_fit_flag(args: &Args) -> Option<bool> {
     if args.global_fit {
         Some(true)
     } else if args.no_global_fit {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// `--fec-prior` / `--no-fec-prior` as a tri-state over the model's own default.
+fn fec_prior_flag(args: &Args) -> Option<bool> {
+    if args.fec_prior {
+        Some(true)
+    } else if args.no_fec_prior {
         Some(false)
     } else {
         None
@@ -4336,11 +4378,13 @@ mod tests {
     fn aliases_never_shadow_a_loaded_model() {
         // `-H` resolves aliases before plain keys, so an alias that collides with a model
         // key would make that model unreachable under its own name.
-        let shipped = filter_aliases(|n| ["jbl770nc", "dt770_80", "ft1pro", "g733"].contains(&n));
+        let shipped =
+            filter_aliases(|n| ["jbl770nc", "dt770_80", "ft1pro", "g733", "hd598"].contains(&n));
         assert_eq!(shipped.len(), MODEL_ALIASES.len());
 
-        let shadowed =
-            filter_aliases(|n| ["dt770", "jbl770nc", "dt770_80", "ft1pro", "g733"].contains(&n));
+        let shadowed = filter_aliases(|n| {
+            ["dt770", "jbl770nc", "dt770_80", "ft1pro", "g733", "hd598"].contains(&n)
+        });
         assert!(
             !shadowed.iter().any(|(a, _)| *a == "dt770"),
             "a model named 'dt770' is unreachable while its alias is active: {shadowed:?}"
@@ -4509,6 +4553,10 @@ mod tests {
             harm_offset: 0.0,
             gauss_apodize: false,
             global_fit: false,
+            regularize: None,
+            ensemble_mode: None,
+            fec_prior: false,
+            peak_penalty: None,
             hf_bypass_hz: 20000.0,
             hf_taper_start_hz: None,
             subbass_leak_discount_db: None,
@@ -4576,7 +4624,7 @@ mod tests {
         // ceiling. Cap first and regularize second, and the same fixture lands near +0.5 dB: the
         // load would be chewing on a knot the cap had already flattened, softening a boost that
         // was no longer there. Two mechanisms, one order, and the number says which.
-        args.regularize = "-0.5".to_string();
+        args.regularize = Some("-0.5".to_string());
         let (shrunk_then_capped, lines) = corrected_curve(&model, &args).expect("a curve");
         let peak = peak_in_range(&shrunk_then_capped);
         assert!(
@@ -4605,13 +4653,14 @@ mod tests {
             .iter()
             .find(|m| m.key == "dt770_80")
             .expect("dt770_80 ships");
-        let mut args = Args::try_parse_from(["hypreq", "-H", "dt770_80"]).expect("parses");
+        let mut args = Args::try_parse_from(["hypreq", "-H", "dt770_80", "--regularize", "off"])
+            .expect("parses");
         let (curve, lines) = regularized_ctrl(model, &args);
         assert_eq!(curve, model.ctrl_pts, "off must not touch the curve");
         assert!(lines.is_empty(), "off must not print anything: {lines:?}");
 
         // A knee high enough to trust everything must also leave the curve alone, exactly.
-        args.regularize = "1000".to_string();
+        args.regularize = Some("1000".to_string());
         let (curve, lines) = regularized_ctrl(model, &args);
         assert_eq!(
             curve, model.ctrl_pts,
@@ -4633,7 +4682,7 @@ mod tests {
         assert!(text.contains("under the knee"), "{text}");
 
         // A knee low enough to distrust everything walks the curve to 0 dB, and says so.
-        args.regularize = "-40".to_string();
+        args.regularize = Some("-40".to_string());
         let (curve, lines) = regularized_ctrl(model, &args);
         assert!(
             curve.iter().all(|&(_, g)| g.abs() < 0.01),
@@ -4764,7 +4813,7 @@ mod tests {
         ];
         let recorded = vec![c1, c2, c3];
         let args_rms = argv(&["-H", "hd6xx", "--ensemble-mode", "rms"]);
-        let out_rms = ensemble_stage(&args_rms, &recorded)
+        let out_rms = ensemble_stage(&args_rms, &recorded, None)
             .expect("rms")
             .expect("some");
         assert!(out_rms
@@ -4773,7 +4822,7 @@ mod tests {
             .any(|l| l.contains("Schärer & Lindau 2009")));
 
         let args_uv = argv(&["-H", "hd6xx", "--ensemble-mode", "upper-variance"]);
-        let out_uv = ensemble_stage(&args_uv, &recorded)
+        let out_uv = ensemble_stage(&args_uv, &recorded, None)
             .expect("uv")
             .expect("some");
         assert!(out_uv
@@ -6275,13 +6324,13 @@ mod tests {
         let two: Vec<hypreq::model::Point> =
             vec![vec![20.0, 0.2], vec![1000.0, -0.4], vec![20000.0, 0.7]];
         assert!(
-            ensemble_stage(&args, std::slice::from_ref(&one))
+            ensemble_stage(&args, std::slice::from_ref(&one), None)
                 .expect("recorded single")
                 .is_none(),
             "a single recorded placement entered the ensemble machinery"
         );
         assert!(
-            ensemble_stage(&args, &[one.clone(), two.clone()])
+            ensemble_stage(&args, &[one.clone(), two.clone()], None)
                 .expect("recorded pair")
                 .is_some(),
             "two placements must form an ensemble"
@@ -6293,6 +6342,7 @@ mod tests {
         let e = ensemble_stage(
             &argv(&["-H", "hd6xx", "--ensemble-csv", f1.to_str().unwrap()]),
             &[],
+            None,
         )
         .expect_err("one explicit CSV must be refused, not run as a 1-curve ensemble");
         assert!(e.to_string().contains("at least two"), "{e}");
@@ -6318,7 +6368,7 @@ mod tests {
             // at 18 kHz so the shape on [20, 18000] is identical between both curves:
             vec![20000.0, 4.9200251782271],
         ];
-        let out = ensemble_stage(&args, &[base, shifted])
+        let out = ensemble_stage(&args, &[base, shifted], None)
             .expect("valid ensemble")
             .expect("two curves");
         let max_sig = out.sigma.iter().map(|p| p.1).fold(0.0_f64, f64::max);

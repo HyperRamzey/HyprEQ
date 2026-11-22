@@ -33,7 +33,7 @@ pub const DEFAULT_DATA_FILE: &str = "measurements.json";
 pub const DEFAULT_MODELS_DIR: &str = "models";
 
 /// Alternate spellings of model keys. Applied only when the target exists.
-pub const MODEL_ALIASES: [(&str, &str); 7] = [
+pub const MODEL_ALIASES: [(&str, &str); 9] = [
     ("fiio_ft1_pro", "ft1pro"),
     ("ft1_pro", "ft1pro"),
     ("dt770", "dt770_80"),
@@ -41,6 +41,8 @@ pub const MODEL_ALIASES: [(&str, &str); 7] = [
     ("jbl_770nc", "jbl770nc"),
     ("logitech_g733", "g733"),
     ("g733_lightspeed", "g733"),
+    ("sennheiser_hd598", "hd598"),
+    ("hd_598", "hd598"),
 ];
 
 /// Gain of one raw-curve row, whatever shape the row has.
@@ -71,6 +73,9 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
         "autoeq_offset_db": 0.0,
         "gauss_apodize": false,
         "global_fit": true,
+        "regularize": "auto",
+        "ensemble_mode": "rms",
+        "fec_prior": true,
         "plot_meta": {
           "title_template": "VERIFICATION: JBL Live 770NC (Passive) Convolver (Preamp: {pre_rt:.2f} dB | Unwindowed Floor: {unwin_rt:.1f} dBFS)",
           "bypass_label": "Uncorrected >9.1 kHz Coupler Cylinder Null Zone (Clamped to 0.0 dB)",
@@ -101,6 +106,9 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
         "autoeq_offset_db": 4.55,
         "gauss_apodize": true,
         "global_fit": true,
+        "regularize": "auto",
+        "ensemble_mode": "rms",
+        "fec_prior": true,
         "plot_meta": {
           "title_template": "VERIFICATION: Beyerdynamic DT 770 Pro (80 Ω) Convolver (Notch Mode: {notch_mode} | Preamp: {pre_rt:.2f} dB)",
           "bypass_label": "Uncorrected >8.8 kHz Coupler Null & >15.8 kHz 0.0 dB Wire Zone (Left Unmodified)",
@@ -134,6 +142,9 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
         "autoeq_offset_db": 4.30,
         "gauss_apodize": true,
         "global_fit": true,
+        "regularize": "auto",
+        "ensemble_mode": "rms",
+        "fec_prior": false,
         "plot_meta": {
           "title_template": "VERIFICATION: FiiO FT1 Pro (Open-Back Planar) Convolver (Notch Mode: {notch_mode} | Preamp: {pre_rt:.2f} dB)",
           "bypass_label": "Uncorrected >9.75 kHz Coupler Null & 0.0 dB Wire Zone (Left Unmodified)",
@@ -157,6 +168,37 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
             {"text": "4. 3.84kHz L/R-Asymmetric Concha Notch\n({notch_db:+.2f}dB in '{notch_mode}' mode;\navoids 4.05dB L/R split glare)", "xy": [3839.0, "notch_db"], "xytext": [1650.0, 7.3], "color": "green"},
             {"text": "5. 5.75kHz Planar Treble Mode Trim\n({curve_db:+.2f}dB Correction)", "xy": [5750.0, "curve"], "xytext": [2800.0, -8.5], "color": "green"},
             {"text": "6. >9.75kHz Uncorrected Coupler Null Zone\n(0.0dB wire: ignores 9.75k & 12.8kHz nulls)", "xy": [11300.0, "curve"], "xytext": [5500.0, 4.4], "color": "cyan"}
+          ]
+        }
+      },
+      "hd598": {
+        "short_title": "Sennheiser HD 598 (Open-Back Dynamic)",
+        "notch_ref_hz": 5500.0,
+        "autoeq_offset_db": 0.0,
+        "gauss_apodize": true,
+        "global_fit": true,
+        "regularize": "auto",
+        "ensemble_mode": "rms",
+        "fec_prior": false,
+        "plot_meta": {
+          "title_template": "VERIFICATION: Sennheiser HD 598 (Open-Back Dynamic) Convolver (Notch Mode: {notch_mode} | Preamp: {pre_rt:.2f} dB)",
+          "bypass_label": "Uncorrected >9.8 kHz Coupler Null & 0.0 dB Wire Zone (Left Unmodified)",
+          "raw_label": "Raw Sennheiser HD 598 (Open-Back Dynamic on GRAS 43AG-7 / KB5000 + IEC 711)",
+          "autoeq_ax1_label": "Standard AutoEq (GraphicEQ.txt: -0.2dB 20Hz & uncompensated 5.5kHz dip)",
+          "wav_ax1_label": "Final WAV Convolver (Notch Mode: {notch_mode} | Unwindowed Floor: {unwin_rt:.1f} dBFS @ 16k)",
+          "raw_err_ax2_label": "Raw Unsmoothed Error (+8.0dB 5.0k-5.6kHz concha dip & 7.1kHz notch)",
+          "autoeq_ax2_label": "Standard AutoEq Curve (-0.2dB sub-bass & 2.0 oct treble blur)",
+          "ax1_ylim": [-15.0, 10.0],
+          "ax1_yticks": [-15, -10, -5, 0, 5, 10],
+          "ax2_ylim": [-10.0, 12.0],
+          "ax2_yticks": [-10.0, -7.5, -5.0, -2.5, 0.0, 2.5, 5.0, 7.5, 10.0],
+          "annotations": [
+            {"text": "1. Open-Back E.A.R. Acoustic Tuning\n({curve_db:+.2f}dB @ 20Hz, natural roll-off)", "xy": [20.5, "curve"], "xytext": [22.0, 5.5], "color": "cyan"},
+            {"text": "2. Mid-Bass Warmth Transition\n({curve_db:+.2f}dB @ 100Hz, {curve_db@200.0:+.2f}dB @ 200Hz)", "xy": [100.0, "curve"], "xytext": [70.0, 4.8], "color": "cyan"},
+            {"text": "3. 1kHz Flat Reference\n({curve_db:+.2f}dB @ 1kHz)", "xy": [1000.0, "curve"], "xytext": [550.0, 4.0], "color": "cyan"},
+            {"text": "4. 5.5kHz Concha Reflection Notch\n({notch_db:+.2f}dB in '{notch_mode}' mode;\navoids harshness)", "xy": [5500.0, "notch_db"], "xytext": [2200.0, 7.5], "color": "green"},
+            {"text": "5. 7.1kHz & 8.2kHz Treble Mode Shaping\n({curve_db@7090.0:+.2f}dB & {curve_db@8231.0:+.2f}dB Cuts)", "xy": [8231.0, "curve"], "xytext": [3800.0, -7.5], "color": "green"},
+            {"text": "6. >9.8kHz Uncorrected Coupler Null Zone\n(0.0dB wire: ignores coupler cylinder null)", "xy": [10500.0, "curve"], "xytext": [5500.0, 5.0], "color": "cyan"}
           ]
         }
       }
@@ -205,6 +247,10 @@ pub struct Model {
     pub harm_offset: f64,
     pub gauss_apodize: bool,
     pub global_fit: bool,
+    pub regularize: Option<String>,
+    pub ensemble_mode: Option<String>,
+    pub fec_prior: bool,
+    pub peak_penalty: Option<f64>,
     pub hf_bypass_hz: f64,
     pub hf_taper_start_hz: Option<f64>,
     pub subbass_leak_discount_db: Option<f64>,
@@ -1160,6 +1206,32 @@ pub fn normalize_model_entry(
             .and_then(Value::as_bool)
             .or_else(|| defaults.get("global_fit").and_then(Value::as_bool))
             .unwrap_or(false),
+        regularize: match cfg.get("regularize").or_else(|| defaults.get("regularize")) {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Bool(true)) => Some("auto".to_string()),
+            Some(Value::Bool(false)) => Some("off".to_string()),
+            Some(Value::Number(n)) => Some(n.to_string()),
+            _ => None,
+        },
+        ensemble_mode: cfg
+            .get("ensemble_mode")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                defaults
+                    .get("ensemble_mode")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }),
+        fec_prior: cfg
+            .get("fec_prior")
+            .and_then(Value::as_bool)
+            .or_else(|| defaults.get("fec_prior").and_then(Value::as_bool))
+            .unwrap_or(false),
+        peak_penalty: cfg
+            .get("peak_penalty")
+            .and_then(as_f64)
+            .or_else(|| defaults.get("peak_penalty").and_then(as_f64)),
         hf_bypass_hz,
         hf_taper_start_hz: cfg.get("hf_taper_start_hz").and_then(as_f64),
         subbass_leak_discount_db: cfg.get("subbass_leak_discount_db").and_then(as_f64),
@@ -2070,6 +2142,10 @@ mod tests {
                 harm_offset: 0.0,
                 gauss_apodize: false,
                 global_fit: false,
+                regularize: None,
+                ensemble_mode: None,
+                fec_prior: false,
+                peak_penalty: None,
                 hf_bypass_hz: 9500.0,
                 hf_taper_start_hz: None,
                 subbass_leak_discount_db: None,
@@ -2139,6 +2215,10 @@ mod tests {
             harm_offset: 0.0,
             gauss_apodize: false,
             global_fit: false,
+            regularize: None,
+            ensemble_mode: None,
+            fec_prior: false,
+            peak_penalty: None,
             hf_bypass_hz: 20000.0,
             hf_taper_start_hz: None,
             subbass_leak_discount_db: None,
@@ -2323,7 +2403,7 @@ mod tests {
                 .expect("the shipped measurements.json must load from the crate root");
         assert_eq!(
             db.keys(),
-            vec!["jbl770nc", "dt770_80", "ft1pro", "g733"],
+            vec!["jbl770nc", "dt770_80", "ft1pro", "g733", "hd598"],
             "model order must be the file's key order, not alphabetical"
         );
         assert_eq!(db.resolve("all"), Some("all"));

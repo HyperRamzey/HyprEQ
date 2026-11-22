@@ -95,32 +95,52 @@ cargo build --release
 
    > **What Global Fit Gives:** Solves the constrained QP across the 3-unit PC wireless ensemble, smoothing high-frequency placement divergence around $13\text{ kHz}$ ($\sigma_r = 5.19\text{ dB}$) and saving $0.10\text{ dB}$ preamp headroom ($-8.00\text{ dB}$) with $100.0000000000\%$ causal energy.
 
+5. **Sennheiser HD 598 (Open-Back Dynamic)** — `--headphone hd598`
+   - **Measurement Source:** **oratory1990** (Genuine `GRAS 43AG-7` fixture: `RA0402` high-frequency 711 coupler + `KB5000` anthropometric pinna), via AutoEq, with a 4-capture multi-placement ensemble across Crinacle, Rtings, InnerFidelity, and oratory1990.
+   - **Target:** **Harman KB5000_7** (Olive & Clark, AES 159th Convention, 2025; `targets/harman_kb5000_7.json` default). Legacy Harman Over-Ear 2018 accessible via `--no-target-preset`.
+
+   **Baseline Verification (Unregularized / Shipped Default):**
+   <img width="1950" height="1725" alt="hd598_final_verification" src="docs/plots/hd598_final_verification.png" />
+
+   **Adaptive Regularized Verification (`--regularize auto`):**
+   <img width="1950" height="1725" alt="hd598_regularized_verification" src="docs/plots/hd598_regularized_verification.png" />
+
+   > **What Adaptive Regularization Gives:** Evaluates local spectral deviation against a half-octave smoothed envelope with an adaptive knee at $3.00\text{ dB}$, moving 268 of 479 knots to smoothly moderate narrow deep-bass inversion ($+11.79\text{ dB} \to +11.39\text{ dB}$ at $20\text{ Hz}$) while preserving the natural acoustic roll-off and concha notch protections ($4.8\text{–}6.2\text{ kHz}$) without inducing treble glare. Total preamp moves from $-13.29\text{ dB}$ to $-12.89\text{ dB}$.
+
+   **Ensemble Global Fit + Adaptive Regularization (`--global-fit --regularize auto`):**
+   <img width="1950" height="1725" alt="hd598_global_fit_verification" src="docs/plots/hd598_global_fit_verification.png" />
+
+   > **What Global Fit Gives:** Solves the curvature-constrained box-QP across the 4-capture placement ensemble ($\sigma_r$ peaking at $4.59\text{ dB}$ around $8.99\text{ kHz}$) with open-back acoustic weighting. Reins in excessive high-frequency boost chasing, recovering $2.00\text{ dB}$ of digital preamp headroom ($-11.29\text{ dB}$ vs. $-13.29\text{ dB}$ baseline) with $99.9999999776\%$ causal energy and $-279.15\text{ dBFS}$ truncation floor.
+
 ### Reference Model Profiles & Convolver Metrics
 
 | Model Key | Target Profile / Mode | Max Boost | Preamp | Truncation Floor ($f_{64}$, after half-Kaiser fade) | Causal Energy | HF Taper | Generated Convolvers / Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`jbl770nc`** | **KB5000_7 Baseline (Shipped Default)** | $+7.03\text{ dB}$ | $-8.53\text{ dB}$ | $-295.18\text{ dBFS}$ | $99.9999999982\%$ | $0.00\text{ dB}$ HF Wire | `targets/harman_kb5000_7.json` default; IR Peak $-7.800\text{ dBTP}$ (x16) |
-| **`jbl770nc`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+7.02\text{ dB}$ | $-8.52\text{ dB}$ | $-295.16\text{ dBFS}$ | $99.9999999982\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$, 26 knots moved ($8.48\text{k}$ softened); IR Peak $-7.783\text{ dBTP}$ (x16) |
-| **`jbl770nc`** | **KB5000_7 Global Fit + Auto (`--global-fit --regularize auto`)** | $+6.91\text{ dB}$ | $-8.41\text{ dB}$ | $-313.29\text{ dBFS}$ | $99.9999999999\%$ | $0.00\text{ dB}$ HF Wire | QP variance-weighted, Knee $3.00\text{ dB}$; IR Peak $-7.603\text{ dBTP}$ (x16) |
+| **`jbl770nc`** | **KB5000_7 Baseline (Unregularized)** | $+6.89\text{ dB}$ | $-8.39\text{ dB}$ | $-291.09\text{ dBFS}$ | $99.9999999986\%$ | $0.00\text{ dB}$ HF Wire | `targets/harman_kb5000_7.json`; IR Peak $-7.612\text{ dBTP}$ (x16) |
+| **`jbl770nc`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+6.86\text{ dB}$ | $-8.36\text{ dB}$ | $-293.41\text{ dBFS}$ | $99.9999999993\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$; IR Peak $-7.584\text{ dBTP}$ (x16) |
+| **`jbl770nc`** | **KB5000_7 Global Fit + Auto (Model Default)** | $+6.74\text{ dB}$ | $-8.24\text{ dB}$ | $-314.25\text{ dBFS}$ | $99.9999999999\%$ | $0.00\text{ dB}$ HF Wire | QP variance-weighted, FEC prior, RMS ensemble; IR Peak $-7.460\text{ dBTP}$ (x16) |
 | **`jbl770nc`** | Harman 2018 Baseline (`--no-target-preset`) | $+4.97\text{ dB}$ | $-6.47\text{ dB}$ | $-319.24\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | `jbl770nc_f64_48k.wav`<br>`jbl770nc_mastering_mono_48k.wav`<br>`jbl770nc_mastering_stereo_48k.wav` |
 | **`jbl770nc`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+4.97\text{ dB}$ | $-6.47\text{ dB}$ | $-319.23\text{ dBFS}$ | $100.0000000000\%$ | $0.00\text{ dB}$ HF Wire | Knee $4.29\text{ dB}$, 20 knots moved ($8.48\text{k}$ softened) |
-| **`dt770_80`** | **KB5000_7 Baseline (Shipped Default)** | $+4.54\text{ dB}$ | $-6.04\text{ dB}$ | $-288.43\text{ dBFS}$ | $99.9999999970\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json` default; IR Peak $-6.989\text{ dBTP}$ (x16) |
-| **`dt770_80`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+4.50\text{ dB}$ | $-6.00\text{ dB}$ | $-288.23\text{ dBFS}$ | $99.9999999969\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $4.27\text{ dB}$, 38 knots moved ($3.78\text{k}$ concha null bypassed $+0.57\text{ dB}$) |
-| **`dt770_80`** | **KB5000_7 Global Fit + Auto (`--global-fit --regularize auto`)** | $+3.99\text{ dB}$ | $-5.49\text{ dB}$ | $-305.00\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | QP variance-weighted, Knee $3.00\text{ dB}$; IR Peak $-5.950\text{ dBTP}$ (x16) |
+| **`dt770_80`** | **KB5000_7 Baseline (Unregularized)** | $+4.40\text{ dB}$ | $-5.90\text{ dB}$ | $-283.19\text{ dBFS}$ | $99.9999999982\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json`; IR Peak $-6.313\text{ dBTP}$ (x16) |
+| **`dt770_80`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+4.22\text{ dB}$ | $-5.72\text{ dB}$ | $-285.82\text{ dBFS}$ | $99.9999999993\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $4.27\text{ dB}$; IR Peak $-6.132\text{ dBTP}$ (x16) |
+| **`dt770_80`** | **KB5000_7 Global Fit + Auto (Model Default)** | $+4.06\text{ dB}$ | $-5.56\text{ dB}$ | $-317.87\text{ dBFS}$ | $99.9999999999\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | QP variance-weighted, FEC prior, RMS ensemble; IR Peak $-5.963\text{ dBTP}$ (x16) |
 | **`dt770_80`** | Harman 2018 Baseline (`--no-target-preset`) | $+4.10\text{ dB}$ | $-5.60\text{ dB}$ | $-293.39\text{ dBFS}$ | $99.9999999981\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `dt770_80ohm_f64_48k.wav`<br>`dt770_80ohm_mastering_mono_48k.wav`<br>`dt770_80ohm_mastering_stereo_48k.wav` |
 | **`dt770_80`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+4.06\text{ dB}$ | $-5.56\text{ dB}$ | $-293.36\text{ dBFS}$ | $99.9999999982\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $4.27\text{ dB}$, $3.7\text{k}$ concha null bypassed ($+0.10\text{ dB}$) |
-| **`ft1pro`** | **KB5000_7 Baseline (Shipped Default)** | $+3.97\text{ dB}$ | $-5.47\text{ dB}$ | $-301.22\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json` default; IR Peak $-5.565\text{ dBTP}$ (x16) |
-| **`ft1pro`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+3.95\text{ dB}$ | $-5.45\text{ dB}$ | $-300.93\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 67 knots moved ($9.18\text{k}$ moderated); IR Peak $-5.561\text{ dBTP}$ (x16) |
-| **`ft1pro`** | **KB5000_7 Global Fit + Auto (`--global-fit --regularize auto`)** | $+4.30\text{ dB}$ | $-5.80\text{ dB}$ | $-306.94\text{ dBFS}$ | $99.9999999997\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | QP variance-weighted, Knee $3.00\text{ dB}$; IR Peak $-5.717\text{ dBTP}$ (x16) |
+| **`ft1pro`** | **KB5000_7 Baseline (Unregularized)** | $+7.15\text{ dB}$ | $-8.65\text{ dB}$ | $-288.58\text{ dBFS}$ | $99.9999999915\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json`; IR Peak $-8.527\text{ dBTP}$ (x16) |
+| **`ft1pro`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+7.04\text{ dB}$ | $-8.54\text{ dB}$ | $-281.57\text{ dBFS}$ | $99.9999999909\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$; IR Peak $-8.506\text{ dBTP}$ (x16) |
+| **`ft1pro`** | **KB5000_7 Global Fit + Auto (Model Default)** | $+3.99\text{ dB}$ | $-5.49\text{ dB}$ | $-311.61\text{ dBFS}$ | $100.0000000000\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | QP variance-weighted, RMS ensemble (open-back, FEC disabled); IR Peak $-5.476\text{ dBTP}$ (x16) |
 | **`ft1pro`** | Harman 2018 Baseline (`--no-target-preset`) | $+4.07\text{ dB}$ | $-5.57\text{ dB}$ | $-311.60\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `ft1pro_f64_48k.wav`<br>`ft1pro_mastering_mono_48k.wav`<br>`ft1pro_mastering_stereo_48k.wav` |
 | **`ft1pro`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+4.03\text{ dB}$ | $-5.53\text{ dB}$ | $-311.45\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 62 knots moved ($9.18\text{k}$ moderated) |
-| **`g733`** | **KB5000_7 Baseline (Shipped Default)** | $+6.63\text{ dB}$ | $-8.13\text{ dB}$ | $-286.94\text{ dBFS}$ | $99.9999999997\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json` default; IR Peak $-8.075\text{ dBTP}$ (x16) |
-| **`g733`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+6.60\text{ dB}$ | $-8.10\text{ dB}$ | $-288.59\text{ dBFS}$ | $99.9999999998\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 256 knots moved; IR Peak $-8.050\text{ dBTP}$ (x16) |
-| **`g733`** | **KB5000_7 Global Fit + Auto (`--global-fit --regularize auto`)** | $+6.50\text{ dB}$ | $-8.00\text{ dB}$ | $-316.01\text{ dBFS}$ | $100.0000000000\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | QP variance-weighted, Knee $3.00\text{ dB}$; IR Peak $-7.965\text{ dBTP}$ (x16) |
+| **`g733`** | **KB5000_7 Baseline (Unregularized)** | $+6.72\text{ dB}$ | $-8.22\text{ dB}$ | $-280.06\text{ dBFS}$ | $99.9999999993\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json`; IR Peak $-8.191\text{ dBTP}$ (x16) |
+| **`g733`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+6.70\text{ dB}$ | $-8.20\text{ dB}$ | $-283.80\text{ dBFS}$ | $99.9999999996\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 256 knots moved; IR Peak $-8.172\text{ dBTP}$ (x16) |
+| **`g733`** | **KB5000_7 Global Fit + Auto (Model Default)** | $+6.21\text{ dB}$ | $-7.71\text{ dB}$ | $-315.09\text{ dBFS}$ | $100.0000000000\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | QP variance-weighted, FEC prior, RMS ensemble; IR Peak $-7.701\text{ dBTP}$ (x16) |
 | **`g733`** | Harman 2018 Baseline (`--no-target-preset`) | $+3.95\text{ dB}$ | $-5.45\text{ dB}$ | $-290.99\text{ dBFS}$ | $99.9999999996\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `g733_f64_48k.wav`<br>`g733_mastering_mono_48k.wav`<br>`g733_mastering_stereo_48k.wav` |
 | **`g733`** | Harman 2018 PR 1 Auto (`--regularize auto`) | $+3.95\text{ dB}$ | $-5.45\text{ dB}$ | $-290.99\text{ dBFS}$ | $99.9999999996\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, treble deviation tapered |
+| **`hd598`** | **KB5000_7 Baseline (Unregularized)** | $+11.79\text{ dB}$ | $-13.29\text{ dB}$ | $-282.81\text{ dBFS}$ | $99.9999999780\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | `targets/harman_kb5000_7.json`; IR Peak $-13.315\text{ dBTP}$ (x16) |
+| **`hd598`** | **KB5000_7 PR 1 Auto (`--regularize auto`)** | $+11.39\text{ dB}$ | $-12.89\text{ dB}$ | $-294.01\text{ dBFS}$ | $99.9999999933\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | Knee $3.00\text{ dB}$, 268 knots moved; IR Peak $-12.915\text{ dBTP}$ (x16) |
+| **`hd598`** | **KB5000_7 Global Fit + Auto (Model Default)** | $+9.79\text{ dB}$ | $-11.29\text{ dB}$ | $-279.15\text{ dBFS}$ | $99.9999999776\%$ | Gaussian Apodizer ($>20.2\text{ kHz}$) | QP variance-weighted, RMS ensemble (open-back, FEC disabled); IR Peak $-11.287\text{ dBTP}$ (x16) |
 
-> **Asset provenance (measured 2026-11-21):** with the authors' published `KB5000_7 any frequency.txt` converted to `targets/kb5000_7.csv`, `hypreq -H <model> --target-preset targets/harman_kb5000_7.json --regularize auto` reproduces all twelve `backup/irs/*.wav` byte-for-byte (running the model's recorded `global_fit=True` by default; opt out with `--no-global-fit`), while the baseline default, `--regularize auto --no-global-fit`, and `--regularize auto` runs produce the `docs/plots` baseline, regularized, and global-fit titles respectively. The CSV itself is deliberately untracked, so a fresh clone still cannot regenerate the KB5000_7 assets until the user supplies it. The Harman 2018 rows use `--no-target-preset`. PNG byte hashes are not a reproducibility test: local font rasterisation changes text pixels while the plotted DSP curves and title numbers match.
+> **Asset provenance (measured 2026-11-22):** with the authors' published `KB5000_7 any frequency.txt` converted to `targets/kb5000_7.csv`, `hypreq -H <model>` reproduces all fifteen `backup/irs/*.wav` byte-for-byte (running the model's recorded `global_fit=true`, `regularize="auto"`, `ensemble_mode="rms"`, and `fec_prior` defaults; opt out with CLI flags), while the baseline unregularized (`--regularize off --no-global-fit`), `--regularize auto --no-global-fit`, and default runs produce the `docs/plots` baseline, regularized, and global-fit titles respectively. The CSV itself is deliberately untracked, so a fresh clone still cannot regenerate the KB5000_7 assets until the user supplies it. The Harman 2018 rows use `--no-target-preset`. PNG byte hashes are not a reproducibility test: local font rasterisation changes text pixels while the plotted DSP curves and title numbers match.
 
 ### Acoustic Scope & Limitations
 A coupler measurement captures one unit on one artificial pinna/ear simulator. Pad wear, seal leakage, and individual pinna geometry shift sub-bass (`<60 Hz`) and high-frequency pinna interference notches (`>3 kHz`) by several dB from ear to ear. For example, even between the Left and Right earcups of the measured DT 770 Pro 80 Ω unit on Crinacle's GRAS 43AG-7 rig, the `~3.76 kHz` concha reflection null shifts by `135 Hz` and `6.6 dB` (`-2.16 dBr` Left vs. `-8.78 dBr` Right at `3,838 Hz`), while the FiiO FT1 Pro exhibits a `4.05 dB` L/R channel split across its `~3.84–4.05 kHz` concha/driver notch (`+4.32 dBr` Left vs. `+8.37 dBr` Right at `3,839 Hz`).
@@ -293,11 +313,15 @@ Inverting sharp, high-Q measurement dips creates harsh, unnatural resonances. Wh
 
 $$G_{\mathrm{reg}}(f) = \frac{|S(f)|^2 G(f) + \beta(f)}{|S(f)|^2 + \beta(f)}$$
 
-where $|S(f)|^2 = 10^{\text{raw}_{\mathrm{dB}}(f) / 10}$ represents normalized measured transfer function power and $G(f) = 10^{g_{\mathrm{dB}}(f) / 20}$ is the nominal linear correction factor.
+where:
+
+$$|S(f)|^2 = 10^{S_{\mathrm{dB}}(f) / 10}, \qquad G(f) = 10^{g_{\mathrm{dB}}(f) / 20}$$
+
+represent normalized measured transfer function power ($S_{\mathrm{dB}}(f) \equiv \text{raw}_{\mathrm{dB}}(f)$) and the nominal linear correction factor respectively.
 
 The regularization diagonal load $\beta(f)$ is continuous and monotonic in the local smoothed spectral deviation:
 
-$$\text{dev}(f) = \left| \text{raw}_{\mathrm{dB}}(f) - \text{smooth}_{1/2\text{-oct}}(\text{raw}_{\mathrm{dB}})(f) \right|$$
+$$\text{dev}(f) = \left| S_{\mathrm{dB}}(f) - \text{smooth}_{1/2\text{-oct}}(S_{\mathrm{dB}})(f) \right|$$
 
 $$\beta(f) = 10^{\frac{\kappa (\text{dev}(f) - \lambda)}{10}}$$
 
@@ -315,11 +339,11 @@ with sensitivity slope $\kappa = 8.0\text{ dB}^{-1}$ and adaptive knee $\lambda 
 
 ### 13. Multi-Placement Ensemble Averaging: Power-Domain RMS & Peak-Safe Envelopes
 When collapsing repeated placement captures (`--ensemble-csv` or recorded `raw_ensemble`), HyprEQ supports four collapse modes via `--ensemble-mode`:
-- **`median` (Default):** Pointwise median across placements — resists a single bad seal or clamp outlier.
-- **`rms` (Schärer & Lindau, 2009; Lindau & Brinkmann, 2012):** Linear power-domain RMS average computed via overflow-safe log-sum-exp:
+- **`rms` (Model Default; Schärer & Lindau, 2009; Lindau & Brinkmann, 2012):** Linear power-domain RMS average computed via overflow-safe log-sum-exp:
   $$H_{\text{RMS}}(f) = 10\log_{10}\!\left(\frac{1}{M}\sum_{j=1}^{M} 10^{L_j(f)/10}\right)$$
   By Jensen's inequality, $H_{\text{RMS}}(f) \ge \overline{L}(f)$ everywhere, naturally weighting down shifting narrowband notches across seatings (Z. Schärer & A. Lindau, 126th AES Convention, Paper 7721, May 2009; A. Lindau & F. Brinkmann, *JAES* 60(1/2), pp. 54–62, Jan./Feb. 2012).
-- **`upper-variance` (Adapted from Masiero & Fels, 2011):** Computes $H_{\text{safe}}(f) = \operatorname{median}(f) + \alpha \cdot (1.4826 \cdot \operatorname{MAD}(f))$ over 1/6-octave smoothed curves (with `--ensemble-alpha`, defaulting to `1.0` when `--ensemble-mode upper-variance` is named explicitly).
+- **`median`:** Pointwise median across placements — resists a single bad seal or clamp outlier.
+- **`upper-variance` (Adapted from Masiero & Fels, 2011):** Computes $H_{\text{safe}}(f) = \mathrm{median}(f) + \alpha \cdot (1.4826 \cdot \mathrm{MAD}(f))$ over 1/6-octave smoothed curves (with `--ensemble-alpha`, defaulting to `1.0` when `--ensemble-mode upper-variance` is named explicitly).
   > [!NOTE]
   > **Prior Art vs. HyprEQ Choice:** B. Masiero & J. Fels (130th AES Convention, Paper 8388, May 2011) defined their peak-safe upper-variance envelope using the arithmetic mean and standard deviation (`mean(f) + k * std(f)`, commonly `k = 2`). HyprEQ intentionally substitutes `median(f) + alpha * (1.4826 * MAD(f))` so a single outlier seating cannot inflate both location and spread.
 - **`average`:** Pointwise dB-domain arithmetic mean (baseline reference).

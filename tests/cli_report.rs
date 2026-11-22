@@ -439,14 +439,14 @@ fn report_leaves_the_audio_alone_and_split_changes_it() {
         "split printed a shared filter it did not apply:\n{out_split}"
     );
     // Re-pinned with the 479-bin placement ensemble + global fit grid for dt770_80:
-    // with smooth QP regularization across the notch zone, 36 left knots and 41 right knots are held/blended,
+    // with smooth QP regularization across the notch zone, 31 left knots and 41 right knots are held/blended,
     // moving the centre in 41 knots.
     assert!(
         out_split.contains("Centre            : moved in 41 knot(s)"),
         "split did not account for the ceiling biting:\n{out_split}"
     );
     assert!(
-        out_split.contains("Notch cap         : held 36 left / 41 right knot(s)"),
+        out_split.contains("Notch cap         : held 31 left / 41 right knot(s)"),
         "the ceiling's accounting is missing:\n{out_split}"
     );
 
@@ -491,15 +491,49 @@ fn report_leaves_the_audio_alone_and_split_changes_it() {
 fn a_default_run_says_nothing_about_regularization() {
     let stdout = run(
         "off",
-        &["-H", "dt770_80", "--no-target-preset", "--no-plot"],
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--regularize",
+            "off",
+            "--no-plot",
+        ],
     );
     assert!(
         !stdout.contains("Regularization"),
-        "the default report gained a section:\n{stdout}"
+        "the explicit off report gained a section:\n{stdout}"
     );
     assert!(
         stdout.contains("MODEL: Beyerdynamic DT 770 Pro"),
         "the report lost its heading:\n{stdout}"
+    );
+}
+
+#[test]
+fn model_regularize_auto_runs_by_default_and_respects_regularize_off() {
+    let stdout_auto = run(
+        "dt770-auto-default",
+        &["-H", "dt770_80", "--no-target-preset", "--no-plot"],
+    );
+    assert!(
+        stdout_auto.contains("=== Regularization"),
+        "model with regularize=auto must run regularization by default:\n{stdout_auto}"
+    );
+    let stdout_off = run(
+        "dt770-explicit-off",
+        &[
+            "-H",
+            "dt770_80",
+            "--no-target-preset",
+            "--regularize",
+            "off",
+            "--no-plot",
+        ],
+    );
+    assert!(
+        !stdout_off.contains("=== Regularization"),
+        "--regularize off must suppress regularization:\n{stdout_off}"
     );
 }
 
@@ -1500,18 +1534,18 @@ fn the_shipped_database_declares_its_acoustic_fixture_and_default_recipe() {
     );
     assert_eq!(
         text.matches("\"fixture\": \"gras_kb5000\"").count(),
-        4,
-        "all four shipped models must declare the acoustic ear of their rig"
+        5,
+        "all five shipped models must declare the acoustic ear of their rig"
     );
     assert_eq!(
         text.matches("\"target_preset\": \"targets/harman_kb5000_7.json\"")
             .count(),
-        4,
+        5,
         "every shipped model's default target is the Olive & Clark recipe"
     );
     assert_eq!(
         text.matches("\"fixture_conflict_ok\":").count(),
-        4,
+        5,
         "the built-in-curve fallback path needs its recorded reason, or --no-target-preset refuses"
     );
     assert!(
@@ -1525,7 +1559,7 @@ fn the_shipped_database_declares_its_acoustic_fixture_and_default_recipe() {
     let stdout = run("shipped-fixture-list", &["--list-models"]);
     assert_eq!(
         stdout.matches("[GRAS KB5000]").count(),
-        4,
+        5,
         "every shipped model lists its acoustic fixture:\n{stdout}"
     );
     // The opted-out (built-in harman_2018) path: recorded conflict, so it runs without a note -

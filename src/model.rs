@@ -70,7 +70,6 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
       "jbl770nc": {
         "short_title": "JBL Live 770NC (Passive)",
         "notch_ref_hz": 5365.9,
-        "autoeq_offset_db": 0.0,
         "gauss_apodize": false,
         "global_fit": true,
         "regularize": "auto",
@@ -103,7 +102,6 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
       "dt770_80": {
         "short_title": "Beyerdynamic DT 770 Pro (80 Ω)",
         "notch_ref_hz": 3703.0,
-        "autoeq_offset_db": 4.55,
         "gauss_apodize": true,
         "global_fit": true,
         "regularize": "auto",
@@ -139,7 +137,6 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
       "ft1pro": {
         "short_title": "FiiO FT1 Pro (Open-Back Planar)",
         "notch_ref_hz": 3839.0,
-        "autoeq_offset_db": 4.30,
         "gauss_apodize": true,
         "global_fit": true,
         "regularize": "auto",
@@ -174,7 +171,6 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
       "g733": {
         "short_title": "Logitech G733 LIGHTSPEED (PC Wireless)",
         "notch_ref_hz": 3840.0,
-        "autoeq_offset_db": 0.0,
         "gauss_apodize": true,
         "global_fit": true,
         "regularize": "auto",
@@ -205,7 +201,6 @@ static ALL_METADATA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
       "hd598": {
         "short_title": "Sennheiser HD 598 (Open-Back Dynamic)",
         "notch_ref_hz": 5500.0,
-        "autoeq_offset_db": 0.0,
         "gauss_apodize": true,
         "global_fit": true,
         "regularize": "auto",
@@ -2403,7 +2398,7 @@ mod tests {
         // The dt770 concha callout anchors on the notch knot as a *string* token.
         let dt = built_in_metadata("dt770_80").unwrap();
         assert_eq!(dt.get("notch_ref_hz").and_then(as_f64), Some(3703.0));
-        assert_eq!(dt.get("autoeq_offset_db").and_then(as_f64), Some(4.55));
+        assert_eq!(dt.get("autoeq_offset_db"), None);
     }
 
     #[test]

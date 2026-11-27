@@ -61,5 +61,27 @@ if [ "$expected" != "$actual" ]; then
   exit 1
 fi
 
+echo "== non-vacuity witness =="
+nv_log="$lean_dir/.lake/nonvacuity.log"
+lake env lean Nonvacuity.lean > "$nv_log"
+
+if ! grep -Fxq "instOrderedFieldOfClasses" "$nv_log"; then
+  echo "FAIL: OrderedField ℚ does not synthesise via instOrderedFieldOfClasses" >&2
+  sed -n '1,120p' "$nv_log" >&2
+  exit 1
+fi
+if ! grep -Fxq "'HyprEQ.orderedField_of_classes' depends on axioms: [propext, Quot.sound]" "$nv_log"; then
+  echo "FAIL: orderedField_of_classes is missing or not choice-free" >&2
+  sed -n '1,120p' "$nv_log" >&2
+  exit 1
+fi
+if ! grep -Fxq "'HyprEQ.orderedField_rat_nonempty' depends on axioms: [propext, Classical.choice, Quot.sound]" "$nv_log"; then
+  echo "FAIL: the ℚ witness footprint changed; expected Classical.choice from core Rat" >&2
+  sed -n '1,120p' "$nv_log" >&2
+  exit 1
+fi
+echo "NOTE: OrderedField ℚ is inhabited; the generic derivation audits choice-free."
+echo "      The ℚ-specialised term carries Classical.choice because core Rat.add/mul do."
+
 count=$(printf '%s\n' "$actual" | wc -l)
 echo "PASS: $count theorems audited; axioms subset of [propext, Quot.sound]"

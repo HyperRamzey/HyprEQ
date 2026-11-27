@@ -23,16 +23,19 @@ the six DSP changes worth making next — with the papers they come from.
 ## Formal Verification
 
 The exact discrete and finite-dimensional algebraic core is also proved in Lean 4 under
-[`lean/`](lean/): 100 theorems covering the overlap-add FFT plan, WAV PCM packing and
+[`lean/`](lean/): 101 theorems covering the overlap-add FFT plan, WAV PCM packing and
 signed round trips, the limiter's lookahead/ramp/latency/ring arithmetic and gain bounds,
 and the PCHIP tangent and monotonicity conditions (Fritsch–Carlson). The package is pinned
 to Lean 4.36.0 and Mathlib `v4.36.0`, contains no `sorry`, and every theorem is audited to
 depend only on `[propext, Quot.sound]` — literally zero `Classical.choice`,
-`Lean.ofReduceBool`, and `Lean.trustCompiler`:
+`Lean.ofReduceBool`, and `Lean.trustCompiler`. The local `OrderedField` hypothesis class is
+also shown non-vacuous: it is derived choice-free from the standard Mathlib order classes,
+and the gate pins that derivation plus the measured `Classical.choice` footprint of the
+unavoidable ℚ specialization:
 
 ```bash
 scripts/lean-verify.sh
-# PASS: 100 theorems audited; axioms subset of [propext, Quot.sound]
+# PASS: 101 theorems audited; axioms subset of [propext, Quot.sound]
 ```
 
 Tier 3 (IEEE-754 semantics, `exp`/`ln`, continuous analysis) is deliberately out of scope:

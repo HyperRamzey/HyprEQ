@@ -115,6 +115,9 @@ import HyprEQ
 #print axioms HyprEQ.hermiteD_simpson
 #print axioms HyprEQ.hermiteCubic_monotone
 
+/-! ### `HyprEQ.Nonvacuity` -/
+#print axioms HyprEQ.orderedField_of_classes
+
 /-! ### `HyprEQ.Tier2.LimiterGain` -/
 #print axioms HyprEQ.kmin_le_left
 #print axioms HyprEQ.kmin_le_right

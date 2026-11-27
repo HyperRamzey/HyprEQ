@@ -14,9 +14,11 @@ floating-point semantics — is out of scope and stays pinned by the Rust tests.
   `sorry`/`admit`, audits **every** theorem with `#print axioms`, and fails unless
   each dependency is a subset of `[propext, Quot.sound]`.  It also verifies that
   `AxiomAudit.lean` covers exactly the theorems declared in the sources.
-- Current result: **100 theorems**, axioms limited to `[propext, Quot.sound]`
+- Current result: **101 theorems**, axioms limited to `[propext, Quot.sound]`
   (several depend on nothing at all).  Literally zero `Classical.choice`,
-  `sorryAx`, `Lean.ofReduceBool` and `Lean.trustCompiler`.
+  `sorryAx`, `Lean.ofReduceBool` and `Lean.trustCompiler`.  The gate also
+  elaborates the ℚ non-vacuity witness and pins both of its measured
+  footprints (see below).
 
 The Rust tree is untouched; everything here lives under `lean/`.
 
@@ -39,12 +41,34 @@ statements are stated division-free and cross-multiplied, e.g.
 `d * pchipDen = pchipNum` instead of `d = pchipNum / pchipDen`.  The `ring`,
 `ring_nf`, `linear_combination`, `omega` and `decide` tactics audit clean here.
 
+## Non-vacuity of the class
+
+A `Prop`-valued class with contradictory fields would make the Tier 2 theorems
+vacuously true.  The class is inhabited, and the derivation is audited:
+
+- `HyprEQ/Nonvacuity.lean` derives `OrderedField K` from the standard Mathlib
+  order classes (`ZeroLEOneClass`, `IsOrderedCancelAddMonoid`,
+  `PosMulStrictMono`, `MulPosStrictMono`) by direct projection.
+  `orderedField_of_classes` audits to `[propext, Quot.sound]` — zero
+  `Classical.choice` — and the instance fires at ℚ (`#synth OrderedField ℚ`
+  prints `instOrderedFieldOfClasses`).
+- A ℚ-specialised *term* inevitably carries `Classical.choice`: core `Rat.add`
+  and `Rat.mul` call `Rat.normalize`, whose `normalize.reduced` proof uses
+  `Int.natAbs_ediv_of_dvd`.  `lean/Nonvacuity.lean` measures this
+  (`orderedField_rat_nonempty` audits to
+  `[propext, Classical.choice, Quot.sound]`) and documents it.  That witness
+  sits outside the audited library; the gate pins both footprints.  Zero
+  choice for a ℚ-touching proof is impossible without replacing the carrier,
+  but the class derivation itself is clean.
+
 ## Layout
 
 | File | Rust source | Content |
 |---|---|---|
 | `HyprEQ/Basic.lean` | — | shared imports and tactic setup |
 | `HyprEQ/OrderLemmas.lean` | — | the local `OrderedField` class and the 39-lemma ordered-field toolbox |
+| `HyprEQ/Nonvacuity.lean` | — | standard-class derivation of `OrderedField`; audited non-vacuity theorem |
+| `Nonvacuity.lean` | — | ℚ witness and the measured `Classical.choice` footprint of core `Rat` |
 | `HyprEQ/Tier1/FftPlan.lean` | `fft.rs:229,240`, `convolve.rs:191,202` | `bit_length`/`shl_bit_length`, the overlap-add plan and no-circular-wrap bound |
 | `HyprEQ/Tier1/WavQuant.lean` | `wav.rs:229,286,304,420,474`, `dither.rs` | little-endian packing, signed decoding, PCM round trips, writer clamps |
 | `HyprEQ/Tier1/LimiterIndex.lean` | `limiter.rs:334,340,377,413,745` | lookahead/ramp/latency arithmetic and ring-slot indexing |
@@ -52,7 +76,7 @@ statements are stated division-free and cross-multiplied, e.g.
 | `HyprEQ/Tier2/PchipMonotone.lean` | `pchip.rs:212-219` | Hermite cubic monotonicity under Fritsch–Carlson |
 | `HyprEQ/Tier2/LimiterGain.lean` | `limiter.rs:735,847` | required-gain bounds and the release follower |
 | `HyprEQ.lean` | — | root module importing the whole proof surface |
-| `AxiomAudit.lean` | — | `#print axioms` for all 100 theorems; consumed by the gate |
+| `AxiomAudit.lean` | — | `#print axioms` for all 101 theorems; consumed by the gate |
 
 Detailed theorem-by-theorem source line mappings, and the statement of what is not
 covered, live in [`../docs/LEAN_VERIFICATION.md`](../docs/LEAN_VERIFICATION.md).
@@ -72,6 +96,12 @@ Multiplication: `mul_pos`, `mul_nonneg`, `mul_le_mul_of_nonneg_right`,
 Numerals and subtraction: `two_eq`, `zero_lt_two`, `three_eq`, `zero_lt_three`,
 `four_eq`, `zero_lt_four`, `two_lt_three`, `six_eq`, `zero_lt_six`,
 `sub_nonneg`, `le_of_sub_nonneg`, `sub_pos`, `sub_nonpos`.
+
+### `HyprEQ.Nonvacuity` (1)
+
+`orderedField_of_classes` — `OrderedField K` follows choice-free from the
+standard order classes, so the six fields are mutually consistent (ℚ and ℝ
+inhabit them).
 
 ### `HyprEQ.Tier1.FftPlan` (6)
 

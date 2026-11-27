@@ -8,6 +8,7 @@
 -/
 import HyprEQ.Basic
 import HyprEQ.OrderLemmas
+import HyprEQ.Nonvacuity
 import HyprEQ.Tier1.FftPlan
 import HyprEQ.Tier1.WavQuant
 import HyprEQ.Tier1.LimiterIndex

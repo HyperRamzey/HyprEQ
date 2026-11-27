@@ -16,6 +16,7 @@ ordered field, and the floating-point layer stays in Rust where the tests live.
 | 2 | PCHIP cubic: derivative nonnegativity and interval monotonicity | `HyprEQ/Tier2/PchipMonotone.lean` |
 | 2 | Limiter gain: `required ∈ (0,1)`, release follower stays in `[0,1]` | `HyprEQ/Tier2/LimiterGain.lean` |
 | — | Ordered-field toolbox used by the Tier 2 proofs | `HyprEQ/OrderLemmas.lean` |
+| — | Class non-vacuity: `OrderedField` derivable from standard order classes | `HyprEQ/Nonvacuity.lean` |
 
 Tier 3 (continuous analysis and IEEE-754 semantics) is out of scope by design.
 
@@ -29,6 +30,9 @@ subset of `[propext, Quot.sound]`.  The gate refuses, literally:
 * `Lean.ofReduceBool`
 * `Lean.trustCompiler`
 
+It additionally elaborates the non-vacuity witness and pins the footprint of
+the ℚ-specialised term (see below).
+
 Run it with:
 
 ```bash
@@ -38,7 +42,7 @@ scripts/lean-verify.sh
 Expected final line:
 
 ```
-PASS: 100 theorems audited; axioms subset of [propext, Quot.sound]
+PASS: 101 theorems audited; axioms subset of [propext, Quot.sound]
 ```
 
 ### Why the Tier 2 proofs use a local `OrderedField` class
@@ -59,6 +63,30 @@ Division and inverse were removed from the class because their mere presence in
 a field type taints the class; all DSP statements are therefore division-free
 and cross-multiplied, e.g. `d * pchipDen = pchipNum` instead of
 `d = pchipNum / pchipDen`.  Every theorem on top of the class audits clean.
+
+### Non-vacuity of the class
+
+`OrderedField` is a local `Prop` class, so a contradictory field would make
+every Tier 2 theorem vacuous.  It is not contradictory:
+
+* `HyprEQ/Nonvacuity.lean` proves `orderedField_of_classes`: `OrderedField K`
+  follows, by direct projection, from `[Field K] [LinearOrder K]
+  [ZeroLEOneClass K] [IsOrderedCancelAddMonoid K] [PosMulStrictMono K]
+  [MulPosStrictMono K]`.  The audited axioms are `[propext, Quot.sound]` —
+  zero `Classical.choice` — and `#synth OrderedField ℚ` resolves to
+  `instOrderedFieldOfClasses`, so ℚ (and ℝ) inhabit the class.
+* A ℚ-specialised *term* cannot audit zero-choice in Lean 4.36: core `Rat.add`
+  and `Rat.mul` call `Rat.normalize`, whose `normalize.reduced` proof uses
+  `Int.natAbs_ediv_of_dvd`, and that lemma depends on `Classical.choice`.
+  Consequently every proof term that mentions `a + b` or `a * b` on ℚ — even
+  `rfl : a + b = a + b` — carries it.  The root `Nonvacuity.lean` witnesses
+  `Nonempty (OrderedField ℚ)` and records the footprint
+  `[propext, Classical.choice, Quot.sound]`.
+
+The gate audits the clean generic theorem and elaborates the root witness,
+pinning both footprints; the ℚ witness is not one of the 101 shipped
+theorems.  The `Classical.choice` in the specialised term is ℚ's, not the
+class's.
 
 ## Theorem → source map
 

@@ -1,7 +1,7 @@
 [package]
 name = "hypreq"
 description = "Rig-compensated minimum-phase FIR convolver generator + true-peak ceiling limiter for AutoEq headphone measurements"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.100"
 license = "MIT"

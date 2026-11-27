@@ -409,8 +409,10 @@ mod tests {
         };
         let f64s = |n: &str| -> Vec<f64> {
             let b = std::fs::read(format!("{dir}/{n}.f64")).expect("fixture");
-            b.chunks_exact(8)
-                .map(|c| f64::from_le_bytes(c.try_into().expect("8 bytes")))
+            b.as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| f64::from_le_bytes(*c))
                 .collect()
         };
         // A: 4000 samples x 999 taps, single block, full and trimmed.

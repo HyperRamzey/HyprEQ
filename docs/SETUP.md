@@ -24,7 +24,8 @@ usage errors. A change that alters any of those has to say so in the test it upd
 
 | What | Needed for | Notes |
 | --- | --- | --- |
-| Rust ≥ 1.87 (`rustc`, `cargo`) | everything | `rust-version` in `Cargo.toml` is 1.87, edition 2021 |
+| Rust ≥ 1.100 (`rustc`, `cargo`) | everything | `rust-version` in `Cargo.toml` is 1.100, edition 2021 |
+| `elan` + Lean 4.36.0 | the formal proofs | `lean/lean-toolchain` pins the toolchain; Mathlib is pinned to `v4.36.0` |
 | `pkg-config`, `fontconfig`, `freetype` (C dev files) | the verification PNG | the `ttf` feature of `plotters` goes through `font-kit`, which links against the system fontconfig/freetype and resolves font families **at runtime** |
 | a usable sans-serif font (`ttf-liberation` / `Liberation Sans`) | the verification PNG | `Liberation Sans` is required to avoid uppercase 'J' glyph bounding-box clipping present in `DejaVu Sans`; `ttf-dejavu` remains a functional fallback |
 | Python ≥ 3.10, `numpy`, `soundfile` | `scripts/derive_rig_calibration.py` | `soundfile` wraps libsndfile for payload decoding |
@@ -102,6 +103,7 @@ cargo build
 cargo build --release
 cargo test                      # unit + integration, default parallelism
 cargo clippy --all-targets      # zero warnings, including tests
+scripts/lean-verify.sh          # Lean proofs + strict axiom gate (see docs/LEAN_VERIFICATION.md)
 
 # documentation links must resolve — this is what catches a doc that still names a
 # function the code no longer has
@@ -116,6 +118,13 @@ sweeps that take minutes:
 ```bash
 cargo test -- --include-ignored
 ```
+
+libtest already runs the test functions themselves in parallel. The three matrix tests
+whose inner loops are the long pole — the true-peak sweep over `Ratio::ALL`, and the
+limiter's ceiling grid and filter-depth matrix — additionally spread their independent
+cases over scoped threads (`std::thread::scope`), so running one of them alone uses the
+whole machine instead of one core. Their per-case results are collected in the original
+loop order, so the reported worst case and tie-breaking are unchanged.
 
 ### What the tests compare
 

@@ -1193,6 +1193,10 @@ mod tests {
     /// What this sweep can resolve, in dB. See the assertion that uses it.
     const SWEEP_TOLERANCE_DB: f64 = 0.01;
 
+    /// Per-ratio sweep result: the ratio, then `(value, f_norm)` for the worst
+    /// under-read, the worst over-read, and the tightest margin against the bound.
+    type UnderreadRow = (Ratio, (f64, f64), (f64, f64), (f64, f64));
+
     /// Sweep the band and report each ratio's worst steady-state under-read.
     ///
     /// `f_norm` here is **cycles per sample**, which is what the Attachment 1 formula
@@ -1208,46 +1212,62 @@ mod tests {
     /// 0.79 dB low at the band edge — past the 0.688 dB the formula allows. Testing our
     /// own tolerance onto them would only make the transcription look wrong.
     fn sweep_underread(step: f64, offsets: usize) {
-        let mut report = Vec::new();
-        for &r in Ratio::ALL.iter() {
-            let mut worst = (f64::INFINITY, 0.0f64);
-            let mut over = (f64::NEG_INFINITY, 0.0f64);
-            // Tightest margin against the standard's own allowance, evaluated at the
-            // same frequency rather than at the corner: see the note on `sweep_underread`.
-            let mut margin = (f64::INFINITY, 0.0f64);
-            let mut d = Detector::new(r);
-            let mut fnorm = 0.02f64;
-            // Not 0.5: a sine at exactly Nyquist sampled at integers is sin(pi*i), which
-            // is zero everywhere, so the sweep would "measure" the noise floor of sin().
-            // A true Nyquist tone is an alternating sequence and has its own test.
-            // All banks are stated and bounded for content up to BAND_EDGE (0.45 fs).
-            let top = BAND_EDGE + 1e-4;
-            while fnorm <= top {
-                for k in 0..offsets {
-                    let phase = std::f64::consts::PI * 2.0 * k as f64 / offsets as f64;
-                    let x = sine(fnorm * FS, 1.0, 4096, phase);
-                    // Settle the filter, then measure: the bound is about steady state,
-                    // and a tone's onset rings the filter upward.
-                    d.clear();
-                    d.push_block(&x[..1024]);
-                    d.reset_peak();
-                    d.push_block(&x[1024..]);
-                    let db = db_from_peak(d.peak());
-                    if db < worst.0 {
-                        worst = (db, fnorm);
-                    }
-                    if db > over.0 {
-                        over = (db, fnorm);
-                    }
-                    let m = db - r.bound_db(fnorm);
-                    if m < margin.0 {
-                        margin = (m, fnorm);
-                    }
-                }
-                fnorm += step;
-            }
-            report.push((r, worst, over, margin));
-        }
+        // Each ratio has its own detector, frequency grid and accumulators: the five
+        // sweeps are independent, so run them concurrently and keep `Ratio::ALL`
+        // order for the report. The ignored full-resolution sweep spends minutes in
+        // this loop; on a multi-core machine this turns that into one ratio's time.
+        let report: Vec<UnderreadRow> = std::thread::scope(|scope| {
+            let handles: Vec<_> = Ratio::ALL
+                .iter()
+                .map(|&r| {
+                    scope.spawn(move || {
+                        let mut worst = (f64::INFINITY, 0.0f64);
+                        let mut over = (f64::NEG_INFINITY, 0.0f64);
+                        // Tightest margin against the standard's own allowance,
+                        // evaluated at the same frequency rather than at the corner.
+                        let mut margin = (f64::INFINITY, 0.0f64);
+                        let mut d = Detector::new(r);
+                        let mut fnorm = 0.02f64;
+                        // Not 0.5: a sine at exactly Nyquist sampled at integers is
+                        // sin(pi*i), zero everywhere, so the sweep would "measure" the
+                        // noise floor of sin(). A true Nyquist tone is an alternating
+                        // sequence and has its own test. All banks are stated and
+                        // bounded for content up to BAND_EDGE (0.45 fs).
+                        let top = BAND_EDGE + 1e-4;
+                        while fnorm <= top {
+                            for k in 0..offsets {
+                                let phase = std::f64::consts::PI * 2.0 * k as f64 / offsets as f64;
+                                let x = sine(fnorm * FS, 1.0, 4096, phase);
+                                // Settle the filter, then measure: the bound is about
+                                // steady state, and a tone's onset rings the filter
+                                // upward.
+                                d.clear();
+                                d.push_block(&x[..1024]);
+                                d.reset_peak();
+                                d.push_block(&x[1024..]);
+                                let db = db_from_peak(d.peak());
+                                if db < worst.0 {
+                                    worst = (db, fnorm);
+                                }
+                                if db > over.0 {
+                                    over = (db, fnorm);
+                                }
+                                let m = db - r.bound_db(fnorm);
+                                if m < margin.0 {
+                                    margin = (m, fnorm);
+                                }
+                            }
+                            fnorm += step;
+                        }
+                        (r, worst, over, margin)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("under-read sweep thread panicked"))
+                .collect()
+        });
         for (r, worst, over, margin) in &report {
             eprintln!(
                 "{r}: worst under-read {:+.4} dB at f_norm {:.3} | worst over-read \

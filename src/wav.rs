@@ -263,14 +263,14 @@ fn decode(payload: &[u8], fmt: &Format, name: &str) -> Result<(Vec<f64>, &'stati
     let mut out = Vec::with_capacity(payload.len() / item);
     match (fmt.eff_tag, fmt.bits) {
         (WAVE_FORMAT_IEEE_FLOAT, 32) => {
-            for w in payload.chunks_exact(4) {
-                out.push(f32::from_le_bytes([w[0], w[1], w[2], w[3]]) as f64);
+            for w in payload.as_chunks::<4>().0 {
+                out.push(f32::from_le_bytes(*w) as f64);
             }
             Ok((out, "pcm_f32le"))
         }
         (WAVE_FORMAT_IEEE_FLOAT, 64) => {
-            for w in payload.chunks_exact(8) {
-                out.push(f64::from_le_bytes(w.try_into().expect("chunk of length 8")));
+            for w in payload.as_chunks::<8>().0 {
+                out.push(f64::from_le_bytes(*w));
             }
             Ok((out, "pcm_f64le"))
         }
@@ -282,13 +282,13 @@ fn decode(payload: &[u8], fmt: &Format, name: &str) -> Result<(Vec<f64>, &'stati
             Ok((out, "pcm_u8"))
         }
         (WAVE_FORMAT_PCM, 16) => {
-            for w in payload.chunks_exact(2) {
-                out.push(i16::from_le_bytes([w[0], w[1]]) as f64 / 32768.0);
+            for w in payload.as_chunks::<2>().0 {
+                out.push(i16::from_le_bytes(*w) as f64 / 32768.0);
             }
             Ok((out, "pcm_s16le"))
         }
         (WAVE_FORMAT_PCM, 24) => {
-            for w in payload.chunks_exact(3) {
+            for w in payload.as_chunks::<3>().0 {
                 // Assemble unsigned, then shift into the top of an i32 and back
                 // with an arithmetic shift to sign-extend — the same result as
                 // Python's `np.where(vals >= 0x800000, vals - 0x1000000, vals)`.
@@ -300,8 +300,8 @@ fn decode(payload: &[u8], fmt: &Format, name: &str) -> Result<(Vec<f64>, &'stati
             Ok((out, "pcm_s24le"))
         }
         (WAVE_FORMAT_PCM, 32) => {
-            for w in payload.chunks_exact(4) {
-                out.push(i32::from_le_bytes([w[0], w[1], w[2], w[3]]) as f64 / 2_147_483_648.0);
+            for w in payload.as_chunks::<4>().0 {
+                out.push(i32::from_le_bytes(*w) as f64 / 2_147_483_648.0);
             }
             Ok((out, "pcm_s32le"))
         }
@@ -837,8 +837,8 @@ mod tests {
         assert_eq!(u16::from_le_bytes([b[20], b[21]]), 1, "PCM tag");
         assert_eq!(u16::from_le_bytes([b[34], b[35]]), 16);
         let mut got = Vec::new();
-        for w in b[44..].chunks_exact(2) {
-            got.push(i16::from_le_bytes([w[0], w[1]]) as i32);
+        for w in b[44..].as_chunks::<2>().0 {
+            got.push(i16::from_le_bytes(*w) as i32);
         }
         assert_eq!(got, q16, "16-bit dithered samples must match numpy exactly");
 
@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(b.len(), 44 + 48);
         assert_eq!(u16::from_le_bytes([b[34], b[35]]), 24);
         let mut got = Vec::new();
-        for w in b[44..].chunks_exact(3) {
+        for w in b[44..].as_chunks::<3>().0 {
             let mut v = u32::from(w[0]) | (u32::from(w[1]) << 8) | (u32::from(w[2]) << 16);
             if v >= 0x800_000 {
                 v = v.wrapping_sub(0x100_0000);
@@ -872,8 +872,10 @@ mod tests {
         assert_eq!(hdr_len, 58);
         assert_eq!(&b[38..42], b"fact");
         let got: Vec<f32> = b[hdr_len..]
-            .chunks_exact(4)
-            .map(|w| f32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| f32::from_le_bytes(*w))
             .collect();
         assert_eq!(got, vec![0.0, 1.0, 0.5, -0.5, 0.25, -0.25]);
         assert_eq!(u16::from_le_bytes([b[20], b[21]]), 3, "IEEE float tag");
@@ -900,8 +902,8 @@ mod tests {
         write_wav_pcm_or_float(&p, &planar, 48000, 16).unwrap();
         let b = std::fs::read(&p).unwrap();
         let mut q = Vec::new();
-        for w in b[44..].chunks_exact(2) {
-            q.push(i16::from_le_bytes([w[0], w[1]]));
+        for w in b[44..].as_chunks::<2>().0 {
+            q.push(i16::from_le_bytes(*w));
         }
         // NaN -> 0, +Inf -> full scale, -Inf -> -full scale, each with dither.
         assert!(q[0].abs() <= 2, "nan became {}", q[0]);

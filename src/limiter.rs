@@ -1209,24 +1209,53 @@ mod tests {
     /// grid, not guessed at.
     #[test]
     fn the_ceiling_holds_across_ratios_lookahead_and_depth() {
+        let las = [MIN_LOOKAHEAD_MS, 1.0, MAX_LOOKAHEAD_MS];
+        let ratios = [Ratio::X2, Ratio::X4, Ratio::X8, Ratio::X16, Ratio::X32];
+        let ceilings = [-1.0, -3.0, -6.0, -12.0, -18.0];
+        let materials = probe_materials();
+        // One thread per (lookahead, ratio) cell: the 15 sweeps share only immutable
+        // probe material and each `run` builds its own limiter and meters, so this is
+        // the whole grid in a fifteenth of the wall time. Cells are collected in the
+        // original loop order and folded below, which keeps the tie-breaking and the
+        // reported worst cell identical to the serial version.
+        let per_cell: Vec<Vec<(f64, String)>> = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for &la in &las {
+                for &ratio in &ratios {
+                    let materials = &materials;
+                    handles.push(scope.spawn(move || {
+                        let mut out = Vec::new();
+                        for &ceil in &ceilings {
+                            let c = cfg(ceil, ratio, la);
+                            for (i, m) in materials.iter().enumerate() {
+                                let (_, r) = run(c, std::slice::from_ref(m), 333);
+                                out.push((
+                                    r.post_dbtp - ceil,
+                                    format!(
+                                        "lookahead {la} ms, {ratio:?}, ceiling {ceil} dBTP, \
+                                         material #{i}"
+                                    ),
+                                ));
+                            }
+                        }
+                        out
+                    }));
+                }
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("limiter ceiling sweep thread panicked"))
+                .collect()
+        });
         let mut worst = f64::NEG_INFINITY;
         let mut at = String::new();
         let mut cells = 0usize;
-        for la in [MIN_LOOKAHEAD_MS, 1.0, MAX_LOOKAHEAD_MS] {
-            for ratio in [Ratio::X2, Ratio::X4, Ratio::X8, Ratio::X16, Ratio::X32] {
-                for &ceil in &[-1.0, -3.0, -6.0, -12.0, -18.0] {
-                    let c = cfg(ceil, ratio, la);
-                    for (i, m) in probe_materials().into_iter().enumerate() {
-                        let (_, r) = run(c, &[m], 333);
-                        cells += 1;
-                        let margin = r.post_dbtp - ceil;
-                        if margin > worst {
-                            worst = margin;
-                            at = format!(
-                                "lookahead {la} ms, {ratio:?}, ceiling {ceil} dBTP, material #{i}"
-                            );
-                        }
-                    }
+        for cell in &per_cell {
+            for (margin, description) in cell {
+                cells += 1;
+                if *margin > worst {
+                    worst = *margin;
+                    at = description.clone();
                 }
             }
         }
@@ -1424,8 +1453,11 @@ mod tests {
     /// numbers, not fudge.
     #[test]
     fn a_peak_inside_the_filter_depth_is_limited_where_it_lands() {
-        let mut worst = f64::NEG_INFINITY;
-        let mut detail = String::new();
+        // The two starts and two shapes are built once; each (signal, ratio) then
+        // sweeps its two lookaheads independently. Threads are collected in the
+        // serial loop order (start, shape, ratio) so the worst-case report is
+        // unchanged.
+        let mut signals = Vec::new();
         for start in [0usize, 1] {
             let mut burst = vec![0.0f64; 4096];
             for (i, slot) in burst.iter_mut().enumerate().skip(start).take(8) {
@@ -1433,32 +1465,55 @@ mod tests {
             }
             let mut impulse = vec![0.0f64; 4096];
             impulse[start] = 4.0;
-            for (name, x) in [("burst", &burst), ("impulse", &impulse)] {
+            signals.push(("burst", start, burst));
+            signals.push(("impulse", start, impulse));
+        }
+        let per_signal: Vec<Vec<(f64, String)>> = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (name, start, x) in &signals {
                 for &ratio in Ratio::ALL.iter() {
-                    for lookahead in [MIN_LOOKAHEAD_MS, DEFAULT_LOOKAHEAD_MS] {
-                        let (out, r) =
-                            run(cfg(-3.0, ratio, lookahead), std::slice::from_ref(x), 777);
-                        let mut meter = TruePeak::new(Ratio::X8, 1);
-                        meter.push_ch(0, &out[0]);
-                        meter.drain();
-                        let got = meter.dbtp();
-                        // What the ceiling permits, in reading terms: the limiter may
-                        // under-read the crest by up to its guard band and still have done
-                        // its duty, and the meter doing this measurement has an error of its
-                        // own in the other direction.
-                        let allowed = -3.0 + r.guard_db + Ratio::X8.worst_overread_db();
-                        if got - allowed > worst {
-                            worst = got - allowed;
-                            detail = format!(
-                                "{ratio} {name} at frame {start}, lookahead {lookahead} ms: \
-                                 measured {got:+.3} dBTP, allowed {allowed:+.3} (guard {:.3} \
-                                 + meter over-read {:.3}), reduction {:.3} dB",
-                                r.guard_db,
-                                Ratio::X8.worst_overread_db(),
-                                r.max_gain_reduction_db
-                            );
+                    handles.push(scope.spawn(move || {
+                        let mut out = Vec::new();
+                        for lookahead in [MIN_LOOKAHEAD_MS, DEFAULT_LOOKAHEAD_MS] {
+                            let (signal, r) =
+                                run(cfg(-3.0, ratio, lookahead), std::slice::from_ref(x), 777);
+                            let mut meter = TruePeak::new(Ratio::X8, 1);
+                            meter.push_ch(0, &signal[0]);
+                            meter.drain();
+                            let got = meter.dbtp();
+                            // What the ceiling permits, in reading terms: the limiter may
+                            // under-read the crest by up to its guard band and still have
+                            // done its duty, and the meter doing this measurement has an
+                            // error of its own in the other direction.
+                            let allowed = -3.0 + r.guard_db + Ratio::X8.worst_overread_db();
+                            out.push((
+                                got - allowed,
+                                format!(
+                                    "{ratio} {name} at frame {start}, lookahead {lookahead} ms: \
+                                     measured {got:+.3} dBTP, allowed {allowed:+.3} (guard \
+                                     {:.3} + meter over-read {:.3}), reduction {:.3} dB",
+                                    r.guard_db,
+                                    Ratio::X8.worst_overread_db(),
+                                    r.max_gain_reduction_db
+                                ),
+                            ));
                         }
-                    }
+                        out
+                    }));
+                }
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("filter-depth limiter thread panicked"))
+                .collect()
+        });
+        let mut worst = f64::NEG_INFINITY;
+        let mut detail = String::new();
+        for row in &per_signal {
+            for (value, description) in row {
+                if *value > worst {
+                    worst = *value;
+                    detail = description.clone();
                 }
             }
         }
@@ -1479,35 +1534,58 @@ mod tests {
     #[test]
     fn output_true_peak_never_exceeds_the_ceiling() {
         let x = worst_case(4096);
+        // One thread per ratio: the five banks sweep the same immutable signal with
+        // disjoint limiters and meters. Collecting the per-ratio rows in `Ratio::ALL`
+        // order preserves the serial scan exactly, including which case is reported
+        // when two margins tie.
+        let per_ratio: Vec<Vec<(f64, f64, String, String)>> = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for &ratio in Ratio::ALL.iter() {
+                let x = &x;
+                handles.push(scope.spawn(move || {
+                    let mut out = Vec::new();
+                    for &ceiling in &[-1.0f64, -3.0, -5.0, -12.0] {
+                        for &la in &[MIN_LOOKAHEAD_MS, 1.0, MAX_LOOKAHEAD_MS] {
+                            let (signal, r) =
+                                run(cfg(ceiling, ratio, la), std::slice::from_ref(x), 333);
+                            assert_eq!(signal.len(), 1, "channel count changed: {r:?}");
+                            assert_eq!(
+                                signal[0].len(),
+                                x.len() + r.latency_samples,
+                                "output length must be input plus latency, {ratio} {la} ms"
+                            );
+                            out.push((
+                                r.post_dbtp - ceiling,
+                                r.guard_db,
+                                format!("{ratio} at {ceiling} dBTP"),
+                                format!(
+                                    "{ratio} at {ceiling} dBTP, {la} ms requested / {:.3} ms \
+                                     effective, gain reduction {:.3} dB",
+                                    r.effective_lookahead_ms, r.max_gain_reduction_db
+                                ),
+                            ));
+                        }
+                    }
+                    out
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("true-peak ceiling thread panicked"))
+                .collect()
+        });
         let mut worst = (f64::NEG_INFINITY, String::new());
         // (how far below the ceiling the best case landed, that case's guard, its name)
         let mut landing = (f64::INFINITY, 0.0f64, String::new());
         let mut cases = 0usize;
-        for &ratio in Ratio::ALL.iter() {
-            for &ceiling in &[-1.0f64, -3.0, -5.0, -12.0] {
-                for &la in &[MIN_LOOKAHEAD_MS, 1.0, MAX_LOOKAHEAD_MS] {
-                    let (out, r) = run(cfg(ceiling, ratio, la), std::slice::from_ref(&x), 333);
-                    cases += 1;
-                    let excess = r.post_dbtp - ceiling;
-                    if excess < landing.0 {
-                        landing = (excess, r.guard_db, format!("{ratio} at {ceiling} dBTP"));
-                    }
-                    if excess > worst.0 {
-                        worst = (
-                            excess,
-                            format!(
-                                "{ratio} at {ceiling} dBTP, {la} ms requested / {:.3} ms \
-                                 effective, gain reduction {:.3} dB",
-                                r.effective_lookahead_ms, r.max_gain_reduction_db
-                            ),
-                        );
-                    }
-                    assert_eq!(out.len(), 1, "channel count changed: {r:?}");
-                    assert_eq!(
-                        out[0].len(),
-                        x.len() + r.latency_samples,
-                        "output length must be input plus latency, {ratio} {la} ms"
-                    );
+        for ratio_row in &per_ratio {
+            for (excess, guard, landing_name, worst_name) in ratio_row {
+                cases += 1;
+                if *excess < landing.0 {
+                    landing = (*excess, *guard, landing_name.clone());
+                }
+                if *excess > worst.0 {
+                    worst = (*excess, worst_name.clone());
                 }
             }
         }

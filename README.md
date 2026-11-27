@@ -7,8 +7,8 @@ All target curves and headphone measurement datasets are decoupled from the DSP 
 ## Implementation
 
 The DSP is a single self-contained Rust crate — a library plus a `hypreq` binary — with no
-external service, plugin host, or path dependency, covered by a 466-test suite
-(`cargo test --all-targets`: 464 executed, 2 explicitly ignored). The behaviour is pinned inside the crate rather than by a second
+external service, plugin host, or path dependency, covered by a 505-test suite
+(`cargo test --all-targets`: 503 executed, 2 explicitly ignored). The behaviour is pinned inside the crate rather than by a second
 implementation: the reference program this was ported from and the harness that used to diff the
 two side by side are no longer in the tree, so the tests — byte comparisons of stdout, WAV
 containers and payloads, audit CSVs, and usage errors — are the contract a change has to satisfy.
@@ -19,6 +19,26 @@ no FMA/fast-math), and the artefact naming.
 [`docs/ROADMAP.md`](docs/ROADMAP.md) is the assessment around that implementation: what the
 engine is good at and where it stops, how it differs from AutoEq, REW and CamillaDSP, and
 the six DSP changes worth making next — with the papers they come from.
+
+## Formal Verification
+
+The exact discrete and finite-dimensional algebraic core is also proved in Lean 4 under
+[`lean/`](lean/): 100 theorems covering the overlap-add FFT plan, WAV PCM packing and
+signed round trips, the limiter's lookahead/ramp/latency/ring arithmetic and gain bounds,
+and the PCHIP tangent and monotonicity conditions (Fritsch–Carlson). The package is pinned
+to Lean 4.36.0 and Mathlib `v4.36.0`, contains no `sorry`, and every theorem is audited to
+depend only on `[propext, Quot.sound]` — literally zero `Classical.choice`,
+`Lean.ofReduceBool`, and `Lean.trustCompiler`:
+
+```bash
+scripts/lean-verify.sh
+# PASS: 100 theorems audited; axioms subset of [propext, Quot.sound]
+```
+
+Tier 3 (IEEE-754 semantics, `exp`/`ln`, continuous analysis) is deliberately out of scope:
+the Rust tests pin the floating-point behaviour, and the Lean proofs cover the exact
+skeleton underneath. [`docs/LEAN_VERIFICATION.md`](docs/LEAN_VERIFICATION.md) maps every
+theorem group to its source lines and states what is not covered.
 
 ```bash
 cargo build --release

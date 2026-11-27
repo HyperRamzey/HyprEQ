@@ -91,3 +91,36 @@ jobs:
           assert non_fft_fma == 0, f"FMA contraction outside rustfft in {f} ({non_fft_fma})"
           assert fma <= 1400, f"unexpected extra FMA instructions ({fma})"
           PY
+
+  # The proof package's own gate: build with the pinned Lean toolchain, then audit
+  # every theorem's axioms. See docs/LEAN_VERIFICATION.md.
+  lean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Fetch Mathlib cache
+        working-directory: lean
+        run: lake exe cache get
+      - name: Build proofs and enforce the axiom gate
+        run: scripts/lean-verify.sh
+
+  # `rust-version` in Cargo.toml is a declared contract, so prove it on that exact
+  # toolchain instead of trusting the moving `stable` tag in the jobs above.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.100.0
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libfontconfig1-dev libfreetype6-dev fonts-dejavu-core
+      - run: cargo build --locked
+      - run: cargo test --locked

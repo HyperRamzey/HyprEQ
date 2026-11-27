@@ -897,7 +897,11 @@ mod tests {
 
     #[test]
     fn odd_sized_data_chunk_appends_pad_byte_and_aligns_riff_size() {
-        let dir = std::env::temp_dir();
+        // A private subdirectory: `temp_dir()` itself is shared with every other test
+        // binary (and every concurrent `cargo test`), so a fixed filename there is a
+        // collision waiting to happen once tests run in parallel.
+        let dir = std::env::temp_dir().join(format!("hypreq-riff-pad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test_odd_wav_pad.wav");
         let mut w = WavWriter::create(&path, 48000, 1, 8, false, None).unwrap();
         // 3 bytes is odd payload
@@ -905,7 +909,7 @@ mod tests {
         let total = w.finish().unwrap();
         assert_eq!(total, 3);
         let bytes = std::fs::read(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
         // Total file length must be even (header + 3 bytes + 1 pad byte)
         assert_eq!(bytes.len() % 2, 0);
         let riff_len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;

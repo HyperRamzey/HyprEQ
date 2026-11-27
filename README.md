@@ -37,8 +37,9 @@ scripts/lean-verify.sh
 
 Tier 3 (IEEE-754 semantics, `exp`/`ln`, continuous analysis) is deliberately out of scope:
 the Rust tests pin the floating-point behaviour, and the Lean proofs cover the exact
-skeleton underneath. [`docs/LEAN_VERIFICATION.md`](docs/LEAN_VERIFICATION.md) maps every
-theorem group to its source lines and states what is not covered.
+skeleton underneath. [`lean/README.md`](lean/README.md) is the package's own setup guide
+(toolchain, cache, layout, theorem inventory); [`docs/LEAN_VERIFICATION.md`](docs/LEAN_VERIFICATION.md)
+maps every theorem group to its source lines and states what is not covered.
 
 ```bash
 cargo build --release
